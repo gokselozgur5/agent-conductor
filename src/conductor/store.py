@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import sqlite3
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -63,17 +64,90 @@ class ConductorStore:
             raise ConductorError(f"unknown agent: {agent_id}")
         return self._decode(row)
 
-    def create_task(self, title: str, required_checks: Iterable[str] = ()) -> dict[str, Any]:
+    def register_project(
+        self, path: str | Path, name: str | None = None
+    ) -> dict[str, Any]:
+        resolved = Path(path).expanduser().resolve(strict=True)
+        if not resolved.is_dir():
+            raise ConductorError(f"project path is not a directory: {resolved}")
+        project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"file://{resolved}"))
+        project_name = name or resolved.name
+        now = self.clock()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO projects(id, name, path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    name = excluded.name,
+                    updated_at = excluded.updated_at
+                """,
+                (project_id, project_name, str(resolved), now, now),
+            )
+        return self.get_project(project_id)
+
+    def get_project(self, project_id: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            raise ConductorError(f"unknown project: {project_id}")
+        return self._decode(row)
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM projects ORDER BY name, id"
+        ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def project_context(self, project_id: str) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        root = Path(project["path"])
+        instruction_files: list[str] = []
+        seen_instructions: set[Path] = set()
+        for directory in reversed((root, *root.parents)):
+            candidate = directory / "AGENTS.md"
+            if candidate.is_file():
+                canonical = candidate.resolve()
+                if canonical not in seen_instructions:
+                    instruction_files.append(str(canonical))
+                    seen_instructions.add(canonical)
+
+        preferred = (
+            "README.md",
+            "docs/STATUS.md",
+            "docs/PHASES.md",
+            "docs/TRACKING.md",
+            "docs/ARCHITECTURE.md",
+        )
+        context_files = [str(root / item) for item in preferred if (root / item).is_file()]
+        git = self._git_context(root)
+        return {
+            "project": project,
+            "instruction_files": instruction_files,
+            "context_files": context_files,
+            "git": git,
+            "board": self.board(project_id),
+        }
+
+    def create_task(
+        self,
+        title: str,
+        required_checks: Iterable[str] = (),
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        if project_id is not None:
+            self.get_project(project_id)
         task_id = str(uuid.uuid4())
         now = self.clock()
         checks = list(dict.fromkeys(required_checks))
         with self.connection:
             self.connection.execute(
                 """
-                INSERT INTO tasks(id, title, state, required_checks_json, created_at, updated_at)
-                VALUES (?, ?, 'queued', ?, ?, ?)
+                INSERT INTO tasks(id, project_id, title, state, required_checks_json, created_at, updated_at)
+                VALUES (?, ?, ?, 'queued', ?, ?, ?)
                 """,
-                (task_id, title, _json(checks), now, now),
+                (task_id, project_id, title, _json(checks), now, now),
             )
         return self.get_task(task_id)
 
@@ -90,6 +164,24 @@ class ConductorStore:
             "SELECT * FROM tasks ORDER BY created_at, id"
         ).fetchall()
         return [self._decode(row) for row in rows]
+
+    def board(self, project_id: str | None = None) -> dict[str, list[dict[str, Any]]]:
+        states = ("queued", "claimed", "running", "verifying", "blocked", "completed", "cancelled")
+        board: dict[str, list[dict[str, Any]]] = {state: [] for state in states}
+        if project_id is None:
+            rows = self.connection.execute(
+                "SELECT * FROM tasks ORDER BY updated_at DESC, id"
+            ).fetchall()
+        else:
+            self.get_project(project_id)
+            rows = self.connection.execute(
+                "SELECT * FROM tasks WHERE project_id = ? ORDER BY updated_at DESC, id",
+                (project_id,),
+            ).fetchall()
+        for row in rows:
+            task = self._decode(row)
+            board[task["state"]].append(task)
+        return board
 
     def claim_task(self, task_id: str, agent_id: str, lease_seconds: float) -> dict[str, Any]:
         if lease_seconds <= 0:
@@ -373,6 +465,36 @@ class ConductorStore:
             if cursor.rowcount != 1:
                 raise ConductorError(f"invalid transition: {old_state} -> {new_state}")
         return self.get_task(task_id)
+
+    @staticmethod
+    def _git_context(root: Path) -> dict[str, Any]:
+        command = [
+            "git",
+            "-C",
+            str(root),
+            "status",
+            "--short",
+            "--branch",
+            "--untracked-files=normal",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return {"available": False, "error": type(error).__name__}
+        if result.returncode != 0:
+            return {"available": False, "error": result.stderr.strip()}
+        lines = result.stdout.splitlines()
+        return {
+            "available": True,
+            "branch": lines[0][3:] if lines and lines[0].startswith("## ") else None,
+            "changes": lines[1:] if lines and lines[0].startswith("## ") else lines,
+        }
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> dict[str, Any]:

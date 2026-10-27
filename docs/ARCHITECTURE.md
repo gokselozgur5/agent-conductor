@@ -23,6 +23,12 @@ coordinator --- SQLite event log/state
 
 A task reaches `completed` only when a non-owner verifier records every required check as true. Rejection returns the task to `queued` while retaining its evidence and checkpoint for diagnosis and continuation.
 
+## Project intake and Kanban
+
+An operator registers a canonical project directory. The coordinator discovers the applicable instruction chain, a small set of conventional continuity documents, read-only Git status, and project tasks. That bounded packet is the adapter's resume input.
+
+The Kanban board is a projection of authoritative task states, not a separately edited copy. Claiming, running, verifying, rejecting, completing, blocking, and cancelling a task move the same record between columns.
+
 ## Recovery
 
 Workers hold expiring leases. Heartbeats renew leases only for active tasks owned by that worker. The reconciler re-queues expired work, clears ownership, marks the missing agent offline, and preserves checkpoint/evidence fields.

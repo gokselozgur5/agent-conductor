@@ -1,6 +1,14 @@
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
     adapter TEXT NOT NULL,
@@ -14,6 +22,7 @@ CREATE TABLE IF NOT EXISTS agents (
 
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id),
     title TEXT NOT NULL,
     state TEXT NOT NULL
         CHECK (state IN ('queued', 'claimed', 'running', 'verifying', 'completed', 'blocked', 'cancelled')),
@@ -70,5 +79,6 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
+CREATE INDEX IF NOT EXISTS idx_tasks_project_state ON tasks(project_id, state);
 CREATE INDEX IF NOT EXISTS idx_tasks_lease ON tasks(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_agent_status ON deliveries(agent_id, status);
