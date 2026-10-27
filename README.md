@@ -14,6 +14,7 @@ It does not trust a conversation to remain alive and it does not accept a worker
 - Idempotent event publication
 - Topic/path subscriptions with bounded event generations
 - No source-agent echo by default, preventing simple hook loops
+- Deterministic polling hooks that route only matching topic/path changes
 
 ## Quick start
 
@@ -25,6 +26,8 @@ conductor --db ./state/conductor.db init
 conductor --db ./state/conductor.db register-agent codex-main codex
 conductor --db ./state/conductor.db create-task "Build the API" --check tests --check docs
 conductor --db ./state/conductor.db list-tasks
+conductor --db ./state/conductor.db subscribe test-agent 'file.*' --path-pattern 'src/*'
+conductor --db ./state/conductor.db watch-once . --snapshot ./state/project-snapshot.json
 ```
 
 For development:

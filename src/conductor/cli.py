@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .hooks import DirectoryWatcher
 from .store import ConductorError, ConductorStore
 
 
@@ -38,6 +39,24 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("task_id")
     start.add_argument("agent_id")
 
+    subscribe = commands.add_parser("subscribe")
+    subscribe.add_argument("agent_id")
+    subscribe.add_argument("topic_pattern")
+    subscribe.add_argument("--path-pattern")
+
+    pending = commands.add_parser("pending")
+    pending.add_argument("agent_id")
+
+    acknowledge = commands.add_parser("acknowledge")
+    acknowledge.add_argument("event_id")
+    acknowledge.add_argument("agent_id")
+
+    watch = commands.add_parser("watch-once")
+    watch.add_argument("root", type=Path)
+    watch.add_argument("--snapshot", type=Path, required=True)
+    watch.add_argument("--source-agent")
+    watch.add_argument("--publish-initial", action="store_true")
+
     reconcile = commands.add_parser("reconcile")
     reconcile.add_argument("--json", action="store_true")
     return root
@@ -60,6 +79,27 @@ def main() -> int:
             _print(store.claim_task(args.task_id, args.agent_id, args.lease))
         elif args.command == "start":
             _print(store.start_task(args.task_id, args.agent_id))
+        elif args.command == "subscribe":
+            store.subscribe(args.agent_id, args.topic_pattern, args.path_pattern)
+            _print({"subscribed": args.agent_id})
+        elif args.command == "pending":
+            _print(store.pending_deliveries(args.agent_id))
+        elif args.command == "acknowledge":
+            store.acknowledge(args.event_id, args.agent_id)
+            _print({"acknowledged": args.event_id, "agent_id": args.agent_id})
+        elif args.command == "watch-once":
+            watcher = DirectoryWatcher(
+                store, args.root, source_agent_id=args.source_agent
+            )
+            previous = watcher.load_snapshot(args.snapshot)
+            current = watcher.scan()
+            event_ids = (
+                watcher.publish_changes(previous, current)
+                if previous or args.publish_initial
+                else []
+            )
+            watcher.save_snapshot(args.snapshot, current)
+            _print({"events": event_ids, "files": len(current)})
         elif args.command == "reconcile":
             _print({"requeued": store.reconcile_expired()})
         return 0
