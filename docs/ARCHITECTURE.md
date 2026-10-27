@@ -31,7 +31,7 @@ Workers hold expiring leases. Heartbeats renew leases only for active tasks owne
 
 Hooks publish facts such as `file.updated` or `git.commit.created`; they never launch all workers directly. Subscriptions filter by topic and optional path glob. An idempotency key makes repeated watcher notifications harmless. Source echo is disabled by default and event generations are bounded.
 
-Future hook ingestion will also debounce and coalesce rapid filesystem changes before publishing one semantic event.
+The first watcher is deliberately polling and one-shot. It hashes stable file contents, stores its snapshot atomically, ignores runtime directories, and publishes idempotent create/update/delete events. A later daemon layer will debounce and coalesce rapid scans before it requests an adapter wake-up.
 
 ## Trust boundary
 
