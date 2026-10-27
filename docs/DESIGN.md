@@ -257,4 +257,3 @@ on macOS and Linux and database restore/reopen reproduces the same projections.
 - Remote-host identity and transport belong to Phase 5.
 - Exact sandbox implementations are adapter-specific Phase 2 design work.
 - PostgreSQL and cloud control planes are outside v1.
-

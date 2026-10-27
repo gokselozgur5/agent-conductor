@@ -99,4 +99,3 @@ not a hostile multi-user security boundary. Write-capable adapters are usable on
 when their declared sandbox and tool controls can enforce the task envelope; if
 that cannot be demonstrated, Conductor must restrict them to read-only work or
 refuse launch.
-
