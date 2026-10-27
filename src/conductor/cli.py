@@ -27,8 +27,21 @@ def parser() -> argparse.ArgumentParser:
     create = commands.add_parser("create-task")
     create.add_argument("title")
     create.add_argument("--check", action="append", default=[])
+    create.add_argument("--project-id")
 
     commands.add_parser("list-tasks")
+
+    add_project = commands.add_parser("add-project")
+    add_project.add_argument("path", type=Path)
+    add_project.add_argument("--name")
+
+    commands.add_parser("list-projects")
+
+    project_context = commands.add_parser("project-context")
+    project_context.add_argument("project_id")
+
+    board = commands.add_parser("board")
+    board.add_argument("--project-id")
 
     claim = commands.add_parser("claim")
     claim.add_argument("task_id")
@@ -72,9 +85,17 @@ def main() -> int:
         elif args.command == "register-agent":
             _print(store.register_agent(args.agent_id, args.adapter, args.capability))
         elif args.command == "create-task":
-            _print(store.create_task(args.title, args.check))
+            _print(store.create_task(args.title, args.check, args.project_id))
         elif args.command == "list-tasks":
             _print(store.list_tasks())
+        elif args.command == "add-project":
+            _print(store.register_project(args.path, args.name))
+        elif args.command == "list-projects":
+            _print(store.list_projects())
+        elif args.command == "project-context":
+            _print(store.project_context(args.project_id))
+        elif args.command == "board":
+            _print(store.board(args.project_id))
         elif args.command == "claim":
             _print(store.claim_task(args.task_id, args.agent_id, args.lease))
         elif args.command == "start":

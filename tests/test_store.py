@@ -95,6 +95,48 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(owned["owner_agent_id"], "worker")
         self.assertEqual(owned["attempt"], 1)
 
+    def test_project_board_tracks_real_task_state(self) -> None:
+        project_root = Path(self.temp.name) / "project"
+        project_root.mkdir()
+        project = self.store.register_project(project_root, "Example")
+        queued = self.store.create_task("queued", project_id=project["id"])
+        running = self.store.create_task("running", project_id=project["id"])
+        self.store.claim_task(running["id"], "worker", 30)
+        self.store.start_task(running["id"], "worker")
+
+        board = self.store.board(project["id"])
+
+        self.assertEqual([task["id"] for task in board["queued"]], [queued["id"]])
+        self.assertEqual([task["id"] for task in board["running"]], [running["id"]])
+        self.assertEqual(board["completed"], [])
+
+    def test_project_context_discovers_rules_docs_git_and_board(self) -> None:
+        project_root = Path(self.temp.name) / "project"
+        docs = project_root / "docs"
+        docs.mkdir(parents=True)
+        (project_root / "AGENTS.md").write_text("# Rules\n", encoding="utf-8")
+        (Path(self.temp.name) / "AGENTS.md").symlink_to(project_root / "AGENTS.md")
+        (project_root / "README.md").write_text("# Project\n", encoding="utf-8")
+        (docs / "STATUS.md").write_text("# Status\n", encoding="utf-8")
+        project = self.store.register_project(project_root)
+        self.store.create_task("resume me", project_id=project["id"])
+
+        context = self.store.project_context(project["id"])
+        canonical_root = project_root.resolve()
+
+        self.assertIn(
+            str(canonical_root / "AGENTS.md"), context["instruction_files"]
+        )
+        self.assertEqual(
+            context["instruction_files"].count(str(canonical_root / "AGENTS.md")), 1
+        )
+        self.assertEqual(
+            context["context_files"],
+            [str(canonical_root / "README.md"), str(canonical_root / "docs/STATUS.md")],
+        )
+        self.assertFalse(context["git"]["available"])
+        self.assertEqual(context["board"]["queued"][0]["title"], "resume me")
+
     def test_event_delivery_is_idempotent_and_does_not_echo_source(self) -> None:
         self.store.subscribe("worker", "file.*", "src/*")
         self.store.subscribe("reviewer", "file.*", "src/*")

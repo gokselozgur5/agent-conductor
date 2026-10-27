@@ -15,6 +15,7 @@ It does not trust a conversation to remain alive and it does not accept a worker
 - Topic/path subscriptions with bounded event generations
 - No source-agent echo by default, preventing simple hook loops
 - Deterministic polling hooks that route only matching topic/path changes
+- Project path intake with rule/doc discovery, Git state, and a live Kanban projection
 
 ## Quick start
 
@@ -24,8 +25,10 @@ python3 -m venv .venv
 python -m pip install -e .
 conductor --db ./state/conductor.db init
 conductor --db ./state/conductor.db register-agent codex-main codex
-conductor --db ./state/conductor.db create-task "Build the API" --check tests --check docs
+conductor --db ./state/conductor.db add-project /absolute/path/to/project
+conductor --db ./state/conductor.db create-task "Build the API" --project-id PROJECT_ID --check tests --check docs
 conductor --db ./state/conductor.db list-tasks
+conductor --db ./state/conductor.db board
 conductor --db ./state/conductor.db subscribe test-agent 'file.*' --path-pattern 'src/*'
 conductor --db ./state/conductor.db watch-once . --snapshot ./state/project-snapshot.json
 ```
@@ -37,3 +40,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
 The HTTP service, vendor adapters, filesystem watcher, and dashboard are later phases. The state machine comes first so those surfaces cannot silently invent lifecycle semantics.
+
+## Path intake
+
+The operator supplies an absolute project path. Conductor records its canonical path and produces a bounded resume packet containing applicable `AGENTS.md` files, known status/phase documents, current Git status, and the project's Kanban projection. Agents receive the packet and read the referenced files in order; Conductor does not dump an entire repository into model context.
