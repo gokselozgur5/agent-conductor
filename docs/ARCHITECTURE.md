@@ -1,4 +1,7 @@
-# Architecture
+# Architecture Overview
+
+The production Phase 1 design is specified in `DESIGN.md`; security and failure
+assumptions are specified in `THREAT_MODEL.md`. This page is the short map.
 
 ## Control-plane boundary
 
@@ -31,7 +34,10 @@ The Kanban board is a projection of authoritative task states, not a separately 
 
 ## Recovery
 
-Workers hold expiring leases. Heartbeats renew leases only for active tasks owned by that worker. The reconciler re-queues expired work, clears ownership, marks the missing agent offline, and preserves checkpoint/evidence fields.
+Workers hold expiring, epoch-fenced leases. Heartbeats renew leases only for
+active tasks owned by that worker. Expiry alone does not prove a worker is dead:
+the reconciler preserves dirty state and refuses reassignment until the previous
+write surface is fenced or explicitly blocked.
 
 ## Events and hooks
 
@@ -41,4 +47,6 @@ The first watcher is deliberately polling and one-shot. It hashes stable file co
 
 ## Trust boundary
 
-Completion evidence is not authority for merge, publication, payment, deletion, credential use, or any other external effect. Those actions retain explicit operator gates.
+Completion evidence is not authority for merge, publication, payment, deletion,
+credential use, or any other external effect. Those actions retain explicit
+operator gates and must be prevented through adapter capabilities, not prose.
