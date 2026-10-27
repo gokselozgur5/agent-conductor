@@ -57,7 +57,7 @@ pub struct ResponseEnvelope {
     pub message_id: Uuid,
     pub correlation_id: Uuid,
     pub request_message_id: Option<Uuid>,
-    pub result: Result<Response, ErrorBody>,
+    pub result: ResponseResult,
 }
 
 impl ResponseEnvelope {
@@ -69,7 +69,7 @@ impl ResponseEnvelope {
             message_id: Uuid::now_v7(),
             correlation_id: request.correlation_id,
             request_message_id: Some(request.message_id),
-            result: Ok(response),
+            result: ResponseResult::Ok(response),
         }
     }
 
@@ -81,9 +81,16 @@ impl ResponseEnvelope {
             message_id: Uuid::now_v7(),
             correlation_id: request.map_or_else(Uuid::now_v7, |value| value.correlation_id),
             request_message_id: request.map(|value| value.message_id),
-            result: Err(error),
+            result: ResponseResult::Error(error),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "payload", rename_all = "snake_case")]
+pub enum ResponseResult {
+    Ok(Response),
+    Error(ErrorBody),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

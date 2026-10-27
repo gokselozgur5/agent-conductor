@@ -1,0 +1,20 @@
+[package]
+name = "conductor-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "conductorctl"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+conductor-protocol = { path = "../protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
