@@ -14,7 +14,10 @@ This repository is an English-only, local-first agent coordination control plane
 
 ## Development
 
-- Keep the core dependency-free until a real integration requires otherwise.
+- Treat the current Python package as an executable spike, not the production architecture.
+- Follow `docs/REQUIREMENTS.md`, `docs/DESIGN.md`, and `docs/THREAT_MODEL.md`.
+- Build the production core in Rust with the crate boundaries defined in the design.
 - Add a regression test for every lifecycle or recovery bug.
 - Do not weaken a refusal path to make a test pass.
 - Keep adapters outside the state machine. Vendor behavior must not define task truth.
+- Run formatting, lint, tests, and secret checks before each atomic commit.

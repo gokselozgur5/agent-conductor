@@ -4,7 +4,7 @@ Agent Conductor is a local-first control plane for durable, evidence-backed work
 
 It does not trust a conversation to remain alive and it does not accept a worker's claim of completion as proof. Tasks, leases, checkpoints, events, subscriptions, deliveries, and verification decisions live in SQLite.
 
-## Phase 1 guarantees
+## Executable spike
 
 - Explicit task lifecycle: `queued -> claimed -> running -> verifying -> completed`
 - Exclusive task leases with heartbeat renewal
@@ -16,6 +16,12 @@ It does not trust a conversation to remain alive and it does not accept a worker
 - No source-agent echo by default, preventing simple hook loops
 - Deterministic polling hooks that route only matching topic/path changes
 - Project path intake with rule/doc discovery, Git state, and a live Kanban projection
+
+The spike is retained as behavioral evidence. Production Phase 1 is a Rust
+control core with a long-running local daemon, SQLite single-writer ownership,
+epoch-fenced leases, transactional effect intents, and immutable-source
+verification. See `docs/REQUIREMENTS.md`, `docs/DESIGN.md`, and
+`docs/THREAT_MODEL.md` before implementation.
 
 ## Quick start
 
@@ -39,7 +45,9 @@ For development:
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-The HTTP service, vendor adapters, filesystem watcher, and dashboard are later phases. The state machine comes first so those surfaces cannot silently invent lifecycle semantics.
+Real vendor adapters, write-capable worktree control, HTTP service, and the
+dashboard are later phases. The production state machine comes first so those
+surfaces cannot silently invent lifecycle semantics.
 
 ## Path intake
 
