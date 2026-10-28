@@ -203,6 +203,9 @@ where
             retained_tasks,
         } = self;
         let mut tasks = JoinSet::new();
+        // One bounded rejection handler preserves a structured overload response
+        // without creating an unbounded second connection pool.
+        let rejection_permit = Arc::new(Semaphore::new(1));
         let maintenance_service = Arc::clone(&service);
         let maintenance = tokio::spawn(async move {
             let start = tokio::time::Instant::now() + maintenance_interval;
@@ -247,7 +250,13 @@ where
                             });
                         }
                         Err(_) => {
-                            reject_overloaded(&stream);
+                            if let Ok(permit) = Arc::clone(&rejection_permit).try_acquire_owned() {
+                                retained_tasks.fetch_add(1, Ordering::Relaxed);
+                                tasks.spawn(async move {
+                                    let _permit = permit;
+                                    let _ = reject_overloaded(stream, read_timeout, write_timeout).await;
+                                });
+                            }
                         }
                     }
                 }
@@ -355,15 +364,26 @@ async fn write_response(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "response write timed out"))?
 }
 
-fn reject_overloaded(stream: &UnixStream) {
+async fn reject_overloaded(
+    mut stream: UnixStream,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) -> Result<(), io::Error> {
+    // Linux resets a socket closed with unread request bytes. Consume only a
+    // bounded frame, and never let a stalled rejection delay the accept loop.
+    let _ = tokio::time::timeout(read_timeout, async {
+        tokio::io::copy(
+            &mut (&mut stream).take(MAX_FRAME_BYTES + 1),
+            &mut tokio::io::sink(),
+        )
+        .await
+    })
+    .await;
     let response = ResponseEnvelope::failure(
         None,
         ErrorBody::new(ErrorCode::Unavailable, "connection limit reached"),
     );
-    if let Ok(mut output) = serde_json::to_vec(&response) {
-        output.push(b'\n');
-        let _ = stream.try_write(&output);
-    }
+    write_response(&mut stream, &response, write_timeout, MAX_RESPONSE_BYTES).await
 }
 
 #[cfg(test)]
@@ -556,6 +576,49 @@ mod tests {
             .expect("daemon task joins")
             .expect("daemon exits cleanly");
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn stalled_overload_handler_is_bounded_and_cancelled_on_shutdown() {
+        let path = socket_path();
+        let server = LocalServer::bind_with_config(
+            &path,
+            InMemoryControlService::new(1),
+            1,
+            Duration::from_secs(60),
+        )
+        .expect("socket binds");
+        let retained = Arc::clone(&server.retained_tasks);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let daemon = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+        let _active = UnixStream::connect(&path).await.expect("active client");
+        let _rejecting = UnixStream::connect(&path).await.expect("rejection client");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while retained.load(Ordering::Relaxed) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active and rejection slots occupied");
+        let mut excess = UnixStream::connect(&path).await.expect("excess client");
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), excess.read(&mut byte))
+                .await
+                .expect("excess rejected promptly")
+                .expect("empty socket closes"),
+            0
+        );
+        assert_eq!(retained.load(Ordering::Relaxed), 2);
+        shutdown_tx.send(()).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(1), daemon)
+            .await
+            .expect("shutdown cancels stalled rejection")
+            .expect("join")
+            .expect("clean exit");
+        assert_eq!(retained.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
