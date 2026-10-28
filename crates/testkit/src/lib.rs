@@ -251,7 +251,14 @@ impl FakeEffectRunner {
         if let Some(resource) = self.inventory.resource(token).await?
             && let Err(error) = ensure_matches(&effect, &resource)
         {
-            return self.abandon(&effect, now_ms, error.to_string()).await;
+            return if effect.status == EffectStatus::Done {
+                Ok(ReconcileDirective::BlockTask {
+                    task_id: effect.task_id,
+                    reason: error.to_string(),
+                })
+            } else {
+                self.abandon(&effect, now_ms, error.to_string()).await
+            };
         }
 
         if effect.status == EffectStatus::Done {
@@ -265,6 +272,16 @@ impl FakeEffectRunner {
         }
 
         let effect = self.claim_if_needed(effect, now_ms, crash).await?;
+        if effect.status == EffectStatus::Observed
+            && effect.runner_id.as_deref() != Some(&self.runner_id)
+            && effect
+                .claim_deadline_ms
+                .is_some_and(|deadline| now_ms < deadline)
+        {
+            return Ok(ReconcileDirective::RetryAfter {
+                deadline_ms: effect.claim_deadline_ms.unwrap_or(now_ms),
+            });
+        }
         if effect.status == EffectStatus::Claimed
             && effect.runner_id.as_deref() != Some(&self.runner_id)
         {
@@ -323,6 +340,17 @@ impl FakeEffectRunner {
         crash: CrashPoint,
     ) -> Result<ReconcileDirective, FakeEffectError> {
         let token = effect.token.clone();
+        if effect.status == EffectStatus::Claimed
+            && !self
+                .store
+                .effect_is_executable(&token, &self.runner_id)
+                .await?
+        {
+            return Ok(ReconcileDirective::BlockTask {
+                task_id: effect.task_id,
+                reason: "effect no longer belongs to a live task attempt".to_owned(),
+            });
+        }
         let resource = self.inventory.execute(&effect, now_ms).await?;
         crash.hit(CrashPoint::AfterExternalEffect);
         let observation = serde_json::to_string(&resource)?;

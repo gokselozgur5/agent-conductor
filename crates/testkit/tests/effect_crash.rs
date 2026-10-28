@@ -6,6 +6,7 @@ use agent_conductor_store::{
 use agent_conductor_testkit::{
     CrashPoint, FakeEffectRunner, FakeInventory, FakeResource, ReconcileDirective,
 };
+use sqlx::{Connection, SqliteConnection};
 use tempfile::TempDir;
 
 const TOKEN: &str = "effect-v1-test-token";
@@ -200,4 +201,101 @@ async fn contradictory_and_unmatched_inventory_fail_closed() {
             .expect("orphan becomes directive"),
         ReconcileDirective::BlockTask { task_id: None, .. }
     ));
+}
+
+#[tokio::test]
+async fn observed_effect_converges_under_replacement_runner_after_expiry() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let (database, inventory_path) = paths(&directory);
+    seed(&database).await;
+    let store = Store::open(&database).await.expect("open control");
+    let inventory = FakeInventory::open(&inventory_path)
+        .await
+        .expect("open inventory");
+    let claimed = store
+        .claim_effect(
+            TOKEN,
+            "runner-a",
+            250,
+            agent_conductor_store::EffectAudit {
+                id: "claim-a",
+                actor_id: "runner-a",
+                correlation_id: "replacement",
+                now_ms: 200,
+            },
+        )
+        .await
+        .expect("claim");
+    let resource = inventory
+        .execute(&claimed, 200)
+        .await
+        .expect("execute once");
+    store
+        .observe_effect(
+            TOKEN,
+            "runner-a",
+            &serde_json::to_string(&resource).expect("observation"),
+            agent_conductor_store::EffectAudit {
+                id: "observe-a",
+                actor_id: "runner-a",
+                correlation_id: "replacement",
+                now_ms: 210,
+            },
+        )
+        .await
+        .expect("observe");
+
+    let runner = FakeEffectRunner::new(store.clone(), inventory, "runner-b", 50);
+    assert!(matches!(
+        runner
+            .reconcile(TOKEN, 249, CrashPoint::Never)
+            .await
+            .expect("wait for owner"),
+        ReconcileDirective::RetryAfter { deadline_ms: 250 }
+    ));
+    assert!(matches!(
+        runner
+            .reconcile(TOKEN, 250, CrashPoint::Never)
+            .await
+            .expect("replacement converges"),
+        ReconcileDirective::Settled(_)
+    ));
+    assert_eq!(
+        store.effect(TOKEN).await.expect("effect").unwrap().status,
+        EffectStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn done_inventory_contradiction_blocks_without_illegal_abandon() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let (database, inventory_path) = paths(&directory);
+    seed(&database).await;
+    assert!(matches!(
+        settle(&database, &inventory_path, 200).await,
+        ReconcileDirective::Settled(_)
+    ));
+    let mut external = SqliteConnection::connect(&format!("sqlite://{inventory_path}"))
+        .await
+        .expect("external connection");
+    sqlx::query("UPDATE fake_resources SET request_json = '{\"changed\":true}' WHERE token = ?")
+        .bind(TOKEN)
+        .execute(&mut external)
+        .await
+        .expect("corrupt inventory fixture");
+    drop(external);
+
+    let store = Store::open(&database).await.expect("open control");
+    let inventory = FakeInventory::open(&inventory_path)
+        .await
+        .expect("open inventory");
+    let directive = FakeEffectRunner::new(store.clone(), inventory, "runner-b", 50)
+        .reconcile(TOKEN, 300, CrashPoint::Never)
+        .await
+        .expect("contradiction becomes block directive");
+    assert!(matches!(directive, ReconcileDirective::BlockTask { .. }));
+    assert_eq!(
+        store.effect(TOKEN).await.expect("effect").unwrap().status,
+        EffectStatus::Done
+    );
 }

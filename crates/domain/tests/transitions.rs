@@ -341,7 +341,7 @@ fn restart_requires_recovery_heartbeat_before_mutation() {
 }
 
 #[test]
-fn recovery_requires_a_new_generation_and_cannot_be_rearmed() {
+fn recovery_requires_a_new_generation_and_refences_each_restart() {
     let task = running_task();
     let enter_recovery = |task: &Task| {
         command(
@@ -369,14 +369,22 @@ fn recovery_requires_a_new_generation_and_cannot_be_rearmed() {
         .unwrap()
         .lease
         .deadline_monotonic_ms;
-    assert!(matches!(
-        apply(
-            &recovering,
-            &enter_recovery(&recovering),
-            clock_on_boot(9, original_deadline - 1),
-        ),
-        Err(Rejection::InvalidLease(_))
-    ));
+    let recovered_again = apply(
+        &recovering,
+        &enter_recovery(&recovering),
+        clock_on_boot(9, original_deadline - 1),
+    )
+    .expect("a later boot generation must fence a pending recovery again")
+    .task;
+    assert_eq!(
+        recovered_again
+            .attempt
+            .as_ref()
+            .unwrap()
+            .lease
+            .boot_generation,
+        9
+    );
     assert_eq!(
         recovering
             .attempt

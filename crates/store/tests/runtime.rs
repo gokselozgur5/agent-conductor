@@ -84,4 +84,91 @@ async fn restart_fences_live_leases_into_a_bounded_recovery_window() {
     assert_eq!(lease.get::<i64, _>("boot_generation"), 1);
     assert_eq!(lease.get::<i64, _>("remaining_ms"), 3000);
     assert_eq!(lease.get::<i64, _>("display_expires_at_ms"), 23_000);
+
+    let second = store
+        .start_runtime(30_000)
+        .await
+        .expect("second restart refences pending recovery");
+    assert_eq!(second.boot_generation, 2);
+    assert_eq!(second.recovery_pending.len(), 1);
+    assert_eq!(second.recovery_pending[0].recovery_window_ms, 3000);
+    let lease = sqlx::query(
+        "SELECT status, boot_generation, remaining_ms, display_expires_at_ms FROM leases WHERE attempt_id = 'attempt-1'",
+    )
+    .fetch_one(store.readers())
+    .await
+    .expect("twice-recovered lease reads");
+    assert_eq!(lease.get::<String, _>("status"), "recovery_pending");
+    assert_eq!(lease.get::<i64, _>("boot_generation"), 2);
+    assert_eq!(lease.get::<i64, _>("remaining_ms"), 3000);
+    assert_eq!(lease.get::<i64, _>("display_expires_at_ms"), 33_000);
+}
+
+#[tokio::test]
+async fn invariant_scan_reports_projection_ownership_boot_and_completion_contradictions() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("conductor.sqlite3");
+    let store = Store::open(&database).await.expect("store opens");
+    store.start_runtime(100).await.expect("runtime starts");
+    let url = format!("sqlite://{}", database.display());
+    let mut seed = SqliteConnection::connect(&url)
+        .await
+        .expect("seed connection opens");
+    sqlx::query("INSERT INTO projects (id, canonical_path, filesystem_identity, created_at_ms) VALUES ('project-1', '/project', 'dev:1:ino:1', 1)")
+        .execute(&mut seed).await.expect("project seeds");
+    sqlx::query("INSERT INTO agents (id, adapter_kind, protocol_fingerprint, capability_hash, access_mode, created_at_ms) VALUES ('agent-1', 'fake', 'v1', 'hash', 'read_write', 1)")
+        .execute(&mut seed).await.expect("agent seeds");
+    let running = serde_json::json!({
+        "id": "task-running",
+        "state": "running",
+        "version": 2,
+        "last_lease_epoch": 4,
+        "attempt": {
+            "id": "attempt-1",
+            "worker": "agent-1",
+            "lease": {
+                "epoch": 4,
+                "boot_generation": 1,
+                "deadline_monotonic_ms": 100,
+                "worker_deadline_monotonic_ms": 90,
+                "remaining_at_last_heartbeat_ms": 100,
+                "recovery_grace_ms": 10,
+                "status": "active"
+            }
+        },
+        "blocker": null,
+        "required_checks": [],
+        "verification": null
+    })
+    .to_string();
+    sqlx::query("INSERT INTO tasks (id, project_id, objective, state, priority, version, authority_json, aggregate_json, created_at_ms, updated_at_ms) VALUES ('task-running', 'project-1', 'run', 'claimed', 0, 3, '{}', ?, 1, 2)")
+        .bind(running).execute(&mut seed).await.expect("running task seeds");
+    sqlx::query("INSERT INTO attempts (id, task_id, worker_id, lease_epoch, instruction_hashes_json, required_checks_json, capability_hash, started_at_ms) VALUES ('attempt-1', 'task-running', 'agent-1', 4, '[]', '[]', 'hash', 2)")
+        .execute(&mut seed).await.expect("attempt seeds");
+    sqlx::query("INSERT INTO leases (attempt_id, task_id, epoch, status, boot_generation, remaining_ms, grace_ms, display_expires_at_ms, last_heartbeat_at_ms) VALUES ('attempt-1', 'task-running', 4, 'active', 9, 100, 10, 100, 1)")
+        .execute(&mut seed).await.expect("lease seeds");
+    let completed = serde_json::json!({
+        "id": "task-completed",
+        "state": "completed",
+        "version": 1,
+        "last_lease_epoch": 0,
+        "attempt": null,
+        "blocker": null,
+        "required_checks": [],
+        "verification": null
+    })
+    .to_string();
+    sqlx::query("INSERT INTO tasks (id, project_id, objective, state, priority, version, authority_json, aggregate_json, created_at_ms, updated_at_ms) VALUES ('task-completed', 'project-1', 'done', 'completed', 0, 1, '{}', ?, 1, 2)")
+        .bind(completed).execute(&mut seed).await.expect("completed task seeds");
+    drop(seed);
+
+    let violations = store
+        .check_runtime_invariants()
+        .await
+        .expect("invariant scan");
+    let codes: Vec<&str> = violations.iter().map(|value| value.code.as_str()).collect();
+    assert!(codes.contains(&"task_projection_mismatch"));
+    assert!(codes.contains(&"lease_identity_mismatch"));
+    assert!(codes.contains(&"lease_boot_generation_mismatch"));
+    assert!(codes.contains(&"incomplete_completed_task"));
 }

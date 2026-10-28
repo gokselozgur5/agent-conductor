@@ -55,6 +55,8 @@ pub enum StoreError {
     BootGenerationOverflow,
     #[error("effect intent not found: {0}")]
     EffectNotFound(String),
+    #[error("attempt identity conflict for {0}")]
+    AttemptIdentityConflict(String),
     #[error("illegal effect transition for {token}: {detail}")]
     EffectTransition { token: String, detail: String },
 }
@@ -111,6 +113,7 @@ pub struct AgentRegistration {
 pub struct PersistedAgent {
     pub id: String,
     pub capability_hash: String,
+    pub access_mode: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,17 +336,20 @@ impl Store {
     /// # Errors
     /// Returns a database error when the agent record cannot be read.
     pub async fn agent(&self, agent_id: &str) -> Result<Option<PersistedAgent>, StoreError> {
-        sqlx::query_as::<_, (String, String)>("SELECT id, capability_hash FROM agents WHERE id = ?")
-            .bind(agent_id)
-            .fetch_optional(&self.inner.readers)
-            .await
-            .map(|row| {
-                row.map(|(id, capability_hash)| PersistedAgent {
-                    id,
-                    capability_hash,
-                })
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT id, capability_hash, access_mode FROM agents WHERE id = ?",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.inner.readers)
+        .await
+        .map(|row| {
+            row.map(|(id, capability_hash, access_mode)| PersistedAgent {
+                id,
+                capability_hash,
+                access_mode,
             })
-            .map_err(StoreError::from)
+        })
+        .map_err(StoreError::from)
     }
 
     pub async fn create_task(&self, task: NewTask<'_>) -> Result<(), StoreError> {
@@ -448,7 +454,7 @@ impl Store {
             let boot_generation = u64::try_from(generation)
                 .map_err(|_| StoreError::Integrity("negative boot generation".to_owned()))?;
             sqlx::query(
-                "UPDATE leases SET status = 'recovery_pending', boot_generation = ?, remaining_ms = MIN(remaining_ms, grace_ms), display_expires_at_ms = ? + MIN(remaining_ms, grace_ms) WHERE status = 'active'",
+                "UPDATE leases SET status = 'recovery_pending', boot_generation = ?, remaining_ms = MIN(remaining_ms, grace_ms), display_expires_at_ms = ? + MIN(remaining_ms, grace_ms) WHERE status IN ('active', 'recovery_pending')",
             )
             .bind(generation)
             .bind(started_at_ms)
@@ -514,16 +520,141 @@ impl Store {
             });
         }
 
-        let runtime_rows: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM runtime_metadata WHERE singleton = 1 AND boot_generation > 0",
+        let runtime_generation: Option<i64> = sqlx::query_scalar(
+            "SELECT boot_generation FROM runtime_metadata WHERE singleton = 1 AND boot_generation > 0",
         )
-        .fetch_one(&self.inner.readers)
+        .fetch_optional(&self.inner.readers)
         .await?;
-        if runtime_rows != 1 {
+        if runtime_generation.is_none() {
             violations.push(RuntimeInvariantViolation {
                 code: "runtime_generation".to_owned(),
                 summary: "runtime boot generation is not initialized".to_owned(),
-                context_json: serde_json::json!({"valid_rows": runtime_rows}).to_string(),
+                context_json: serde_json::json!({"valid_rows": 0}).to_string(),
+            });
+        }
+
+        let task_rows = sqlx::query_as::<_, (String, String, i64, String)>(
+            "SELECT id, state, version, aggregate_json FROM tasks WHERE aggregate_json IS NOT NULL ORDER BY id",
+        )
+        .fetch_all(&self.inner.readers)
+        .await?;
+        for (task_id, state, version, aggregate_json) in task_rows {
+            let aggregate: serde_json::Value =
+                serde_json::from_str(&aggregate_json).map_err(|e| {
+                    StoreError::Integrity(format!("task {task_id} has invalid aggregate JSON: {e}"))
+                })?;
+            let matches_projection = aggregate.get("id").and_then(serde_json::Value::as_str)
+                == Some(task_id.as_str())
+                && aggregate.get("state").and_then(serde_json::Value::as_str)
+                    == Some(state.as_str())
+                && aggregate.get("version").and_then(serde_json::Value::as_i64) == Some(version);
+            if !matches_projection {
+                violations.push(RuntimeInvariantViolation {
+                    code: "task_projection_mismatch".to_owned(),
+                    summary: "task row disagrees with its authoritative aggregate".to_owned(),
+                    context_json: serde_json::json!({"task_id": task_id}).to_string(),
+                });
+            }
+            if state == "completed" && !completion_projection_is_valid(&aggregate) {
+                violations.push(RuntimeInvariantViolation {
+                    code: "incomplete_completed_task".to_owned(),
+                    summary:
+                        "completed task lacks a closed lease or accepted source-bound verification"
+                            .to_owned(),
+                    context_json: serde_json::json!({"task_id": task_id}).to_string(),
+                });
+            }
+        }
+
+        let live_rows = sqlx::query_as::<_, (String, String, i64, String, i64, Option<String>, Option<String>, Option<i64>, Option<String>)>(
+            "SELECT l.attempt_id, l.task_id, l.epoch, l.status, l.boot_generation, a.task_id, a.worker_id, a.lease_epoch, t.aggregate_json FROM leases l LEFT JOIN attempts a ON a.id = l.attempt_id LEFT JOIN tasks t ON t.id = l.task_id WHERE l.status IN ('active', 'recovery_pending') ORDER BY l.task_id",
+        )
+        .fetch_all(&self.inner.readers)
+        .await?;
+        for (
+            attempt_id,
+            task_id,
+            epoch,
+            status,
+            boot_generation,
+            attempt_task_id,
+            worker_id,
+            attempt_epoch,
+            aggregate_json,
+        ) in live_rows
+        {
+            let row_identity_matches = attempt_task_id.as_deref() == Some(task_id.as_str())
+                && attempt_epoch == Some(epoch);
+            let aggregate_matches = aggregate_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                .is_some_and(|aggregate| {
+                    let attempt = aggregate.get("attempt");
+                    attempt
+                        .and_then(|v| v.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some(attempt_id.as_str())
+                        && attempt
+                            .and_then(|v| v.get("worker"))
+                            .and_then(serde_json::Value::as_str)
+                            == worker_id.as_deref()
+                        && attempt
+                            .and_then(|v| v.get("lease"))
+                            .and_then(|v| v.get("epoch"))
+                            .and_then(serde_json::Value::as_i64)
+                            == Some(epoch)
+                        && attempt
+                            .and_then(|v| v.get("lease"))
+                            .and_then(|v| v.get("boot_generation"))
+                            .and_then(serde_json::Value::as_i64)
+                            == Some(boot_generation)
+                        && attempt
+                            .and_then(|v| v.get("lease"))
+                            .and_then(|v| v.get("status"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some(status.as_str())
+                });
+            if !row_identity_matches || !aggregate_matches {
+                violations.push(RuntimeInvariantViolation {
+                    code: "lease_identity_mismatch".to_owned(),
+                    summary: "live lease, attempt, and task aggregate identities disagree"
+                        .to_owned(),
+                    context_json: serde_json::json!({"task_id": task_id, "attempt_id": attempt_id})
+                        .to_string(),
+                });
+            }
+            if runtime_generation.is_some_and(|generation| generation != boot_generation) {
+                violations.push(RuntimeInvariantViolation {
+                    code: "lease_boot_generation_mismatch".to_owned(),
+                    summary: "live lease belongs to a previous daemon boot".to_owned(),
+                    context_json: serde_json::json!({"task_id": task_id, "attempt_id": attempt_id, "boot_generation": boot_generation}).to_string(),
+                });
+            }
+        }
+
+        let tasks_without_live_attempt: Vec<String> = sqlx::query_scalar(
+            "SELECT t.id FROM tasks t LEFT JOIN leases l ON l.task_id = t.id AND l.status IN ('active', 'recovery_pending') WHERE t.state IN ('claimed', 'running', 'verifying') GROUP BY t.id HAVING COUNT(l.attempt_id) != 1 ORDER BY t.id",
+        )
+        .fetch_all(&self.inner.readers)
+        .await?;
+        for task_id in tasks_without_live_attempt {
+            violations.push(RuntimeInvariantViolation {
+                code: "task_without_live_attempt".to_owned(),
+                summary: "owned task does not have exactly one live lease".to_owned(),
+                context_json: serde_json::json!({"task_id": task_id}).to_string(),
+            });
+        }
+
+        let unsafe_effects: Vec<String> = sqlx::query_scalar(
+            "SELECT e.token FROM effect_intents e LEFT JOIN attempts a ON a.id = e.attempt_id WHERE (e.status = 'done' AND e.observation_json IS NULL) OR (e.status IN ('pending', 'claimed', 'observed') AND e.attempt_id IS NOT NULL AND (a.id IS NULL OR a.ended_at_ms IS NOT NULL)) ORDER BY e.token",
+        )
+        .fetch_all(&self.inner.readers)
+        .await?;
+        for token in unsafe_effects {
+            violations.push(RuntimeInvariantViolation {
+                code: "effect_ownership_mismatch".to_owned(),
+                summary: "effect status contradicts its observation or owning attempt".to_owned(),
+                context_json: serde_json::json!({"token": token}).to_string(),
             });
         }
 
@@ -542,6 +673,42 @@ impl Store {
 
         Ok(violations)
     }
+}
+
+fn completion_projection_is_valid(aggregate: &serde_json::Value) -> bool {
+    let source = aggregate
+        .pointer("/verification/source")
+        .and_then(serde_json::Value::as_str);
+    let verdict = aggregate.pointer("/verification/verdict");
+    let verdict_valid = verdict
+        .and_then(|value| value.get("accepted"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && verdict
+            .and_then(|value| value.get("source"))
+            .and_then(serde_json::Value::as_str)
+            == source;
+    let lease_ended = aggregate
+        .pointer("/attempt/lease/status")
+        .and_then(serde_json::Value::as_str)
+        == Some("ended");
+    let checks = aggregate
+        .pointer("/verification/checks")
+        .and_then(serde_json::Value::as_array);
+    let required = aggregate
+        .get("required_checks")
+        .and_then(serde_json::Value::as_array);
+    let checks_valid = required.zip(checks).is_some_and(|(required, checks)| {
+        required.iter().all(|required_check| {
+            let id = required_check.get("id").and_then(serde_json::Value::as_str);
+            checks.iter().any(|check| {
+                check.get("check_id").and_then(serde_json::Value::as_str) == id
+                    && check.get("passed").and_then(serde_json::Value::as_bool) == Some(true)
+                    && check.get("source").and_then(serde_json::Value::as_str) == source
+            })
+        })
+    });
+    source.is_some() && verdict_valid && lease_ended && checks_valid
 }
 
 async fn verify_integrity(connection: &mut SqliteConnection) -> Result<(), StoreError> {
@@ -692,8 +859,8 @@ async fn persist_in_transaction(
     }
 
     if let Some(attempt) = &batch.attempt {
-        sqlx::query(
-            "INSERT INTO attempts (id, task_id, worker_id, lease_epoch, instruction_hashes_json, required_checks_json, capability_hash, started_at_ms, ended_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET ended_at_ms = excluded.ended_at_ms",
+        let attempt_result = sqlx::query(
+            "INSERT INTO attempts (id, task_id, worker_id, lease_epoch, instruction_hashes_json, required_checks_json, capability_hash, started_at_ms, ended_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET ended_at_ms = excluded.ended_at_ms WHERE attempts.task_id = excluded.task_id AND attempts.worker_id = excluded.worker_id AND attempts.lease_epoch = excluded.lease_epoch AND attempts.instruction_hashes_json = excluded.instruction_hashes_json AND attempts.required_checks_json = excluded.required_checks_json AND attempts.capability_hash = excluded.capability_hash",
         )
         .bind(&attempt.attempt_id)
         .bind(&attempt.task_id)
@@ -706,8 +873,13 @@ async fn persist_in_transaction(
         .bind(attempt.ended_at_ms)
         .execute(&mut *connection)
         .await?;
-        sqlx::query(
-            "INSERT INTO leases (attempt_id, task_id, epoch, status, boot_generation, remaining_ms, grace_ms, display_expires_at_ms, last_heartbeat_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(attempt_id) DO UPDATE SET status = excluded.status, boot_generation = excluded.boot_generation, remaining_ms = excluded.remaining_ms, grace_ms = excluded.grace_ms, display_expires_at_ms = excluded.display_expires_at_ms, last_heartbeat_at_ms = excluded.last_heartbeat_at_ms",
+        if attempt_result.rows_affected() != 1 {
+            return Err(StoreError::AttemptIdentityConflict(
+                attempt.attempt_id.clone(),
+            ));
+        }
+        let lease_result = sqlx::query(
+            "INSERT INTO leases (attempt_id, task_id, epoch, status, boot_generation, remaining_ms, grace_ms, display_expires_at_ms, last_heartbeat_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(attempt_id) DO UPDATE SET status = excluded.status, boot_generation = excluded.boot_generation, remaining_ms = excluded.remaining_ms, grace_ms = excluded.grace_ms, display_expires_at_ms = excluded.display_expires_at_ms, last_heartbeat_at_ms = excluded.last_heartbeat_at_ms WHERE leases.task_id = excluded.task_id AND leases.epoch = excluded.epoch",
         )
         .bind(&attempt.attempt_id)
         .bind(&attempt.task_id)
@@ -720,6 +892,52 @@ async fn persist_in_transaction(
         .bind(attempt.last_heartbeat_at_ms)
         .execute(&mut *connection)
         .await?;
+        if lease_result.rows_affected() != 1 {
+            return Err(StoreError::AttemptIdentityConflict(
+                attempt.attempt_id.clone(),
+            ));
+        }
+
+        if attempt.ended_at_ms.is_some() {
+            let obsolete = sqlx::query_as::<_, (String, String)>(
+                "SELECT token, correlation_id FROM effect_intents WHERE task_id = ? AND attempt_id = ? AND lease_epoch = ? AND status IN ('pending', 'claimed', 'observed') ORDER BY token",
+            )
+            .bind(&attempt.task_id)
+            .bind(&attempt.attempt_id)
+            .bind(attempt.lease_epoch)
+            .fetch_all(&mut *connection)
+            .await?;
+            for (token, correlation_id) in obsolete {
+                let reason = serde_json::json!({
+                    "reason": "owning attempt ended before effect completion",
+                    "attempt_id": attempt.attempt_id,
+                    "lease_epoch": attempt.lease_epoch,
+                })
+                .to_string();
+                sqlx::query(
+                    "UPDATE effect_intents SET status = 'abandoned', observation_json = ?, updated_at_ms = ? WHERE token = ? AND status IN ('pending', 'claimed', 'observed')",
+                )
+                .bind(&reason)
+                .bind(attempt.ended_at_ms)
+                .bind(&token)
+                .execute(&mut *connection)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO audit_events (id, task_id, actor_id, kind, correlation_id, payload_json, occurred_at_ms) VALUES (?, ?, ?, 'effect.abandoned', ?, ?, ?)",
+                )
+                .bind(format!(
+                    "effect-invalidated:{}:{}:{}",
+                    batch.actor_id, batch.idempotency_key, token
+                ))
+                .bind(&attempt.task_id)
+                .bind(&batch.actor_id)
+                .bind(correlation_id)
+                .bind(&reason)
+                .bind(attempt.ended_at_ms)
+                .execute(&mut *connection)
+                .await?;
+            }
+        }
     }
 
     for event in &batch.audit {

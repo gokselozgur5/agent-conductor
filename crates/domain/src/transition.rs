@@ -134,9 +134,12 @@ pub fn apply(task: &Task, command: &Command, clock: ClockReading) -> Result<Outc
                 .attempt
                 .as_mut()
                 .ok_or(Rejection::InvalidLease("task has no active attempt"))?;
-            if attempt.lease.status != LeaseStatus::Active {
+            if !matches!(
+                attempt.lease.status,
+                LeaseStatus::Active | LeaseStatus::RecoveryPending
+            ) {
                 return Err(Rejection::InvalidLease(
-                    "only an active lease can enter recovery",
+                    "only a live lease can enter recovery",
                 ));
             }
             if clock.boot_generation <= attempt.lease.boot_generation {

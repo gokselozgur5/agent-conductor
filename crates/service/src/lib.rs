@@ -34,6 +34,9 @@ pub use clock::SystemClock;
 
 pub trait ControlService: Send + Sync + 'static {
     fn handle(&self, request: Request) -> impl Future<Output = Result<Response, ErrorBody>> + Send;
+    fn maintain(&self) -> impl Future<Output = Result<(), ErrorBody>> + Send {
+        async { Ok(()) }
+    }
 }
 pub trait Clock: Send + Sync + 'static {
     fn read(&self, boot_generation: u64) -> ClockReading;
@@ -82,11 +85,12 @@ impl<C: Clock> PersistentControlService<C> {
             };
             let task: Task = serde_json::from_str(&row.aggregate_json)
                 .map_err(|e| StoreError::Integrity(format!("invalid aggregate: {e}")))?;
-            if task
-                .attempt
-                .as_ref()
-                .is_some_and(|a| a.lease.status == LeaseStatus::Active)
-            {
+            if task.attempt.as_ref().is_some_and(|a| {
+                matches!(
+                    a.lease.status,
+                    LeaseStatus::Active | LeaseStatus::RecoveryPending
+                )
+            }) {
                 let command = Command {
                     actor: Actor {
                         id: ActorId("conductor-runtime".into()),
@@ -136,6 +140,117 @@ impl<C: Clock> PersistentControlService<C> {
                 )
             })
             .map(Some)
+    }
+
+    async fn validate_external_actor(&self, actor: &Actor) -> Result<(), ErrorBody> {
+        let required_access = match actor.role {
+            ActorRole::Operator => return Ok(()),
+            ActorRole::System => {
+                return Err(ErrorBody::new(
+                    ErrorCode::Validation,
+                    "system commands are internal to the conductor runtime",
+                ));
+            }
+            ActorRole::Worker => "read_write",
+            ActorRole::Verifier => "read_only",
+        };
+        let agent = self
+            .store
+            .agent(&actor.id.0)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| ErrorBody::new(ErrorCode::Validation, "actor is not registered"))?;
+        if agent.access_mode != required_access {
+            return Err(ErrorBody::new(
+                ErrorCode::Validation,
+                "actor role does not match its registered access mode",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn validate_claim_worker(&self, command: &Command) -> Result<(), ErrorBody> {
+        let CommandKind::Claim { worker, .. } = &command.kind else {
+            return Ok(());
+        };
+        let worker = self
+            .store
+            .agent(&worker.0)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| {
+                ErrorBody::new(ErrorCode::Validation, "claim worker is not registered")
+            })?;
+        if worker.access_mode != "read_write" {
+            return Err(ErrorBody::new(
+                ErrorCode::Validation,
+                "claim worker lacks write access",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Requeues every lease whose authoritative deadline and grace have elapsed.
+    ///
+    /// This is the bounded maintenance operation called by the daemon timer. It
+    /// emits the same versioned system command as any other lifecycle mutation;
+    /// it never patches task state directly.
+    ///
+    /// # Errors
+    /// Returns an integrity error if persisted aggregates cannot be decoded or
+    /// an eligible requeue cannot be committed.
+    pub async fn reconcile_expired(&self) -> Result<usize, StoreError> {
+        let _guard = self.mutations.lock().await;
+        let clock = self.clock.read(self.boot_generation);
+        let rows = self.store.tasks(None).await?;
+        let mut requeued = 0;
+        for row in rows {
+            let task: Task = serde_json::from_str(&row.aggregate_json)
+                .map_err(|error| StoreError::Integrity(format!("invalid aggregate: {error}")))?;
+            let Some(attempt) = task.attempt.as_ref() else {
+                continue;
+            };
+            if attempt.lease.status == LeaseStatus::Ended
+                || attempt.lease.boot_generation != clock.boot_generation
+            {
+                continue;
+            }
+            let Some(requeue_at) = attempt
+                .lease
+                .deadline_monotonic_ms
+                .checked_add(attempt.lease.recovery_grace_ms)
+            else {
+                return Err(StoreError::Integrity(format!(
+                    "lease deadline overflow for task {}",
+                    task.id.0
+                )));
+            };
+            if clock.monotonic_ms < requeue_at {
+                continue;
+            }
+            let command = Command {
+                actor: Actor {
+                    id: ActorId("conductor-reconciler".into()),
+                    role: ActorRole::System,
+                },
+                expected_version: task.version,
+                correlation_id: CorrelationId(format!(
+                    "reconcile:{}:{}:{}",
+                    self.boot_generation, task.id.0, attempt.lease.epoch
+                )),
+                idempotency_key: IdempotencyKey(format!(
+                    "requeue:{}:{}:{}",
+                    self.boot_generation, task.id.0, attempt.lease.epoch
+                )),
+                reason: "lease deadline and recovery grace elapsed".into(),
+                kind: CommandKind::RequeueExpired,
+            };
+            self.apply_row(row, command)
+                .await
+                .map_err(|error| StoreError::Integrity(error.message))?;
+            requeued += 1;
+        }
+        Ok(requeued)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -222,18 +337,7 @@ impl<C: Clock> PersistentControlService<C> {
             value.replayed = true;
             return Ok(value);
         }
-        if let CommandKind::Claim { worker, .. } = &command.kind
-            && !self
-                .store
-                .agent_exists(&worker.0)
-                .await
-                .map_err(store_error)?
-        {
-            return Err(ErrorBody::new(
-                ErrorCode::Validation,
-                "claim worker is not registered",
-            ));
-        }
+        self.validate_claim_worker(&command).await?;
         let old: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
         let clock = self.clock.read(self.boot_generation);
         let applied = apply(&old, &command, clock).map_err(rejection_error)?;
@@ -445,6 +549,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
             }
             Request::ApplyCommand { task_id, command } => {
                 let _guard = self.mutations.lock().await;
+                self.validate_external_actor(&command.actor).await?;
                 let row = self
                     .store
                     .task(&task_id)
@@ -601,6 +706,13 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                 Ok(Response::EventAcknowledged { delivery_id })
             }
         }
+    }
+
+    async fn maintain(&self) -> Result<(), ErrorBody> {
+        self.reconcile_expired()
+            .await
+            .map(|_| ())
+            .map_err(store_error)
     }
 }
 
@@ -789,7 +901,8 @@ fn store_error(e: StoreError) -> ErrorBody {
     let code = match e {
         StoreError::VersionConflict { .. }
         | StoreError::IdempotencyCollision
-        | StoreError::ProjectIdentityConflict => ErrorCode::Conflict,
+        | StoreError::ProjectIdentityConflict
+        | StoreError::AttemptIdentityConflict(_) => ErrorCode::Conflict,
         StoreError::Integrity(_) | StoreError::InvalidVersionStep { .. } => {
             ErrorCode::InvariantViolation
         }
@@ -851,9 +964,10 @@ fn validate_task_event(
     clock: ClockReading,
 ) -> Result<(), ErrorBody> {
     let task: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
-    let attempt = task.attempt.as_ref().ok_or_else(|| {
-        ErrorBody::new(ErrorCode::Conflict, "task has no active attempt")
-    })?;
+    let attempt = task
+        .attempt
+        .as_ref()
+        .ok_or_else(|| ErrorBody::new(ErrorCode::Conflict, "task has no active attempt"))?;
     if event.project_id.as_deref() != Some(row.project_id.as_str())
         || event.attempt_id.as_deref() != Some(attempt.id.0.as_str())
         || event.lease_epoch != Some(attempt.lease.epoch)
@@ -1006,6 +1120,8 @@ fn hash(v: &str) -> String {
 mod effect_tests {
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
+    use agent_conductor_store::{NewAgent, NewProject, NewTask, Store};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -1054,6 +1170,351 @@ mod effect_tests {
         assert_eq!(
             serde_json::from_str::<EffectIntentSpec>(&first.request_json).expect("typed request"),
             effect
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct FixedClock {
+        monotonic_ms: Arc<AtomicU64>,
+    }
+
+    impl FixedClock {
+        fn new(monotonic_ms: u64) -> Self {
+            Self {
+                monotonic_ms: Arc::new(AtomicU64::new(monotonic_ms)),
+            }
+        }
+
+        fn set(&self, monotonic_ms: u64) {
+            self.monotonic_ms.store(monotonic_ms, Ordering::SeqCst);
+        }
+    }
+
+    impl Clock for FixedClock {
+        fn read(&self, boot_generation: u64) -> ClockReading {
+            ClockReading {
+                boot_generation,
+                monotonic_ms: self.monotonic_ms.load(Ordering::SeqCst),
+                wall_unix_ms: 100,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn external_actor_roles_are_bound_to_registered_access() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = Store::open(directory.path().join("state.sqlite3"))
+            .await
+            .expect("store");
+        store
+            .create_agent(NewAgent {
+                id: "worker",
+                adapter_kind: "fake",
+                protocol_fingerprint: "v1",
+                capability_hash: "worker-capability",
+                access_mode: "read_write",
+                created_at_ms: 1,
+            })
+            .await
+            .expect("worker");
+        store
+            .create_agent(NewAgent {
+                id: "verifier",
+                adapter_kind: "fake",
+                protocol_fingerprint: "v1",
+                capability_hash: "verifier-capability",
+                access_mode: "read_only",
+                created_at_ms: 1,
+            })
+            .await
+            .expect("verifier");
+        let service = PersistentControlService::start_with_clock(store, 100, FixedClock::new(10))
+            .await
+            .expect("service");
+
+        assert!(
+            service
+                .validate_external_actor(&Actor {
+                    id: ActorId("invented-system".into()),
+                    role: ActorRole::System,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .validate_external_actor(&Actor {
+                    id: ActorId("invented-verifier".into()),
+                    role: ActorRole::Verifier,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .validate_external_actor(&Actor {
+                    id: ActorId("worker".into()),
+                    role: ActorRole::Verifier,
+                })
+                .await
+                .is_err()
+        );
+        service
+            .validate_external_actor(&Actor {
+                id: ActorId("worker".into()),
+                role: ActorRole::Worker,
+            })
+            .await
+            .expect("registered write worker");
+        service
+            .validate_external_actor(&Actor {
+                id: ActorId("verifier".into()),
+                role: ActorRole::Verifier,
+            })
+            .await
+            .expect("registered read-only verifier");
+        let read_only_claim = Command {
+            actor: Actor {
+                id: ActorId("operator".into()),
+                role: ActorRole::Operator,
+            },
+            expected_version: 0,
+            correlation_id: CorrelationId("claim-read-only".into()),
+            idempotency_key: IdempotencyKey("claim-read-only".into()),
+            reason: "claim read-only agent".into(),
+            kind: CommandKind::Claim {
+                attempt_id: AttemptId("attempt-read-only".into()),
+                worker: ActorId("verifier".into()),
+                lease_duration_ms: 10,
+                worker_margin_ms: 1,
+                recovery_grace_ms: 5,
+            },
+        };
+        assert!(
+            service
+                .validate_claim_worker(&read_only_claim)
+                .await
+                .is_err()
+        );
+    }
+
+    fn lifecycle_command(task: &Task, actor: Actor, kind: CommandKind, key: &str) -> Command {
+        Command {
+            actor,
+            expected_version: task.version,
+            correlation_id: CorrelationId(format!("correlation-{key}")),
+            idempotency_key: IdempotencyKey(key.into()),
+            reason: key.into(),
+            kind,
+        }
+    }
+
+    async fn lifecycle_store() -> (tempfile::TempDir, Store) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = Store::open(directory.path().join("state.sqlite3"))
+            .await
+            .expect("store");
+        store
+            .create_project(NewProject {
+                id: "project",
+                canonical_path: "/project",
+                filesystem_identity: "test:project",
+                git_common_dir_identity: None,
+                created_at_ms: 1,
+            })
+            .await
+            .expect("project");
+        store
+            .create_agent(NewAgent {
+                id: "worker",
+                adapter_kind: "fake",
+                protocol_fingerprint: "v1",
+                capability_hash: "worker-capability",
+                access_mode: "read_write",
+                created_at_ms: 1,
+            })
+            .await
+            .expect("worker");
+        let task = Task::new(TaskId("task".into()), vec![]);
+        let aggregate = serde_json::to_string(&task).expect("aggregate");
+        store
+            .create_task(NewTask {
+                id: "task",
+                project_id: "project",
+                objective: "exercise recovery",
+                state: "backlog",
+                priority: 0,
+                authority_json: "{}",
+                aggregate_json: &aggregate,
+                created_at_ms: 1,
+            })
+            .await
+            .expect("task");
+        (directory, store)
+    }
+
+    async fn claim_task<C: Clock>(service: &PersistentControlService<C>) -> (Task, String) {
+        let row = service
+            .store
+            .task("task")
+            .await
+            .expect("task")
+            .expect("row");
+        let task: Task = serde_json::from_str(&row.aggregate_json).expect("aggregate");
+        let ready = service
+            .apply_row(
+                row,
+                lifecycle_command(
+                    &task,
+                    Actor {
+                        id: ActorId("operator".into()),
+                        role: ActorRole::Operator,
+                    },
+                    CommandKind::MarkReady,
+                    "ready",
+                ),
+            )
+            .await
+            .expect("ready")
+            .task
+            .aggregate;
+        let row = service
+            .store
+            .task("task")
+            .await
+            .expect("task")
+            .expect("row");
+        let response = service
+            .apply_row(
+                row,
+                lifecycle_command(
+                    &ready,
+                    Actor {
+                        id: ActorId("worker".into()),
+                        role: ActorRole::Worker,
+                    },
+                    CommandKind::Claim {
+                        attempt_id: AttemptId("attempt".into()),
+                        worker: ActorId("worker".into()),
+                        lease_duration_ms: 10,
+                        worker_margin_ms: 1,
+                        recovery_grace_ms: 5,
+                    },
+                    "claim",
+                ),
+            )
+            .await
+            .expect("claim");
+        let token = response.effect_tokens.first().expect("spawn token").clone();
+        (response.task.aggregate.as_ref().clone(), token)
+    }
+
+    #[tokio::test]
+    async fn maintenance_requeues_expired_attempt_and_abandons_spawn_intent() {
+        let (_directory, store) = lifecycle_store().await;
+        let clock = FixedClock::new(0);
+        let service = PersistentControlService::start_with_clock(store.clone(), 100, clock.clone())
+            .await
+            .expect("service");
+        let (_, token) = claim_task(&service).await;
+        clock.set(15);
+
+        assert_eq!(service.reconcile_expired().await.expect("reconcile"), 1);
+        let row = store.task("task").await.expect("task").expect("row");
+        let task: Task = serde_json::from_str(&row.aggregate_json).expect("aggregate");
+        assert_eq!(task.state, TaskState::Ready);
+        assert_eq!(
+            store.effect(&token).await.expect("effect").unwrap().status,
+            agent_conductor_store::EffectStatus::Abandoned
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_abandons_unexecuted_spawn_intent_atomically() {
+        let (_directory, store) = lifecycle_store().await;
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .expect("service");
+        let (claimed, token) = claim_task(&service).await;
+        let row = store.task("task").await.expect("task").expect("row");
+        service
+            .apply_row(
+                row,
+                lifecycle_command(
+                    &claimed,
+                    Actor {
+                        id: ActorId("operator".into()),
+                        role: ActorRole::Operator,
+                    },
+                    CommandKind::Cancel,
+                    "cancel",
+                ),
+            )
+            .await
+            .expect("cancel");
+        assert_eq!(
+            store.effect(&token).await.expect("effect").unwrap().status,
+            agent_conductor_store::EffectStatus::Abandoned
+        );
+    }
+
+    #[tokio::test]
+    async fn consecutive_restarts_keep_recovery_heartbeat_usable() {
+        let (_directory, store) = lifecycle_store().await;
+        let first =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .expect("first boot");
+        let (claimed, _) = claim_task(&first).await;
+        let epoch = claimed.attempt.as_ref().expect("attempt").lease.epoch;
+        drop(first);
+
+        let second =
+            PersistentControlService::start_with_clock(store.clone(), 200, FixedClock::new(0))
+                .await
+                .expect("second boot");
+        drop(second);
+        let third =
+            PersistentControlService::start_with_clock(store.clone(), 300, FixedClock::new(0))
+                .await
+                .expect("third boot");
+        let row = store.task("task").await.expect("task").expect("row");
+        let recovering: Task = serde_json::from_str(&row.aggregate_json).expect("aggregate");
+        let recovered = third
+            .apply_row(
+                row,
+                lifecycle_command(
+                    &recovering,
+                    Actor {
+                        id: ActorId("worker".into()),
+                        role: ActorRole::Worker,
+                    },
+                    CommandKind::RecoverHeartbeat {
+                        attempt_id: AttemptId("attempt".into()),
+                        lease_epoch: epoch,
+                        lease_duration_ms: 20,
+                        worker_margin_ms: 2,
+                    },
+                    "recover-third-boot",
+                ),
+            )
+            .await
+            .expect("recovery heartbeat")
+            .task
+            .aggregate;
+        assert_eq!(
+            recovered.attempt.as_ref().expect("attempt").lease.status,
+            LeaseStatus::Active
+        );
+        assert_eq!(
+            recovered
+                .attempt
+                .as_ref()
+                .expect("attempt")
+                .lease
+                .boot_generation,
+            3
         );
     }
 

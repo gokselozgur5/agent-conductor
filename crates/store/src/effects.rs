@@ -72,6 +72,26 @@ impl Store {
         fetch_effect(&self.inner.readers, token).await
     }
 
+    /// Confirms that a claimed worker-spawn intent still belongs to the live
+    /// task attempt immediately before the external action is attempted.
+    ///
+    /// # Errors
+    /// Returns a database error when the ownership projection cannot be read.
+    pub async fn effect_is_executable(
+        &self,
+        token: &str,
+        runner_id: &str,
+    ) -> Result<bool, StoreError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM effect_intents e LEFT JOIN attempts a ON a.id = e.attempt_id AND a.task_id = e.task_id AND a.lease_epoch = e.lease_epoch LEFT JOIN leases l ON l.attempt_id = a.id AND l.task_id = a.task_id AND l.epoch = a.lease_epoch LEFT JOIN tasks t ON t.id = a.task_id WHERE e.token = ? AND e.status = 'claimed' AND e.runner_id = ? AND (e.task_id IS NULL OR (a.ended_at_ms IS NULL AND l.status = 'active' AND t.state IN ('claimed', 'running', 'verifying'))) ",
+        )
+        .bind(token)
+        .bind(runner_id)
+        .fetch_one(&self.inner.readers)
+        .await?;
+        Ok(count == 1)
+    }
+
     /// Claims a pending effect, or takes over an expired claim, using the same token.
     ///
     /// # Errors
@@ -144,10 +164,28 @@ impl Store {
         runner_id: &str,
         audit: EffectAudit<'_>,
     ) -> Result<EffectRecord, StoreError> {
+        let now_ms = audit.now_ms;
         self.mutate_effect(token, audit, |record| {
-            require_runner(record, token, runner_id, EffectStatus::Observed)?;
+            if record.status != EffectStatus::Observed {
+                return Err(transition_error(token, "effect is not observed"));
+            }
+            let same_runner = record.runner_id.as_deref() == Some(runner_id);
+            let expired_owner = record
+                .claim_deadline_ms
+                .is_some_and(|deadline| now_ms >= deadline);
+            if !same_runner && !expired_owner {
+                return Err(transition_error(
+                    token,
+                    "observing runner still owns the effect",
+                ));
+            }
+            record.runner_id = Some(runner_id.to_owned());
             record.status = EffectStatus::Done;
-            Ok("effect.done")
+            Ok(if same_runner {
+                "effect.done"
+            } else {
+                "effect.adopted_done"
+            })
         })
         .await
     }

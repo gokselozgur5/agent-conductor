@@ -1,6 +1,7 @@
 use agent_conductor_store::{
-    AgentRegistration, AuditAppend, CommitBatch, CommitResult, EffectAudit, EffectIntentAppend,
-    EffectStatus, NewProject, NewTask, Store, StoreError, TaskMutation, TaskTransitionAppend,
+    AgentRegistration, AttemptLeaseMutation, AuditAppend, CommitBatch, CommitResult, EffectAudit,
+    EffectIntentAppend, EffectStatus, NewProject, NewTask, Store, StoreError, TaskMutation,
+    TaskTransitionAppend,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 use tempfile::TempDir;
@@ -402,6 +403,130 @@ async fn expired_claim_is_retried_with_the_same_effect_token() {
 }
 
 #[tokio::test]
+async fn observed_effect_transfers_only_after_original_runner_deadline() {
+    let (_directory, store) = seeded_store().await;
+    store
+        .persist(&batch(
+            "effect-observed-transfer",
+            "hash-observed-transfer",
+            "audit-observed-transfer",
+            "effect-observed-transfer",
+        ))
+        .await
+        .expect("persist intent");
+    store
+        .claim_effect(
+            "effect-observed-transfer",
+            "runner-1",
+            300,
+            effect_audit("claim-observed-transfer", 210),
+        )
+        .await
+        .expect("claim");
+    store
+        .observe_effect(
+            "effect-observed-transfer",
+            "runner-1",
+            r#"{"external_id":"worker-1"}"#,
+            effect_audit("observe-transfer", 220),
+        )
+        .await
+        .expect("observe");
+
+    assert!(matches!(
+        store
+            .complete_effect(
+                "effect-observed-transfer",
+                "runner-2",
+                effect_audit("early-transfer", 299),
+            )
+            .await,
+        Err(StoreError::EffectTransition { .. })
+    ));
+    let done = store
+        .complete_effect(
+            "effect-observed-transfer",
+            "runner-2",
+            effect_audit("expired-transfer", 300),
+        )
+        .await
+        .expect("expired observation owner transfers");
+    assert_eq!(done.status, EffectStatus::Done);
+    assert_eq!(done.runner_id.as_deref(), Some("runner-2"));
+}
+
+#[tokio::test]
+async fn ending_attempt_abandons_its_unfinished_effect_in_same_transaction() {
+    let (_directory, store) = seeded_store().await;
+    store
+        .create_agent(agent_conductor_store::NewAgent {
+            id: "worker",
+            adapter_kind: "fake",
+            protocol_fingerprint: "v1",
+            capability_hash: "capability",
+            access_mode: "read_write",
+            created_at_ms: 100,
+        })
+        .await
+        .expect("agent");
+    let mut claimed = batch(
+        "claim-effect",
+        "hash-claim-effect",
+        "audit-claim-effect",
+        "effect-owned",
+    );
+    claimed.attempt = Some(AttemptLeaseMutation {
+        attempt_id: "attempt-owned".into(),
+        task_id: "task-1".into(),
+        worker_id: "worker".into(),
+        lease_epoch: 1,
+        lease_status: "active".into(),
+        boot_generation: 1,
+        remaining_ms: 100,
+        grace_ms: 10,
+        display_expires_at_ms: 300,
+        last_heartbeat_at_ms: 200,
+        instruction_hashes_json: "[]".into(),
+        required_checks_json: "[]".into(),
+        capability_hash: "capability".into(),
+        ended_at_ms: None,
+    });
+    claimed.effects[0].attempt_id = Some("attempt-owned".into());
+    store.persist(&claimed).await.expect("claim");
+
+    let mut cancelled = claimed;
+    cancelled.actor_id = "operator-cancel".into();
+    cancelled.idempotency_key = "cancel-effect".into();
+    cancelled.request_hash = "hash-cancel-effect".into();
+    cancelled.task.as_mut().expect("task").expected_version = 1;
+    cancelled.task.as_mut().expect("task").new_version = 2;
+    cancelled.task.as_mut().expect("task").state = "cancelled".into();
+    cancelled.attempt.as_mut().expect("attempt").lease_status = "released".into();
+    cancelled.attempt.as_mut().expect("attempt").ended_at_ms = Some(250);
+    cancelled.transitions[0].id = "transition-cancel-effect".into();
+    cancelled.audit[0].id = "audit-cancel-effect".into();
+    cancelled.effects.clear();
+    store.persist(&cancelled).await.expect("cancel");
+
+    assert_eq!(
+        store
+            .effect("effect-owned")
+            .await
+            .expect("effect")
+            .unwrap()
+            .status,
+        EffectStatus::Abandoned
+    );
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE kind = 'effect.abandoned' AND task_id = 'task-1'",
+    )
+    .fetch_one(store.readers())
+    .await
+    .expect("audit count");
+    assert_eq!(audit_count, 1);
+}
+
+#[tokio::test]
 async fn abandoning_an_effect_is_terminal() {
     let (_directory, store) = seeded_store().await;
     store
@@ -619,6 +744,111 @@ async fn concurrent_expected_version_writers_have_one_winner() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn reused_attempt_id_with_changed_identity_rolls_back_every_projection() {
+    let (_directory, store) = seeded_store().await;
+    for agent in ["worker-1", "worker-2"] {
+        store
+            .create_agent(agent_conductor_store::NewAgent {
+                id: agent,
+                adapter_kind: "fake",
+                protocol_fingerprint: "v1",
+                capability_hash: "capability",
+                access_mode: "read_write",
+                created_at_ms: 100,
+            })
+            .await
+            .expect("seed agent");
+    }
+
+    let mut first = batch("attempt-first", "hash-first", "audit-first", "effect-first");
+    first.attempt = Some(AttemptLeaseMutation {
+        attempt_id: "attempt-reused".into(),
+        task_id: "task-1".into(),
+        worker_id: "worker-1".into(),
+        lease_epoch: 1,
+        lease_status: "active".into(),
+        boot_generation: 1,
+        remaining_ms: 100,
+        grace_ms: 10,
+        display_expires_at_ms: 300,
+        last_heartbeat_at_ms: 200,
+        instruction_hashes_json: "[]".into(),
+        required_checks_json: "[]".into(),
+        capability_hash: "capability".into(),
+        ended_at_ms: None,
+    });
+    store.persist(&first).await.expect("first attempt");
+
+    let mut reused = first.clone();
+    reused.actor_id = "operator-2".into();
+    reused.idempotency_key = "attempt-reused".into();
+    reused.request_hash = "hash-reused".into();
+    reused.task.as_mut().expect("task").expected_version = 1;
+    reused.task.as_mut().expect("task").new_version = 2;
+    reused.task.as_mut().expect("task").state = "running".into();
+    reused.task.as_mut().expect("task").aggregate_json = r#"{"changed":true}"#.into();
+    reused.attempt.as_mut().expect("attempt").worker_id = "worker-2".into();
+    reused.attempt.as_mut().expect("attempt").lease_epoch = 2;
+    reused.transitions[0].id = "transition-reused".into();
+    reused.audit[0].id = "audit-reused".into();
+    reused.effects.clear();
+
+    assert!(matches!(
+        store.persist(&reused).await,
+        Err(StoreError::AttemptIdentityConflict(id)) if id == "attempt-reused"
+    ));
+    let task: (String, i64) =
+        sqlx::query_as("SELECT state, version FROM tasks WHERE id = 'task-1'")
+            .fetch_one(store.readers())
+            .await
+            .expect("task projection");
+    assert_eq!(task, ("claimed".into(), 1));
+    let attempt: (String, i64) =
+        sqlx::query_as("SELECT worker_id, lease_epoch FROM attempts WHERE id = 'attempt-reused'")
+            .fetch_one(store.readers())
+            .await
+            .expect("attempt projection");
+    assert_eq!(attempt, ("worker-1".into(), 1));
+    assert_eq!(count(store.readers(), "command_idempotency").await, 1);
+
+    store
+        .create_task(NewTask {
+            id: "task-2",
+            project_id: "project-1",
+            objective: "second task",
+            state: "ready",
+            priority: 0,
+            authority_json: "{}",
+            aggregate_json: "{}",
+            created_at_ms: 300,
+        })
+        .await
+        .expect("second task");
+    let mut cross_task = first;
+    cross_task.actor_id = "operator-3".into();
+    cross_task.idempotency_key = "attempt-cross-task".into();
+    cross_task.request_hash = "hash-cross-task".into();
+    cross_task.task.as_mut().expect("task").task_id = "task-2".into();
+    cross_task.task.as_mut().expect("task").expected_version = 0;
+    cross_task.task.as_mut().expect("task").new_version = 1;
+    cross_task.attempt.as_mut().expect("attempt").task_id = "task-2".into();
+    cross_task.transitions[0].id = "transition-cross-task".into();
+    cross_task.transitions[0].task_id = "task-2".into();
+    cross_task.audit[0].id = "audit-cross-task".into();
+    cross_task.audit[0].task_id = Some("task-2".into());
+    cross_task.effects.clear();
+    assert!(matches!(
+        store.persist(&cross_task).await,
+        Err(StoreError::AttemptIdentityConflict(id)) if id == "attempt-reused"
+    ));
+    let task_2_version: i64 = sqlx::query_scalar("SELECT version FROM tasks WHERE id = 'task-2'")
+        .fetch_one(store.readers())
+        .await
+        .expect("second task version");
+    assert_eq!(task_2_version, 0);
 }
 
 #[tokio::test]
