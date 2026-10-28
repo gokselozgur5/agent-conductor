@@ -253,6 +253,51 @@ impl<C: Clock> PersistentControlService<C> {
         Ok(requeued)
     }
 
+    /// Applies a fake-effect reconciliation contradiction through the normal
+    /// versioned task lifecycle. Production adapters are intentionally outside
+    /// Phase 1; this is the internal port their typed `BlockTask` directive uses.
+    ///
+    /// # Errors
+    /// Returns a service error when the task is missing or cannot be blocked.
+    pub async fn block_effect_contradiction(
+        &self,
+        task_id: &str,
+        effect_token: &str,
+        reason: &str,
+    ) -> Result<CommandAppliedResponse, ErrorBody> {
+        validate_text(&[task_id, effect_token, reason])?;
+        let _guard = self.mutations.lock().await;
+        let row = self
+            .store
+            .task(task_id)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(not_found)?;
+        let task: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
+        self.apply_row(
+            row,
+            Command {
+                actor: Actor {
+                    id: ActorId("conductor-effect-reconciler".into()),
+                    role: ActorRole::System,
+                },
+                expected_version: task.version,
+                correlation_id: CorrelationId(format!("effect-contradiction:{effect_token}")),
+                idempotency_key: IdempotencyKey(format!("effect-block:{effect_token}")),
+                reason: "fake effect inventory contradiction".into(),
+                kind: CommandKind::Block {
+                    blocker: agent_conductor_domain::Blocker {
+                        kind: "effect_inventory_contradiction".into(),
+                        detail: reason.into(),
+                        resume_when: "operator resolves the external inventory contradiction"
+                            .into(),
+                    },
+                },
+            },
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn persist_creation(
         &self,
@@ -1509,6 +1554,23 @@ mod effect_tests {
             store.effect(&token).await.expect("effect").unwrap().status,
             agent_conductor_store::EffectStatus::Abandoned
         );
+    }
+
+    #[tokio::test]
+    async fn effect_contradiction_directive_blocks_the_owning_task() {
+        let (_directory, store) = lifecycle_store().await;
+        let service = PersistentControlService::start_with_clock(store, 100, FixedClock::new(0))
+            .await
+            .expect("service");
+        let (_claimed, token) = claim_task(&service).await;
+        let response = service
+            .block_effect_contradiction("task", &token, "done intent has no tagged resource")
+            .await
+            .expect("internal block directive applies");
+        assert_eq!(response.task.aggregate.state, TaskState::Blocked);
+        let blocker = response.task.aggregate.blocker.as_ref().expect("blocker");
+        assert_eq!(blocker.kind, "effect_inventory_contradiction");
+        assert!(blocker.detail.contains("no tagged resource"));
     }
 
     #[tokio::test]
