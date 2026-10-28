@@ -49,6 +49,10 @@ impl RequestEnvelope {
 pub enum Request {
     Health,
     CheckInvariants,
+    SubmitWorkflow {
+        plan_json: String,
+    },
+    ListWorkflows,
     RegisterProject {
         actor_id: String,
         idempotency_key: String,
@@ -155,6 +159,12 @@ pub enum ResponseResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
+    WorkflowQueued {
+        task_id: String,
+    },
+    Workflows {
+        entries: Vec<Value>,
+    },
     Health(HealthResponse),
     Invariants(InvariantResponse),
     ProjectRegistered {

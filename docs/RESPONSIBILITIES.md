@@ -55,7 +55,8 @@ dispatches on vendor kind. Keep subsequent vendor-specific rules inside that
 boundary rather than adding vendor conditionals to service. Do not introduce a plugin registry,
 DI container or general workflow language solely to remove one conditional.
 
-The end-to-end scheduler, writer fencing/source finalization and independent
-verifier integration remain incomplete. The board, hooks and host support stay
-in scope. An integrated acceptance run must demonstrate real work, passing checks,
-a distinct verifier and a recoverable interruption before claiming usability.
+Sequential durable dispatch, restricted-writer source finalization and independent
+verification now compose into an exercised native workflow. Generic command-writer
+fencing and automatic retained-attempt continuation remain incomplete. Hooks and
+host support stay in scope. Real work/check/reviewer acceptance does not establish
+recoverable interruption; that separate acceptance is still required.

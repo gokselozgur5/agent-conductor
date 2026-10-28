@@ -35,6 +35,8 @@ mod clock;
 #[cfg(unix)]
 mod workflow;
 #[cfg(unix)]
+mod workflow_dispatch;
+#[cfg(unix)]
 pub use workflow::{NativeWorkflowPlan, WorkflowOutcome};
 #[cfg(unix)]
 mod source_finalization;
@@ -95,6 +97,9 @@ impl<C: Clock> PersistentControlService<C> {
         clock: C,
     ) -> Result<Self, StoreError> {
         let startup = store.start_runtime(started_at_ms).await?;
+        store
+            .recover_workflow_dispatch(startup.boot_generation, started_at_ms)
+            .await?;
         let service = Self {
             store,
             boot_generation: startup.boot_generation,
@@ -555,6 +560,19 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
     #[allow(clippy::too_many_lines)]
     async fn handle(&self, request: Request) -> Result<Response, ErrorBody> {
         match request.clone() {
+            Request::SubmitWorkflow { plan_json } => self.submit_workflow(&plan_json).await,
+            Request::ListWorkflows => {
+                let entries = self
+                    .store
+                    .workflows()
+                    .await
+                    .map_err(store_error)?
+                    .into_iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(json_error)?;
+                Ok(Response::Workflows { entries })
+            }
             Request::Health => {
                 let v = invariants(&self.store).await?;
                 Ok(Response::Health(HealthResponse {

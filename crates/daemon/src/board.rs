@@ -1,5 +1,6 @@
 //! Authenticated loopback operator access to the existing control service.
 mod controls;
+mod workflows;
 use axum::{
     Router,
     body::Body,
@@ -92,6 +93,10 @@ impl OperatorBoard {
             .route("/api/tasks", get(tasks::<S>))
             .route("/api/health", get(health::<S>))
             .route("/api/control", post(controls::apply::<S>))
+            .route(
+                "/api/workflows",
+                get(workflows::list::<S>).post(workflows::submit::<S>),
+            )
             .layer(middleware::from_fn_with_state(state.clone(), boundary::<S>))
             .with_state(state);
         Ok(Self {
