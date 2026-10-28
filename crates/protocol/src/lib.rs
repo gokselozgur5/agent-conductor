@@ -1,4 +1,4 @@
-use agent_conductor_domain::{Command, RequiredCheck, Task};
+use agent_conductor_domain::{Command, RequiredCheck, SourceIdentity, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -83,6 +83,14 @@ pub enum Request {
     ApplyCommand {
         task_id: String,
         command: Command,
+    },
+    /// Privileged conductor operation. The daemon supplies the System actor;
+    /// callers cannot assert that role through `ApplyCommand`.
+    BindVerificationSource {
+        task_id: String,
+        expected_version: u64,
+        idempotency_key: String,
+        source: SourceIdentity,
     },
     SubscribeEvents {
         subscription: EventSubscriptionInput,

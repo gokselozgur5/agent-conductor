@@ -10,6 +10,7 @@ name = "conductorctl"
 path = "src/main.rs"
 
 [dependencies]
+agent-conductor-domain = { path = "../domain" }
 clap.workspace = true
 conductor-protocol = { path = "../protocol" }
 serde_json.workspace = true

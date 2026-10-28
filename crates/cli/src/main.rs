@@ -61,6 +61,13 @@ enum Command {
         task_id: String,
         command_json: String,
     },
+    /// Bind an operator-supplied Phase 1 source label; does not capture or fence Git.
+    BindVerificationSource {
+        task_id: String,
+        expected_version: u64,
+        idempotency_key: String,
+        source: String,
+    },
     SubscribeEvents {
         subscription_json: String,
     },
@@ -168,6 +175,17 @@ fn command_request(command: Command) -> Request {
             task_id,
             command: parse_json(&command_json, "command"),
         },
+        Command::BindVerificationSource {
+            task_id,
+            expected_version,
+            idempotency_key,
+            source,
+        } => Request::BindVerificationSource {
+            task_id,
+            expected_version,
+            idempotency_key,
+            source: agent_conductor_domain::SourceIdentity(source),
+        },
         Command::SubscribeEvents { subscription_json } => Request::SubscribeEvents {
             subscription: parse_json::<EventSubscriptionInput>(
                 &subscription_json,
@@ -220,4 +238,35 @@ fn parse_json<T: serde::de::DeserializeOwned>(input: &str, label: &str) -> T {
         eprintln!("invalid {label} JSON: {error}");
         std::process::exit(2)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_binding_cli_maps_to_privileged_request() {
+        let cli = Cli::try_parse_from([
+            "conductorctl",
+            "bind-verification-source",
+            "task",
+            "4",
+            "bind-1",
+            "fake:phase-1:artifact",
+        ])
+        .expect("source binding command parses");
+        let Request::BindVerificationSource {
+            task_id,
+            expected_version,
+            idempotency_key,
+            source,
+        } = command_request(cli.command)
+        else {
+            panic!("wrong request")
+        };
+        assert_eq!(task_id, "task");
+        assert_eq!(expected_version, 4);
+        assert_eq!(idempotency_key, "bind-1");
+        assert_eq!(source.0, "fake:phase-1:artifact");
+    }
 }

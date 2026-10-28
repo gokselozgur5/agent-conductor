@@ -341,7 +341,12 @@ impl<C: Clock> PersistentControlService<C> {
         let old: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
         let clock = self.clock.read(self.boot_generation);
         let applied = apply(&old, &command, clock).map_err(rejection_error)?;
-        let capability_hash = self.attempt_capability_hash(&applied.task).await?;
+        let attempt = attempt_requires_persistence(&old, &applied.task);
+        let capability_hash = if attempt {
+            self.attempt_capability_hash(&applied.task).await?
+        } else {
+            None
+        };
         let effects = effect_appends(&applied.task, &command, &applied.effects, clock)?;
         let response = CommandAppliedResponse {
             task: TaskResponse {
@@ -369,7 +374,10 @@ impl<C: Clock> PersistentControlService<C> {
             project: None,
             agent: None,
             new_task: None,
-            attempt: attempt(&applied.task, clock, capability_hash.as_deref())?,
+            attempt: attempt
+                .then(|| attempt_mutation(&applied.task, clock, capability_hash.as_deref()))
+                .transpose()?
+                .flatten(),
             transitions: vec![TaskTransitionAppend {
                 id: Uuid::now_v7().to_string(),
                 task_id: applied.task.id.0.clone(),
@@ -562,6 +570,37 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                         "task identity mismatch",
                     ));
                 }
+                Ok(Response::CommandApplied(
+                    self.apply_row(row, command).await?,
+                ))
+            }
+            Request::BindVerificationSource {
+                task_id,
+                expected_version,
+                idempotency_key,
+                source,
+            } => {
+                validate_text(&[&task_id, &idempotency_key, &source.0])?;
+                let _guard = self.mutations.lock().await;
+                let row = self
+                    .store
+                    .task(&task_id)
+                    .await
+                    .map_err(store_error)?
+                    .ok_or_else(not_found)?;
+                let command = Command {
+                    actor: Actor {
+                        id: ActorId("conductor-source-binder".into()),
+                        role: ActorRole::System,
+                    },
+                    expected_version,
+                    correlation_id: CorrelationId(format!(
+                        "bind-source:{task_id}:{idempotency_key}"
+                    )),
+                    idempotency_key: IdempotencyKey(idempotency_key),
+                    reason: "bind conductor-observed verification source".into(),
+                    kind: CommandKind::BindVerificationSource { source },
+                };
                 Ok(Response::CommandApplied(
                     self.apply_row(row, command).await?,
                 ))
@@ -778,7 +817,17 @@ fn map_violation(v: RuntimeInvariantViolation) -> InvariantViolation {
             .unwrap_or(serde_json::Value::String(v.context_json)),
     }
 }
-fn attempt(
+fn attempt_requires_persistence(previous: &Task, next: &Task) -> bool {
+    match (previous.attempt.as_ref(), next.attempt.as_ref()) {
+        (Some(previous), Some(next)) => {
+            previous.id != next.id || previous.worker != next.worker || previous.lease != next.lease
+        }
+        (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
+fn attempt_mutation(
     task: &Task,
     clock: ClockReading,
     capability_hash: Option<&str>,
@@ -1121,6 +1170,7 @@ mod effect_tests {
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
     use agent_conductor_store::{NewAgent, NewProject, NewTask, Store};
+    use sqlx::{Connection, SqliteConnection};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[cfg(unix)]
@@ -1457,6 +1507,145 @@ mod effect_tests {
             store.effect(&token).await.expect("effect").unwrap().status,
             agent_conductor_store::EffectStatus::Abandoned
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Keep the ordered regression scenario together.
+    async fn resumed_task_updates_future_checks_without_mutating_ended_attempt() {
+        let (directory, store) = lifecycle_store().await;
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .expect("service");
+        let (claimed, _) = claim_task(&service).await;
+        let row = store.task("task").await.expect("task").expect("row");
+        let paused = service
+            .apply_row(
+                row,
+                lifecycle_command(
+                    &claimed,
+                    Actor {
+                        id: ActorId("operator".into()),
+                        role: ActorRole::Operator,
+                    },
+                    CommandKind::Pause,
+                    "pause-for-new-contract",
+                ),
+            )
+            .await
+            .expect("pause")
+            .task
+            .aggregate;
+        let row = store.task("task").await.expect("task").expect("row");
+        let ready = service
+            .apply_row(
+                row,
+                lifecycle_command(
+                    &paused,
+                    Actor {
+                        id: ActorId("operator".into()),
+                        role: ActorRole::Operator,
+                    },
+                    CommandKind::Resume,
+                    "resume-for-new-contract",
+                ),
+            )
+            .await
+            .expect("resume")
+            .task
+            .aggregate;
+        let row = store.task("task").await.expect("task").expect("row");
+        let updated = service
+            .apply_row(
+                row,
+                lifecycle_command(
+                    &ready,
+                    Actor {
+                        id: ActorId("operator".into()),
+                        role: ActorRole::Operator,
+                    },
+                    CommandKind::AddRequiredCheck {
+                        check: agent_conductor_domain::RequiredCheck {
+                            id: agent_conductor_domain::CheckId("new-check".into()),
+                            description: "new contract check".into(),
+                        },
+                    },
+                    "add-future-check",
+                ),
+            )
+            .await
+            .expect("new check applies without rewriting ended attempt")
+            .task
+            .aggregate;
+        assert_eq!(updated.required_checks.len(), 1);
+
+        let url = format!(
+            "sqlite://{}",
+            directory.path().join("state.sqlite3").display()
+        );
+        let mut connection = SqliteConnection::connect(&url)
+            .await
+            .expect("inspection connection");
+        let frozen: String =
+            sqlx::query_scalar("SELECT required_checks_json FROM attempts WHERE id = 'attempt'")
+                .fetch_one(&mut connection)
+                .await
+                .expect("ended attempt");
+        assert_eq!(frozen, "[]");
+
+        let row = store.task("task").await.expect("task").expect("row");
+        let reuse = service
+            .apply_row(
+                row.clone(),
+                lifecycle_command(
+                    &updated,
+                    Actor {
+                        id: ActorId("operator".into()),
+                        role: ActorRole::Operator,
+                    },
+                    CommandKind::Claim {
+                        attempt_id: AttemptId("attempt".into()),
+                        worker: ActorId("worker".into()),
+                        lease_duration_ms: 10,
+                        worker_margin_ms: 1,
+                        recovery_grace_ms: 5,
+                    },
+                    "reject-reused-attempt",
+                ),
+            )
+            .await
+            .expect_err("ended attempt identity cannot be reused");
+        assert_eq!(reuse.code, ErrorCode::Conflict);
+
+        let next_claim = service
+            .apply_row(
+                row,
+                lifecycle_command(
+                    &updated,
+                    Actor {
+                        id: ActorId("operator".into()),
+                        role: ActorRole::Operator,
+                    },
+                    CommandKind::Claim {
+                        attempt_id: AttemptId("attempt-next".into()),
+                        worker: ActorId("worker".into()),
+                        lease_duration_ms: 10,
+                        worker_margin_ms: 1,
+                        recovery_grace_ms: 5,
+                    },
+                    "claim-updated-contract",
+                ),
+            )
+            .await
+            .expect("next claim");
+        assert_eq!(next_claim.task.aggregate.required_checks.len(), 1);
+        let next_frozen: String = sqlx::query_scalar(
+            "SELECT required_checks_json FROM attempts WHERE id = 'attempt-next'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("next attempt");
+        assert!(next_frozen.contains("new-check"));
     }
 
     #[tokio::test]

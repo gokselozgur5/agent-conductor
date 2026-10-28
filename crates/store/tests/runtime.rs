@@ -160,6 +160,40 @@ async fn invariant_scan_reports_projection_ownership_boot_and_completion_contrad
     .to_string();
     sqlx::query("INSERT INTO tasks (id, project_id, objective, state, priority, version, authority_json, aggregate_json, created_at_ms, updated_at_ms) VALUES ('task-completed', 'project-1', 'done', 'completed', 0, 1, '{}', ?, 1, 2)")
         .bind(completed).execute(&mut seed).await.expect("completed task seeds");
+    let self_verified = serde_json::json!({
+        "id": "task-self-verified",
+        "state": "completed",
+        "version": 4,
+        "last_lease_epoch": 1,
+        "attempt": {
+            "id": "attempt-self-verified",
+            "worker": "agent-1",
+            "lease": {
+                "epoch": 1,
+                "boot_generation": 1,
+                "deadline_monotonic_ms": 100,
+                "worker_deadline_monotonic_ms": 90,
+                "remaining_at_last_heartbeat_ms": 100,
+                "recovery_grace_ms": 10,
+                "status": "ended"
+            }
+        },
+        "blocker": null,
+        "required_checks": [{"id": "check-1", "description": "independent check"}],
+        "verification": {
+            "source": "source-1",
+            "checks": [{
+                "check_id": "check-1",
+                "passed": true,
+                "source": "source-1",
+                "recorded_by": "agent-1"
+            }],
+            "verdict": {"accepted": true, "source": "source-1", "verifier": "agent-1"}
+        }
+    })
+    .to_string();
+    sqlx::query("INSERT INTO tasks (id, project_id, objective, state, priority, version, authority_json, aggregate_json, created_at_ms, updated_at_ms) VALUES ('task-self-verified', 'project-1', 'invalid self verification', 'completed', 0, 4, '{}', ?, 1, 2)")
+        .bind(self_verified).execute(&mut seed).await.expect("self-verified task seeds");
     drop(seed);
 
     let violations = store
@@ -171,4 +205,8 @@ async fn invariant_scan_reports_projection_ownership_boot_and_completion_contrad
     assert!(codes.contains(&"lease_identity_mismatch"));
     assert!(codes.contains(&"lease_boot_generation_mismatch"));
     assert!(codes.contains(&"incomplete_completed_task"));
+    assert!(violations.iter().any(|violation| {
+        violation.code == "incomplete_completed_task"
+            && violation.context_json.contains("task-self-verified")
+    }));
 }

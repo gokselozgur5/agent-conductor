@@ -676,6 +676,9 @@ impl Store {
 }
 
 fn completion_projection_is_valid(aggregate: &serde_json::Value) -> bool {
+    let worker = aggregate
+        .pointer("/attempt/worker")
+        .and_then(serde_json::Value::as_str);
     let source = aggregate
         .pointer("/verification/source")
         .and_then(serde_json::Value::as_str);
@@ -687,7 +690,11 @@ fn completion_projection_is_valid(aggregate: &serde_json::Value) -> bool {
         && verdict
             .and_then(|value| value.get("source"))
             .and_then(serde_json::Value::as_str)
-            == source;
+            == source
+        && verdict
+            .and_then(|value| value.get("verifier"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|verifier| Some(verifier) != worker);
     let lease_ended = aggregate
         .pointer("/attempt/lease/status")
         .and_then(serde_json::Value::as_str)
@@ -705,6 +712,10 @@ fn completion_projection_is_valid(aggregate: &serde_json::Value) -> bool {
                 check.get("check_id").and_then(serde_json::Value::as_str) == id
                     && check.get("passed").and_then(serde_json::Value::as_bool) == Some(true)
                     && check.get("source").and_then(serde_json::Value::as_str) == source
+                    && check
+                        .get("recorded_by")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|recorded_by| Some(recorded_by) != worker)
             })
         })
     });

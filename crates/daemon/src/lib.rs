@@ -371,8 +371,8 @@ mod tests {
     use std::time::Duration;
 
     use agent_conductor_domain::{
-        Actor, ActorId, ActorRole, AttemptId, Command, CommandKind, CorrelationId, IdempotencyKey,
-        LeaseStatus, Task, TaskState,
+        Actor, ActorId, ActorRole, AttemptId, CheckId, Command, CommandKind, CorrelationId,
+        IdempotencyKey, LeaseStatus, RequiredCheck, SourceIdentity, Task, TaskState,
     };
     use agent_conductor_store::Store;
     use conductor_protocol::{
@@ -1436,6 +1436,200 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Conflict);
         shutdown_tx.send(()).expect("shutdown");
         task.await.expect("join").expect("clean exit");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn privileged_source_binding_completes_a_real_daemon_task() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("conductor.sqlite3");
+        let path = directory.path().join("conductor.sock");
+        let store = Store::open(&database).await.expect("store opens");
+        let service = PersistentControlService::start(store, 100)
+            .await
+            .expect("runtime starts");
+        let server = LocalServer::bind(&path, service).expect("socket binds");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let daemon = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        let setup = [
+            Request::RegisterProject {
+                actor_id: "operator".into(),
+                idempotency_key: "verification-project".into(),
+                id: "verification-project".into(),
+                path: directory.path().to_string_lossy().into_owned(),
+            },
+            Request::RegisterAgent {
+                actor_id: "operator".into(),
+                idempotency_key: "verification-worker".into(),
+                id: "verification-worker".into(),
+                adapter_kind: "fake".into(),
+                protocol_fingerprint: "phase-1".into(),
+                capability_hash: "sha256:worker".into(),
+                access_mode: "read_write".into(),
+            },
+            Request::RegisterAgent {
+                actor_id: "operator".into(),
+                idempotency_key: "verification-verifier".into(),
+                id: "verification-verifier".into(),
+                adapter_kind: "fake".into(),
+                protocol_fingerprint: "phase-1".into(),
+                capability_hash: "sha256:verifier".into(),
+                access_mode: "read_only".into(),
+            },
+            Request::CreateTask {
+                actor_id: "operator".into(),
+                idempotency_key: "verification-task".into(),
+                id: "verification-task".into(),
+                project_id: "verification-project".into(),
+                objective: "prove the Phase 1 verification path".into(),
+                priority: 0,
+                authority: serde_json::json!({}),
+                required_checks: vec![RequiredCheck {
+                    id: CheckId("phase-1-check".into()),
+                    description: "fake deterministic check".into(),
+                }],
+            },
+        ];
+        for request in setup {
+            let envelope = RequestEnvelope::new(request);
+            assert!(matches!(
+                exchange(&path, &serde_json::to_vec(&envelope).expect("serialize"))
+                    .await
+                    .result,
+                ResponseResult::Ok(_)
+            ));
+        }
+
+        let actor = |id: &str, role| Actor {
+            id: ActorId(id.into()),
+            role,
+        };
+        let command = |expected_version, actor, key: &str, kind| Command {
+            actor,
+            expected_version,
+            correlation_id: CorrelationId(format!("correlation-{key}")),
+            idempotency_key: IdempotencyKey(key.into()),
+            reason: key.into(),
+            kind,
+        };
+        for command in [
+            command(
+                0,
+                actor("operator", ActorRole::Operator),
+                "verification-ready",
+                CommandKind::MarkReady,
+            ),
+            command(
+                1,
+                actor("verification-worker", ActorRole::Worker),
+                "verification-claim",
+                CommandKind::Claim {
+                    attempt_id: AttemptId("verification-attempt".into()),
+                    worker: ActorId("verification-worker".into()),
+                    lease_duration_ms: 60_000,
+                    worker_margin_ms: 1_000,
+                    recovery_grace_ms: 5_000,
+                },
+            ),
+            command(
+                2,
+                actor("verification-worker", ActorRole::Worker),
+                "verification-start",
+                CommandKind::Start {
+                    attempt_id: AttemptId("verification-attempt".into()),
+                    lease_epoch: 1,
+                },
+            ),
+            command(
+                3,
+                actor("verification-worker", ActorRole::Worker),
+                "verification-begin",
+                CommandKind::BeginVerification {
+                    attempt_id: AttemptId("verification-attempt".into()),
+                    lease_epoch: 1,
+                },
+            ),
+        ] {
+            let envelope = RequestEnvelope::new(Request::ApplyCommand {
+                task_id: "verification-task".into(),
+                command,
+            });
+            assert!(matches!(
+                exchange(&path, &serde_json::to_vec(&envelope).expect("serialize"))
+                    .await
+                    .result,
+                ResponseResult::Ok(Response::CommandApplied(_))
+            ));
+        }
+
+        let source = SourceIdentity("fake:phase-1:artifact-1".into());
+        let bind = RequestEnvelope::new(Request::BindVerificationSource {
+            task_id: "verification-task".into(),
+            expected_version: 4,
+            idempotency_key: "verification-bind-source".into(),
+            source: source.clone(),
+        });
+        assert!(matches!(
+            exchange(&path, &serde_json::to_vec(&bind).expect("serialize"))
+                .await
+                .result,
+            ResponseResult::Ok(Response::CommandApplied(_))
+        ));
+
+        for command in [
+            command(
+                5,
+                actor("verification-verifier", ActorRole::Verifier),
+                "verification-check",
+                CommandKind::RecordCheck {
+                    check_id: CheckId("phase-1-check".into()),
+                    passed: true,
+                    source: source.clone(),
+                },
+            ),
+            command(
+                6,
+                actor("verification-verifier", ActorRole::Verifier),
+                "verification-verdict",
+                CommandKind::RecordVerdict {
+                    accepted: true,
+                    source: source.clone(),
+                },
+            ),
+            command(
+                7,
+                actor("operator", ActorRole::Operator),
+                "verification-complete",
+                CommandKind::Complete {
+                    observed_source: source,
+                },
+            ),
+        ] {
+            let envelope = RequestEnvelope::new(Request::ApplyCommand {
+                task_id: "verification-task".into(),
+                command,
+            });
+            assert!(matches!(
+                exchange(&path, &serde_json::to_vec(&envelope).expect("serialize"))
+                    .await
+                    .result,
+                ResponseResult::Ok(Response::CommandApplied(_))
+            ));
+        }
+        let get = RequestEnvelope::new(Request::GetTask {
+            task_id: "verification-task".into(),
+        });
+        let response = exchange(&path, &serde_json::to_vec(&get).expect("serialize")).await;
+        let ResponseResult::Ok(Response::Task(task)) = response.result else {
+            panic!("completed task is unavailable")
+        };
+        assert_eq!(task.aggregate.state, TaskState::Completed);
+
+        shutdown_tx.send(()).expect("shutdown sends");
+        daemon.await.expect("daemon joins").expect("daemon stops");
     }
 
     #[test]
