@@ -33,11 +33,15 @@ use uuid::Uuid;
 mod check_execution;
 mod clock;
 #[cfg(unix)]
+mod repository_watch;
+#[cfg(unix)]
 mod workflow;
 #[cfg(unix)]
 mod workflow_continuation;
 #[cfg(unix)]
 mod workflow_dispatch;
+#[cfg(unix)]
+pub use repository_watch::{RepositoryWatch, RepositoryWatchState};
 #[cfg(unix)]
 pub use workflow::{NativeWorkflowPlan, WorkflowOutcome};
 #[cfg(unix)]

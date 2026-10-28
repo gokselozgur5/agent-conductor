@@ -167,3 +167,20 @@ no-overwrite publication. Storage regression proves stale-boot refusal and the
 one-automatic-retry limit across another restart; explicit continuation remains
 available. This slice still requires exact-head CI. Generic hostile-process
 fencing, hooks, other-host isolation and full-product acceptance remain open.
+
+
+## Repository observation integration
+
+The current hooks branch provides opt-in daemon `--watch-config`, bounded
+read-only content observation, quiet/max-latency debounce and atomic publication
+of at most256 events plus the advanced baseline. A real daemon/CLI/Git probe passed
+burst coalescing, path routing, source-echo suppression, no raw-content payload,
+updates/deletion, ignore exclusion, changes across restart and HEAD events. See
+[REPOSITORY_HOOKS.md](REPOSITORY_HOOKS.md) for exact limits and current evidence.
+
+166 full workspace tests passed after a stop-fixture readiness correction; all
+prior failures remain recorded. The controlled delayed-start probe explains the
+fixture's missed-renewal assumption, not every historical timeout. The earlier
+socket-permit deadline remains unresolved under issue20. Issue19 remains open:
+owned-attempt attribution, instruction invalidation and eligible bounded wake
+are not yet implemented. No model calls were made for watcher acceptance.

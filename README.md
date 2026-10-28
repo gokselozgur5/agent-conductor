@@ -92,3 +92,5 @@ review results. See [Operator board](docs/OPERATOR_BOARD.md) for `--http`, crede
 handling and the read-only scope. The existing Unix-socket CLI remains available.
 
 Native plan submission and persistent execution: [Workflow dispatch](docs/WORKFLOW_DISPATCH.md).
+
+Opt-in repository change observation: [Repository hooks](docs/REPOSITORY_HOOKS.md).
