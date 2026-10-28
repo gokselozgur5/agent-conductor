@@ -340,6 +340,43 @@ class OperatorRecoveryIntegration(unittest.TestCase):
                 with opener.open(urllib.request.Request(url, headers={'Authorization': 'Bearer ' + new_token}), timeout=5) as response:
                     self.assertEqual(json.load(response)['status'], 'ready')
                 self.assertTrue(json.loads(call('ctl', '--json', 'check-invariants'))['result']['payload']['healthy'])
+                stop(process); process = None
+                # Exercise the repair CLI against a real migrated database, then
+                # reopen the actual daemon after both possible directory outcomes.
+                for boundary in ('after_move', 'after_publish'):
+                    exported = root / ('snapshot-' + boundary)
+                    retained = root / ('retained-' + boundary)
+                    call('backup', str(exported))
+                    script = '''
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import operator_restore
+state, source, retained = map(Path, sys.argv[2:5])
+rename = os.rename
+def interrupt(source, target):
+    result = rename(source, target)
+    if Path(target) == (retained if sys.argv[5] == 'after_move' else state):
+        os._exit(79)
+    return result
+operator_restore.os.rename = interrupt
+operator_restore.restore(state, source, retained)
+'''
+                    interrupted = subprocess.run([sys.executable, '-c', script, str(repo / 'tools'),
+                                                  str(state), str(exported), str(retained), boundary],
+                                                 capture_output=True, timeout=60)
+                    self.assertEqual(interrupted.returncode, 79, interrupted.stderr)
+                    if boundary == 'after_move':
+                        self.assertFalse(state.exists())
+                    repair = json.loads(call('repair-restore', '--retained', str(retained)))
+                    self.assertFalse(repair['dispatch_started'])
+                    self.assertEqual(repair['outcome'], 'original_state_restored' if boundary == 'after_move'
+                                     else 'published_restore_retained')
+                    process = start()
+                    self.assertTrue(json.loads(call('ctl', '--json', 'check-invariants'))['result']['payload']['healthy'])
+                    if boundary == 'after_publish':
+                        call('repair-restore', '--retained', str(retained), success=False)
+                    stop(process); process = None
             finally:
                 if process is not None and process.poll() is None:
                     stop(process)
