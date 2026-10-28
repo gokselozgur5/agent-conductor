@@ -1,7 +1,7 @@
 use std::io;
 use std::path::Path;
 
-use conductor_protocol::{RequestEnvelope, ResponseEnvelope};
+use conductor_protocol::{ErrorCode, RequestEnvelope, ResponseEnvelope};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -54,4 +54,31 @@ pub async fn send(
         return Err(ClientError::MismatchedResponse);
     }
     Ok(response)
+}
+
+/// Returns the stable process exit status for a structured daemon error.
+#[must_use]
+pub const fn exit_code(code: ErrorCode) -> i32 {
+    match code {
+        ErrorCode::Validation | ErrorCode::UnsupportedProtocol => 2,
+        ErrorCode::Conflict => 3,
+        ErrorCode::Unavailable => 4,
+        ErrorCode::InvariantViolation => 5,
+        ErrorCode::Internal => 6,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_errors_have_stable_distinct_exit_codes() {
+        assert_eq!(exit_code(ErrorCode::Validation), 2);
+        assert_eq!(exit_code(ErrorCode::UnsupportedProtocol), 2);
+        assert_eq!(exit_code(ErrorCode::Conflict), 3);
+        assert_eq!(exit_code(ErrorCode::Unavailable), 4);
+        assert_eq!(exit_code(ErrorCode::InvariantViolation), 5);
+        assert_eq!(exit_code(ErrorCode::Internal), 6);
+    }
 }

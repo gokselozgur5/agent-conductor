@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use conductor_cli::send;
-use conductor_protocol::{ErrorCode, Request, RequestEnvelope, Response, ResponseResult};
+use conductor_cli::{exit_code, send};
+use conductor_protocol::{Request, RequestEnvelope, Response, ResponseResult};
 
 #[derive(Debug, Parser)]
 #[command(name = "conductorctl", version, about = "Agent Conductor local client")]
@@ -182,14 +182,4 @@ fn parse_json<T: serde::de::DeserializeOwned>(input: &str, label: &str) -> T {
         eprintln!("invalid {label} JSON: {error}");
         std::process::exit(2)
     })
-}
-
-const fn exit_code(code: ErrorCode) -> i32 {
-    match code {
-        ErrorCode::Validation | ErrorCode::UnsupportedProtocol => 2,
-        ErrorCode::Conflict => 3,
-        ErrorCode::Unavailable => 4,
-        ErrorCode::InvariantViolation => 5,
-        ErrorCode::Internal => 6,
-    }
 }

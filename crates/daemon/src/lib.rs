@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use conductor_protocol::{ErrorBody, ErrorCode, RequestEnvelope, ResponseEnvelope};
 use conductor_service::ControlService;
@@ -10,10 +11,13 @@ use fs2::FileExt;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 pub const MAX_FRAME_BYTES: u64 = 1024 * 1024;
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
@@ -89,6 +93,8 @@ pub struct LocalServer<S> {
     listener: UnixListener,
     service: Arc<S>,
     guard: SocketGuard,
+    permits: Arc<Semaphore>,
+    read_timeout: Duration,
 }
 
 impl<S> LocalServer<S>
@@ -102,6 +108,20 @@ where
     /// Returns an I/O error if the parent is absent, the socket is already in
     /// use, permissions cannot be restricted, or binding otherwise fails.
     pub fn bind(path: impl AsRef<Path>, service: S) -> Result<Self, DaemonError> {
+        Self::bind_with_config(
+            path,
+            service,
+            MAX_CONCURRENT_CONNECTIONS,
+            REQUEST_READ_TIMEOUT,
+        )
+    }
+
+    fn bind_with_config(
+        path: impl AsRef<Path>,
+        service: S,
+        max_connections: usize,
+        read_timeout: Duration,
+    ) -> Result<Self, DaemonError> {
         use std::os::unix::fs::PermissionsExt;
 
         let path = path.as_ref().to_path_buf();
@@ -112,6 +132,8 @@ where
             listener,
             service: Arc::new(service),
             guard: SocketGuard { path },
+            permits: Arc::new(Semaphore::new(max_connections)),
+            read_timeout,
         })
     }
 
@@ -128,6 +150,8 @@ where
             listener,
             service,
             guard: _guard,
+            permits,
+            read_timeout,
         } = self;
         let mut tasks = JoinSet::new();
         tokio::pin!(shutdown);
@@ -138,12 +162,20 @@ where
                 () = &mut shutdown => break,
                 accepted = listener.accept() => {
                     let (stream, _) = accepted?;
-                    let service = Arc::clone(&service);
-                    tasks.spawn(async move {
-                        if let Err(error) = serve_connection(stream, service.as_ref()).await {
-                            debug!(%error, "local client connection failed");
+                    match Arc::clone(&permits).try_acquire_owned() {
+                        Ok(permit) => {
+                            let service = Arc::clone(&service);
+                            tasks.spawn(async move {
+                                let _permit = permit;
+                                if let Err(error) = serve_connection(stream, service.as_ref(), read_timeout).await {
+                                    debug!(%error, "local client connection failed");
+                                }
+                            });
                         }
-                    });
+                        Err(_) => {
+                            reject_overloaded(&stream);
+                        }
+                    }
                 }
             }
         }
@@ -154,15 +186,37 @@ where
     }
 }
 
-async fn serve_connection<S>(mut stream: UnixStream, service: &S) -> Result<(), io::Error>
+async fn serve_connection<S>(
+    mut stream: UnixStream,
+    service: &S,
+    read_timeout: Duration,
+) -> Result<(), io::Error>
 where
     S: ControlService,
 {
     let mut input = Vec::new();
-    (&mut stream)
-        .take(MAX_FRAME_BYTES + 1)
-        .read_to_end(&mut input)
-        .await?;
+    match tokio::time::timeout(
+        read_timeout,
+        (&mut stream)
+            .take(MAX_FRAME_BYTES + 1)
+            .read_to_end(&mut input),
+    )
+    .await
+    {
+        Ok(result) => {
+            result?;
+        }
+        Err(_) => {
+            return write_response(
+                &mut stream,
+                &ResponseEnvelope::failure(
+                    None,
+                    ErrorBody::new(ErrorCode::Unavailable, "request read timed out"),
+                ),
+            )
+            .await;
+        }
+    }
 
     let response = if input.len() as u64 > MAX_FRAME_BYTES {
         ResponseEnvelope::failure(
@@ -185,10 +239,28 @@ where
         }
     };
 
-    let mut output = serde_json::to_vec(&response).map_err(io::Error::other)?;
+    write_response(&mut stream, &response).await
+}
+
+async fn write_response(
+    stream: &mut UnixStream,
+    response: &ResponseEnvelope,
+) -> Result<(), io::Error> {
+    let mut output = serde_json::to_vec(response).map_err(io::Error::other)?;
     output.push(b'\n');
     stream.write_all(&output).await?;
     stream.shutdown().await
+}
+
+fn reject_overloaded(stream: &UnixStream) {
+    let response = ResponseEnvelope::failure(
+        None,
+        ErrorBody::new(ErrorCode::Unavailable, "connection limit reached"),
+    );
+    if let Ok(mut output) = serde_json::to_vec(&response) {
+        output.push(b'\n');
+        let _ = stream.try_write(&output);
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +386,82 @@ mod tests {
             .expect("daemon task joins")
             .expect("daemon exits cleanly");
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn stalled_and_excess_clients_are_bounded_and_recovery_accepts_health() {
+        let path = socket_path();
+        let server = LocalServer::bind_with_config(
+            &path,
+            InMemoryControlService::new(1),
+            2,
+            Duration::from_millis(50),
+        )
+        .expect("socket binds");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+        let mut first = UnixStream::connect(&path)
+            .await
+            .expect("first stalled client");
+        let mut second = UnixStream::connect(&path)
+            .await
+            .expect("second stalled client");
+
+        let request = RequestEnvelope::new(Request::Health);
+        let body = serde_json::to_vec(&request).expect("request serializes");
+        let mut excess = UnixStream::connect(&path)
+            .await
+            .expect("excess client connects");
+        excess.write_all(&body).await.expect("request writes");
+        excess.shutdown().await.expect("request half-closes");
+        let mut excess_response = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            excess.read_to_end(&mut excess_response),
+        )
+        .await
+        .expect("overload response is bounded")
+        .expect("overload response reads");
+        let overload: ResponseEnvelope =
+            serde_json::from_slice(&excess_response).expect("structured overload response");
+        let ResponseResult::Error(error) = overload.result else {
+            panic!("overloaded request unexpectedly succeeded")
+        };
+        assert_eq!(error.code, ErrorCode::Unavailable);
+
+        for stalled in [&mut first, &mut second] {
+            let mut response = Vec::new();
+            tokio::time::timeout(Duration::from_secs(1), stalled.read_to_end(&mut response))
+                .await
+                .expect("timeout response is bounded")
+                .expect("timeout response reads");
+            let response: ResponseEnvelope =
+                serde_json::from_slice(&response).expect("structured timeout response");
+            let ResponseResult::Error(error) = response.result else {
+                panic!("stalled request unexpectedly succeeded")
+            };
+            assert_eq!(error.code, ErrorCode::Unavailable);
+        }
+
+        let healthy = RequestEnvelope::new(Request::Health);
+        let response = exchange(
+            &path,
+            &serde_json::to_vec(&healthy).expect("request serializes"),
+        )
+        .await;
+        assert!(matches!(
+            response.result,
+            ResponseResult::Ok(Response::Health(_))
+        ));
+
+        shutdown_tx.send(()).expect("shutdown sends");
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("shutdown remains bounded")
+            .expect("daemon joins")
+            .expect("daemon exits cleanly");
     }
 
     #[tokio::test]
