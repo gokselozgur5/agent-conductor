@@ -1,6 +1,6 @@
 use agent_conductor_store::{
     AuditAppend, CommitBatch, CommitResult, EffectIntentAppend, NewProject, NewTask, Store,
-    StoreError, TaskMutation,
+    StoreError, TaskMutation, TaskTransitionAppend,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 use tempfile::TempDir;
@@ -51,6 +51,16 @@ fn batch(key: &str, hash: &str, audit_id: &str, effect_token: &str) -> CommitBat
             state: "claimed".into(),
             updated_at_ms: 200,
         }),
+        transitions: vec![TaskTransitionAppend {
+            id: format!("transition-{key}"),
+            task_id: "task-1".into(),
+            actor_id: "operator-1".into(),
+            prior_state: "ready".into(),
+            new_state: "claimed".into(),
+            reason: "accepted claim".into(),
+            correlation_id: "correlation-1".into(),
+            occurred_at_ms: 200,
+        }],
         audit: vec![AuditAppend {
             id: audit_id.into(),
             task_id: Some("task-1".into()),
@@ -164,6 +174,7 @@ async fn outcome_audit_effect_and_idempotency_commit_atomically() {
     assert_eq!(task.get::<String, _>("state"), "claimed");
     assert_eq!(task.get::<i64, _>("version"), 1);
     assert_eq!(count(store.readers(), "audit_events").await, 1);
+    assert_eq!(count(store.readers(), "task_transitions").await, 1);
     assert_eq!(count(store.readers(), "effect_intents").await, 1);
     assert_eq!(count(store.readers(), "command_idempotency").await, 1);
 }
@@ -182,6 +193,7 @@ async fn identical_command_replays_stored_outcome_without_duplicate_rows() {
         }
     );
     assert_eq!(count(store.readers(), "audit_events").await, 1);
+    assert_eq!(count(store.readers(), "task_transitions").await, 1);
     assert_eq!(count(store.readers(), "effect_intents").await, 1);
 }
 
@@ -199,6 +211,7 @@ async fn idempotency_key_with_different_request_is_rejected() {
         .expect_err("collision must fail");
     assert!(matches!(error, StoreError::IdempotencyCollision));
     assert_eq!(count(store.readers(), "audit_events").await, 1);
+    assert_eq!(count(store.readers(), "task_transitions").await, 1);
     assert_eq!(count(store.readers(), "effect_intents").await, 1);
 }
 
@@ -211,6 +224,11 @@ async fn optimistic_conflict_rolls_back_every_append() {
         .as_mut()
         .expect("task mutation")
         .expected_version = 7;
+    conflicting
+        .task
+        .as_mut()
+        .expect("task mutation")
+        .new_version = 8;
 
     let error = store
         .persist(&conflicting)
@@ -218,8 +236,103 @@ async fn optimistic_conflict_rolls_back_every_append() {
         .expect_err("version conflict");
     assert!(matches!(error, StoreError::VersionConflict { .. }));
     assert_eq!(count(store.readers(), "audit_events").await, 0);
+    assert_eq!(count(store.readers(), "task_transitions").await, 0);
     assert_eq!(count(store.readers(), "effect_intents").await, 0);
     assert_eq!(count(store.readers(), "command_idempotency").await, 0);
+}
+
+#[tokio::test]
+async fn invalid_version_step_rolls_back_every_append() {
+    let (_directory, store) = seeded_store().await;
+    let mut invalid = batch("key-1", "hash-1", "audit-1", "effect-1");
+    invalid.task.as_mut().expect("task mutation").new_version = 3;
+
+    let error = store
+        .persist(&invalid)
+        .await
+        .expect_err("version must advance exactly once");
+    assert!(matches!(error, StoreError::InvalidVersionStep { .. }));
+    assert_eq!(count(store.readers(), "audit_events").await, 0);
+    assert_eq!(count(store.readers(), "task_transitions").await, 0);
+    assert_eq!(count(store.readers(), "effect_intents").await, 0);
+    assert_eq!(count(store.readers(), "command_idempotency").await, 0);
+}
+
+#[tokio::test]
+async fn duplicate_transition_rolls_back_the_whole_batch() {
+    let (_directory, store) = seeded_store().await;
+    store
+        .persist(&batch("key-1", "hash-1", "audit-1", "effect-1"))
+        .await
+        .expect("first persistence");
+
+    let mut duplicate = batch("key-2", "hash-2", "audit-2", "effect-2");
+    let task = duplicate.task.as_mut().expect("task mutation");
+    task.expected_version = 1;
+    task.new_version = 2;
+    duplicate.transitions[0].id = "transition-key-1".into();
+
+    duplicate
+        .transitions
+        .first_mut()
+        .expect("transition")
+        .prior_state = "claimed".into();
+    let error = store
+        .persist(&duplicate)
+        .await
+        .expect_err("duplicate transition must fail");
+    assert!(matches!(error, StoreError::Database(_)));
+
+    let version: i64 = sqlx::query_scalar("SELECT version FROM tasks WHERE id = 'task-1'")
+        .fetch_one(store.readers())
+        .await
+        .expect("task version");
+    assert_eq!(version, 1);
+    assert_eq!(count(store.readers(), "audit_events").await, 1);
+    assert_eq!(count(store.readers(), "task_transitions").await, 1);
+    assert_eq!(count(store.readers(), "effect_intents").await, 1);
+    assert_eq!(count(store.readers(), "command_idempotency").await, 1);
+}
+
+#[tokio::test]
+async fn close_and_reopen_preserves_committed_truth_and_idempotency() {
+    let (directory, store) = seeded_store().await;
+    let database = directory.path().join("conductor.sqlite3");
+    let committed = batch("key-1", "hash-1", "audit-1", "effect-1");
+    store.persist(&committed).await.expect("persist outcome");
+    store.readers().close().await;
+    drop(store);
+
+    let reopened = Store::open(&database).await.expect("reopen store");
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(reopened.readers())
+        .await
+        .expect("integrity check");
+    assert_eq!(integrity, "ok");
+
+    let task: (String, i64) =
+        sqlx::query_as("SELECT state, version FROM tasks WHERE id = 'task-1'")
+            .fetch_one(reopened.readers())
+            .await
+            .expect("restored task");
+    assert_eq!(task, ("claimed".into(), 1));
+    assert_eq!(count(reopened.readers(), "task_transitions").await, 1);
+    assert_eq!(count(reopened.readers(), "audit_events").await, 1);
+    assert_eq!(count(reopened.readers(), "effect_intents").await, 1);
+
+    let replay = reopened
+        .persist(&committed)
+        .await
+        .expect("replay after reopen");
+    assert_eq!(
+        replay,
+        CommitResult::Replayed {
+            outcome_json: committed.outcome_json
+        }
+    );
+    assert_eq!(count(reopened.readers(), "task_transitions").await, 1);
+    assert_eq!(count(reopened.readers(), "audit_events").await, 1);
+    assert_eq!(count(reopened.readers(), "effect_intents").await, 1);
 }
 
 #[tokio::test]

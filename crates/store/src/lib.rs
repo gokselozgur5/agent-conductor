@@ -29,6 +29,14 @@ pub enum StoreError {
     },
     #[error("idempotency key was reused with a different request")]
     IdempotencyCollision,
+    #[error(
+        "invalid task version step for {task_id}; expected the successor of {expected_version}, got {new_version}"
+    )]
+    InvalidVersionStep {
+        task_id: String,
+        expected_version: i64,
+        new_version: i64,
+    },
     #[error("invalid database path")]
     InvalidPath,
 }
@@ -64,6 +72,18 @@ pub struct AuditAppend {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskTransitionAppend {
+    pub id: String,
+    pub task_id: String,
+    pub actor_id: String,
+    pub prior_state: String,
+    pub new_state: String,
+    pub reason: String,
+    pub correlation_id: String,
+    pub occurred_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectIntentAppend {
     pub token: String,
     pub task_id: Option<String>,
@@ -81,6 +101,7 @@ pub struct CommitBatch {
     pub idempotency_key: String,
     pub request_hash: String,
     pub task: Option<TaskMutation>,
+    pub transitions: Vec<TaskTransitionAppend>,
     pub audit: Vec<AuditAppend>,
     pub effects: Vec<EffectIntentAppend>,
     pub outcome_json: String,
@@ -234,6 +255,13 @@ async fn persist_in_transaction(
     }
 
     if let Some(task) = &batch.task {
+        if task.expected_version.checked_add(1) != Some(task.new_version) {
+            return Err(StoreError::InvalidVersionStep {
+                task_id: task.task_id.clone(),
+                expected_version: task.expected_version,
+                new_version: task.new_version,
+            });
+        }
         let result = sqlx::query(
             "UPDATE tasks SET state = ?, version = ?, updated_at_ms = ? WHERE id = ? AND version = ?",
         )
@@ -281,6 +309,22 @@ async fn persist_in_transaction(
         .bind(&effect.request_json)
         .bind(effect.created_at_ms)
         .bind(effect.created_at_ms)
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    for transition in &batch.transitions {
+        sqlx::query(
+            "INSERT INTO task_transitions (id, task_id, actor_id, prior_state, new_state, reason, correlation_id, occurred_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&transition.id)
+        .bind(&transition.task_id)
+        .bind(&transition.actor_id)
+        .bind(&transition.prior_state)
+        .bind(&transition.new_state)
+        .bind(&transition.reason)
+        .bind(&transition.correlation_id)
+        .bind(transition.occurred_at_ms)
         .execute(&mut *connection)
         .await?;
     }
