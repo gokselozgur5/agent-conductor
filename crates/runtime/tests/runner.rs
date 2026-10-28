@@ -236,3 +236,42 @@ async fn spawn_failure_is_not_reported_as_successfully_stopped() {
     let mut bytes = Vec::new();
     assert_eq!(reader.read_until(b'\n', &mut bytes).await.expect("EOF"), 0);
 }
+
+#[tokio::test]
+async fn controller_persists_ack_before_release_and_refusal_has_no_side_effect() {
+    use conductor_runtime::{RunnerConnection, RunnerConnectionError};
+    for accept in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let input = launch(directory.path(), "printf result > changed", 1000);
+        let path = directory.path().join("changed");
+        let result = RunnerConnection::launch(
+            std::path::Path::new(env!("CARGO_BIN_EXE_conductor-runner")),
+            &input,
+            |_| async {
+                assert!(!path.exists(), "persistence precedes worker execution");
+                if accept {
+                    Ok(())
+                } else {
+                    Err(RunnerConnectionError::Persistence)
+                }
+            },
+        )
+        .await;
+        if accept {
+            let mut connection = result.expect("released");
+            assert!(matches!(
+                connection.event().await.expect("result"),
+                RunnerEvent::Finished {
+                    exit_code: Some(0),
+                    ..
+                }
+            ));
+            connection.wait().await.expect("settled");
+            assert!(path.exists());
+        } else {
+            assert!(matches!(result, Err(RunnerConnectionError::Persistence)));
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(!path.exists());
+        }
+    }
+}

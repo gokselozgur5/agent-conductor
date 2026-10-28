@@ -12,3 +12,8 @@ pub use process::*;
 mod runner;
 #[cfg(unix)]
 pub use runner::*;
+
+#[cfg(unix)]
+mod client;
+#[cfg(unix)]
+pub use client::*;
