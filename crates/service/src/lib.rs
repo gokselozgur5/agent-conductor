@@ -33,6 +33,8 @@ use uuid::Uuid;
 mod check_execution;
 mod clock;
 #[cfg(unix)]
+mod source_finalization;
+#[cfg(unix)]
 pub use check_execution::CheckWorkspace;
 #[cfg(unix)]
 mod execution;
@@ -2255,6 +2257,7 @@ mod effect_tests {
     }
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn native_terminal_observation_binds_output_and_blocks_invalid_results() {
         use agent_conductor_store::{EffectAudit, ExecutionState};
         use conductor_runtime::{AdapterKind, PacketAcknowledgement, RunnerEvent};
@@ -2280,7 +2283,31 @@ mod effect_tests {
                 )
                 .await
                 .expect("claim");
-            let mut input = runtime_launch(directory.path());
+            let row = store.task("task").await.unwrap().unwrap();
+            let task = serde_json::from_str(&row.aggregate_json).unwrap();
+            service
+                .apply_row(
+                    row,
+                    lifecycle_command(
+                        &task,
+                        Actor {
+                            id: ActorId("worker".into()),
+                            role: ActorRole::Worker,
+                        },
+                        CommandKind::Start {
+                            attempt_id: AttemptId("attempt".into()),
+                            lease_epoch: 1,
+                        },
+                        "start-native",
+                    ),
+                )
+                .await
+                .unwrap();
+            let workspace = directory.path().join("work");
+            fs::create_dir(&workspace).unwrap();
+            fs::write(workspace.join("result.txt"), "candidate source").unwrap();
+            let mut input = runtime_launch(&workspace);
+            input.packet.contract.authority.allow_workspace_commands = false;
             input.packet.contract.adapter.kind = AdapterKind::Claude;
             let ready = serde_json::to_string(&RunnerEvent::Ready {
                 acknowledgement: PacketAcknowledgement {
@@ -2293,7 +2320,7 @@ mod effect_tests {
             })
             .expect("ready");
             let stdout = if valid {
-                b"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"candidate only\"}\n".to_vec()
+                b"{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[\"Read\",\"Write\",\"Edit\",\"Glob\",\"Grep\"]}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"candidate only\"}\n".to_vec()
             } else {
                 b"truncated".to_vec()
             };
@@ -2332,19 +2359,49 @@ mod effect_tests {
                 assert!(result.is_err());
                 assert_eq!(persisted.state, ExecutionState::Started);
             } else if valid {
-                let (observed, candidate) = result.expect("candidate");
+                let (observed, mut candidate) = result.expect("candidate");
                 assert_eq!(candidate.text, "candidate only");
                 assert_eq!(observed.state, ExecutionState::Exited);
                 assert_eq!(persisted, observed);
+                candidate.file_only_tools = false;
+                assert!(
+                    service
+                        .finalize_native_source(
+                            &token,
+                            &candidate,
+                            &directory.path().join("refused"),
+                            &[]
+                        )
+                        .await
+                        .is_err()
+                );
+                assert!(!directory.path().join("refused").exists());
+                assert!(store.has_unfenced_execution("task").await.unwrap());
+                candidate.file_only_tools = true;
+                let captured = service
+                    .finalize_native_source(
+                        &token,
+                        &candidate,
+                        &directory.path().join("final"),
+                        &[],
+                    )
+                    .await
+                    .expect("capture and bind");
+                assert_eq!(captured.entries.len(), 1);
+                let row = store.task("task").await.unwrap().unwrap();
+                let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+                assert_eq!(task.state, TaskState::Verifying);
+                assert_eq!(
+                    task.verification.unwrap().source.unwrap().0,
+                    format!("snapshot:{}", captured.sha256().unwrap())
+                );
             } else {
                 assert!(result.is_err());
                 assert_eq!(persisted.state, ExecutionState::Blocked);
             }
-            assert!(
-                store
-                    .has_unfenced_execution("task")
-                    .await
-                    .expect("still unfenced")
+            assert_eq!(
+                store.has_unfenced_execution("task").await.unwrap(),
+                !valid || replace_packet
             );
             let row = store.task("task").await.expect("task").expect("row");
             let task: Task = serde_json::from_str(&row.aggregate_json).expect("aggregate");

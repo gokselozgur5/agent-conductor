@@ -234,3 +234,18 @@ pub fn native_writer_launch(
         heartbeat_timeout_ms: 1000.min(packet.contract.max_runtime_ms),
     })
 }
+
+/// Checks adapter evidence for a normally exited restricted file-tool writer.
+/// The service must separately prove wrapper exit and current attempt identity.
+/// This relies on the pinned CLI enforcing its accepted tool policy; it is not
+/// an OS proof for arbitrary command-capable processes or malicious host users.
+#[must_use]
+pub fn accepts_file_writer_exit(packet: &ResumePacket, candidate: &crate::VendorCandidate) -> bool {
+    packet.contract.adapter.kind == AdapterKind::Claude
+        && !packet.contract.authority.allow_workspace_commands
+        && candidate.file_only_tools
+        && candidate.attempt_id == packet.contract.attempt_id
+        && packet
+            .sha256()
+            .is_ok_and(|digest| digest == candidate.packet_sha256)
+}

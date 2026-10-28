@@ -75,3 +75,26 @@ replacing the executable between validation and OS execution.
 
 Installed CLI help and the executed probes determine the observed local behavior;
 current upstream documentation alone does not certify these pinned versions.
+
+## Restricted writer finalization
+
+The internal source-finalization port accepts a normal restricted-Claude writer
+exit only when the durable wrapper record is `exited` with code zero, the accepted
+candidate matches the stored packet, current task ownership remains valid, and
+the observed tool envelope contains only Read/Write/Edit/Glob/Grep with no
+observed command tool. Adapter admission also forbids workspace commands. Its
+audit records packet, output, binary and conformance hashes.
+
+This is a capability-based write fence under the existing trusted, pinned CLI
+assumption: model-controlled writes occur through confined file tools and the
+owning CLI has exited. It is not a generic OS descendant-death proof, protection
+against a compromised vendor binary or hostile same-user host process, or
+acceptance of a command-capable Codex writer. Interrupted/malformed executions
+remain blocked. Tool-envelope parsing alone is insufficient.
+
+The service then captures the private attempt tree outside the writer root,
+including new files and baseline deletions, and binds its manifest digest to the
+verification state. Capture failures preserve partial artifacts; no acceptance
+verdict is recorded. Source finalization uses two lifecycle transactions (begin,
+bind); a crash between them can leave an unbound verification state requiring
+reconciliation. End-to-end native acceptance and automatic recovery remain open.

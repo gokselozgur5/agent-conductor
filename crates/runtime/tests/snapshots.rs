@@ -131,3 +131,36 @@ fn sparse_oversized_files_and_special_files_are_refused_without_blocking() {
         Err(SnapshotError::Unsupported)
     ));
 }
+
+#[test]
+fn attempt_capture_includes_new_files_and_baseline_deletions() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir_all(source.join("new")).unwrap();
+    std::fs::write(source.join("new/file"), "new content").unwrap();
+    let manifest = conductor_runtime::snapshot_attempt_tree(
+        &source,
+        &root.path().join("capture"),
+        &["deleted".into()],
+    )
+    .unwrap();
+    assert_eq!(manifest.entries.len(), 2);
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .any(|e| e.path == "deleted" && e.sha256.is_none())
+    );
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .any(|e| e.path == "new/file" && e.sha256.is_some())
+    );
+    std::os::unix::fs::symlink(root.path(), source.join("escape")).unwrap();
+    assert!(
+        conductor_runtime::snapshot_attempt_tree(&source, &root.path().join("refused"), &[])
+            .is_err()
+    );
+    assert!(!root.path().join("refused").exists());
+}

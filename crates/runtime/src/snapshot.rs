@@ -233,3 +233,58 @@ fn read_source(root: &File, path: &str) -> Result<Option<(Vec<u8>, bool)>, Snaps
     }
     Err(SnapshotError::Invalid)
 }
+
+/// Captures a private non-Git attempt tree, including newly created files and
+/// baseline paths now deleted. Inventory is checked again after the copy.
+/// This does not establish writer quiescence; callers must establish it first.
+/// # Errors
+/// Refuses links, special files, Git metadata, excessive inventories, and changes.
+pub fn snapshot_attempt_tree(
+    source: &Path,
+    destination: &Path,
+    baseline_paths: &[String],
+) -> Result<SnapshotManifest, SnapshotError> {
+    let source = source.canonicalize().map_err(|_| SnapshotError::Io)?;
+    let before = tree_inventory(&source)?;
+    let mut paths = validate_paths(baseline_paths)?;
+    paths.extend(before.iter().cloned());
+    if paths.len() > PATH_LIMIT {
+        return Err(SnapshotError::Bounds);
+    }
+    let manifest = snapshot_paths(&source, destination, &paths.into_iter().collect::<Vec<_>>())?;
+    if tree_inventory(&source)? != before {
+        return Err(SnapshotError::Changed);
+    }
+    Ok(manifest)
+}
+fn tree_inventory(root: &Path) -> Result<BTreeSet<String>, SnapshotError> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut paths = BTreeSet::new();
+    let mut visited = 0usize;
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).map_err(|_| SnapshotError::Io)? {
+            let entry = entry.map_err(|_| SnapshotError::Io)?;
+            visited += 1;
+            if visited > PATH_LIMIT {
+                return Err(SnapshotError::Bounds);
+            }
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| SnapshotError::Invalid)?
+                .to_str()
+                .ok_or(SnapshotError::Invalid)?
+                .to_owned();
+            validate_paths(std::slice::from_ref(&relative))?;
+            let kind = entry.file_type().map_err(|_| SnapshotError::Io)?;
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file() {
+                paths.insert(relative);
+            } else {
+                return Err(SnapshotError::Unsupported);
+            }
+        }
+    }
+    Ok(paths)
+}

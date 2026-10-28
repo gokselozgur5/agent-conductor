@@ -136,3 +136,13 @@ Native writer admission moved from service to the runtime adapter factory withou
 introducing a plugin framework. Claude tool-envelope observations are parsed as
 adapter evidence only; they do not by themselves establish writer fencing or
 completion. The integrated workflow remains the next delivery priority.
+
+### Writer-to-verification integration
+
+A normally exited restricted file-tool writer can now be finalized into a
+source-bound verification state. The adapter checks its accepted capability
+profile; the service checks durable exit and current ownership, captures the
+private tree including new/deleted files, and binds the snapshot identity.
+Protocol-peer integration tests cover missing tool evidence refusal and successful
+source binding; they are not end-to-end native vendor acceptance. See the trust
+limits in [ADAPTER_CONFORMANCE.md](ADAPTER_CONFORMANCE.md).
