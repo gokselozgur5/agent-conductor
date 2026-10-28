@@ -1,0 +1,73 @@
+# SQLite transaction cancellation
+
+Every explicit store transaction now owns a SQLx `Transaction`. `BEGIN IMMEDIATE`
+retains writer serialization; dropping an unfinished transaction queues rollback
+before the shared writer can execute its next command. Helpers consume the
+transaction and commit only a successful result. Domain rules, schema version 15,
+audit ordering and idempotency keys are unchanged.
+
+## Reproduced defect and correction
+
+On base `d155ae9`, aborting a caller after a real SQLite write bypassed the manual
+result-based rollback helper. Uncommitted changes remained visible on the shared
+writer connection. This could poison subsequent operations; the tests do not
+claim that a reader connection observed those uncommitted rows.
+
+`crates/store/src/transaction_cancellation.rs` uses an update-hook barrier to pause
+the SQLite worker after the selected write, aborts and awaits the caller, then
+releases SQLite. It compares all application tables on the writer and a separate
+reader to their initial contents, and successfully retries the real operation.
+The second batch barrier also verifies rollback of earlier batches.
+
+| Transaction owner | Cancellation barrier | Old manual owner |
+| --- | --- | --- |
+| `create_project` | project insertion | Partial state reproduced |
+| `create_task` | task insertion | Partial state reproduced |
+| `persist` | project insertion | Partial state reproduced |
+| `persist_sequence` | second project insertion | Partial state reproduced |
+| `start_runtime` | generation update | Partial state reproduced |
+| `mutate_effect` (through claim) | effect update | Partial state reproduced |
+| `publish_event` | delivery insertion after event | Partial state reproduced |
+| `publish_repository_observation` | observation update after event/fanout | Partial state reproduced |
+| `claim_event_delivery` | delivery update | Partial state reproduced |
+| `acknowledge_event_with_state` | delivery update after consumer state | Partial state reproduced |
+| `enqueue_workflow` | wake insertion after dispatch | Partial state reproduced |
+| `claim_workflow` | dispatch update | Partial state reproduced |
+
+All twelve corrected owners pass the same cancellation controls. Execution
+preparation and execution update already owned transactions; new controls verify
+both at their execution write. Reassignment already has its own deterministic
+cancellation regression. This covers all fifteen explicit transaction owners
+found in the store source. Shared-owner controls do not independently inject
+cancellation into every domain branch, and single-statement autocommit writes
+are outside this inventory.
+
+## Commit and failure boundaries
+
+Cancellation is not a promise that an operation never happened. Once COMMIT is
+issued, SQLite may finish it after the caller disappears. Two commit-hook tests
+cancel persistence and event publication while COMMIT is executing, permit the
+commit, verify writer/reader agreement and require the retry to return Replayed
+or Duplicate without changing any table. Callers must reconcile uncertain
+responses using existing idempotency identities, not create a new operation.
+
+Existing semantic tests retain audit-failure rollback, version conflicts,
+idempotency collisions and successful commits. The cancellation probes establish
+Tokio task-abort behavior on this SQLite/SQLx implementation; they are not power
+loss, disk-full, OS-crash, remote-agent fencing or full-product soak evidence.
+
+## Validation provenance
+
+Private evidence is under `reviews/agent-conductor-runtime-20261028/`.
+`transactions-before-v4.log` records twelve partial-state failures on the old
+production source; `transactions-workspace-v2.log` records the corrected twelve
+controls and workspace suite. The store crate was cleaned and recompiled between
+variants. Final local validation passes 238 workspace tests, formatting and strict Clippy,
+including the execution and lost-response controls.
+
+Earlier failed harness runs are retained: v1 omitted fixture agent foreign keys;
+v2 assumed all tables had rowid; v3 proved eleven failures but its ACK hook targeted
+a WITHOUT ROWID table, for which SQLite does not call the update hook. The final
+ACK barrier targets the delivery update after consumer state. These harness
+failures are not counted as product reproductions. No acceptance condition was
+weakened to hide them.

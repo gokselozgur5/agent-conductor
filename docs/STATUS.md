@@ -53,7 +53,11 @@ Explicit registered-worker reassignment now retains the immutable plan and prior
 evidence through an atomic successor/queue/audit record. A real interrupted local
 workflow completed under a distinct registered successor with independent review
 in 80.47 seconds; 222 tests and strict lint pass. Cancellation during assignment
-also rolls back; issue #43 tracks the broader manual-transaction audit. See [WORKFLOW_REASSIGNMENT.md](WORKFLOW_REASSIGNMENT.md).
+also rolls back. See [WORKFLOW_REASSIGNMENT.md](WORKFLOW_REASSIGNMENT.md).
+All twelve remaining manual SQLite transaction owners now use rollback-on-drop.
+Deterministic before/after controls reproduce and correct partial writer state;
+execution-owner and lost-COMMIT-response controls cover the important boundaries.
+See [STORE_TRANSACTIONS.md](STORE_TRANSACTIONS.md) for the audit and evidence.
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, outer advisory
 discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,

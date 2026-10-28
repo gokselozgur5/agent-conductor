@@ -7,7 +7,7 @@ use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use sqlx::{
-    Connection, Executor, SqliteConnection, SqlitePool,
+    Connection, SqliteConnection, SqlitePool,
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
@@ -17,6 +17,8 @@ use tokio::sync::Mutex;
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 mod history;
+#[cfg(test)]
+mod transaction_cancellation;
 pub use history::AuditMetadata;
 mod workflow_dependencies;
 pub use workflow_dependencies::WorkflowDependency;
@@ -317,8 +319,8 @@ impl Store {
     }
 
     pub async fn create_project(&self, project: NewProject<'_>) -> Result<(), StoreError> {
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "INSERT INTO projects (id, canonical_path, filesystem_identity, git_common_dir_identity, created_at_ms) VALUES (?, ?, ?, ?, ?)",
         )
@@ -331,7 +333,7 @@ impl Store {
         .await
         .map(|_| ())
         .map_err(project_insert_error);
-        finish_transaction(&mut writer, result).await
+        finish_transaction(writer, result).await
     }
 
     pub async fn create_agent(&self, agent: NewAgent<'_>) -> Result<(), StoreError> {
@@ -380,8 +382,8 @@ impl Store {
     }
 
     pub async fn create_task(&self, task: NewTask<'_>) -> Result<(), StoreError> {
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "INSERT INTO tasks (id, project_id, objective, state, priority, version, authority_json, aggregate_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
         )
@@ -398,7 +400,7 @@ impl Store {
         .await
         .map(|_| ())
         .map_err(StoreError::from);
-        finish_transaction(&mut writer, result).await
+        finish_transaction(writer, result).await
     }
 
     pub async fn task(&self, task_id: &str) -> Result<Option<PersistedTask>, StoreError> {
@@ -473,11 +475,11 @@ impl Store {
     }
 
     pub async fn persist(&self, batch: &CommitBatch) -> Result<CommitResult, StoreError> {
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
 
         let result = persist_in_transaction(&mut writer, batch).await;
-        finish_transaction(&mut writer, result).await
+        finish_transaction(writer, result).await
     }
 
     /// Persists an ordered set of domain batches atomically. A late conflict or
@@ -488,8 +490,8 @@ impl Store {
         &self,
         batches: &[CommitBatch],
     ) -> Result<Vec<CommitResult>, StoreError> {
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             let mut results = Vec::with_capacity(batches.len());
             for batch in batches {
@@ -498,7 +500,7 @@ impl Store {
             Ok(results)
         }
         .await;
-        finish_transaction(&mut writer, result).await
+        finish_transaction(writer, result).await
     }
 
     /// Verifies the database and atomically begins a new daemon boot era.
@@ -508,8 +510,8 @@ impl Store {
     /// Refuses startup when SQLite reports corruption, dangling foreign keys,
     /// the runtime singleton is missing, or the generation cannot advance.
     pub async fn start_runtime(&self, started_at_ms: i64) -> Result<RuntimeStartup, StoreError> {
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             verify_integrity(&mut writer).await?;
             let generation = sqlx::query_scalar::<_, i64>(
@@ -553,7 +555,7 @@ impl Store {
             })
         }
         .await;
-        finish_transaction(&mut writer, result).await
+        finish_transaction(writer, result).await
     }
 
     /// Reads persisted state and reports structural contradictions.
@@ -835,22 +837,12 @@ fn task_from_row(row: (String, String, String, i64, String, String)) -> Persiste
 }
 
 async fn finish_transaction<T>(
-    connection: &mut SqliteConnection,
+    transaction: sqlx::Transaction<'_, sqlx::Sqlite>,
     result: Result<T, StoreError>,
 ) -> Result<T, StoreError> {
-    match result {
-        Ok(value) => match connection.execute("COMMIT").await {
-            Ok(_) => Ok(value),
-            Err(error) => {
-                let _ = connection.execute("ROLLBACK").await;
-                Err(StoreError::Database(error))
-            }
-        },
-        Err(error) => {
-            let _ = connection.execute("ROLLBACK").await;
-            Err(error)
-        }
-    }
+    let value = result?;
+    transaction.commit().await?;
+    Ok(value)
 }
 
 fn project_insert_error(error: sqlx::Error) -> StoreError {
