@@ -915,6 +915,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
     }
 
     async fn maintain(&self) -> Result<(), ErrorBody> {
+        self.recover_fenced_receipts().await.map_err(store_error)?;
         self.reconcile_expired()
             .await
             .map(|_| ())

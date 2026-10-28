@@ -10,12 +10,17 @@ pub fn authentication(kind: &str) -> BTreeMap<String, String> {
 }
 pub async fn serve(
     service: PersistentControlService,
+    recover: bool,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
     let worker = authentication("ANTHROPIC_API_KEY");
     let verifier = authentication("CODEX_HOME");
     loop {
         if *stop.borrow() {
+            return;
+        }
+        if recover && service.recover_interrupted_workflows().await.is_err() {
+            eprintln!("native recovery stopped: durable reconciliation failed");
             return;
         }
         tokio::select! {

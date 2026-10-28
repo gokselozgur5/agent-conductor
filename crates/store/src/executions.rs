@@ -89,6 +89,18 @@ impl Store {
             .fetch_all(&self.inner.readers).await?.into_iter().map(decode).collect()
     }
 
+    /// Lists blocked observations that may later acquire a durable wrapper receipt.
+    /// # Errors
+    /// Returns database/record errors.
+    pub async fn blocked_executions(&self) -> Result<Vec<ExecutionRecord>, StoreError> {
+        sqlx::query("SELECT * FROM executions WHERE state='blocked' ORDER BY effect_token")
+            .fetch_all(&self.inner.readers)
+            .await?
+            .into_iter()
+            .map(decode)
+            .collect()
+    }
+
     /// Whether any recorded execution lacks explicit fencing evidence.
     /// Exit status, blocked status and elapsed leases are not fencing evidence.
     /// # Errors
