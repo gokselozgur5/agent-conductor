@@ -131,3 +131,13 @@ terminal-scan coverage and expanded stale-owner negatives remain pending.
 Expired ownership is tested to publish no event. Started executions are selected
 in ordered pages of at most 16 per configured project per round, with a wrapping
 cursor so a busy early execution does not permanently hide later records. FR-7 and FR-8 are not complete.
+
+A real native workflow passed owned observation acceptance in75.91seconds:
+queued submission survived restart, pinned Claude created answer.txt, the watcher
+published its actual task/attempt/epoch/spawn correlation, and the separate
+subscribed consumer received one durable delivery. Checks and independent pinned
+Codex verification completed the task. Original project and approved outer policy
+remained unchanged. Evidence: private `owned-workspace-v2/receipt.json`.
+The first v1 probe refused a changed Claude symlink before model launch; v2 used
+the previously accepted retained2.1.311 binary. This proves delivery to the
+consumer queue, not automatic adapter wake or consumption acknowledgment.
