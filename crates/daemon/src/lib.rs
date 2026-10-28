@@ -21,6 +21,7 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
@@ -100,6 +101,7 @@ pub struct LocalServer<S> {
     read_timeout: Duration,
     write_timeout: Duration,
     max_response_bytes: usize,
+    maintenance_interval: Duration,
     retained_tasks: Arc<AtomicUsize>,
 }
 
@@ -163,8 +165,16 @@ where
             read_timeout,
             write_timeout,
             max_response_bytes,
+            maintenance_interval: MAINTENANCE_INTERVAL,
             retained_tasks: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    #[cfg(test)]
+    fn with_maintenance_interval(mut self, interval: Duration) -> Self {
+        assert!(!interval.is_zero(), "maintenance interval must be positive");
+        self.maintenance_interval = interval;
+        self
     }
 
     #[cfg(test)]
@@ -189,9 +199,22 @@ where
             read_timeout,
             write_timeout,
             max_response_bytes,
+            maintenance_interval,
             retained_tasks,
         } = self;
         let mut tasks = JoinSet::new();
+        let maintenance_service = Arc::clone(&service);
+        let maintenance = tokio::spawn(async move {
+            let start = tokio::time::Instant::now() + maintenance_interval;
+            let mut interval = tokio::time::interval_at(start, maintenance_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Err(error) = maintenance_service.maintain().await {
+                    warn!(?error.code, message = %error.message, "control maintenance failed");
+                }
+            }
+        });
         tokio::pin!(shutdown);
 
         loop {
@@ -232,6 +255,8 @@ where
         }
 
         drop(listener);
+        maintenance.abort();
+        let _ = maintenance.await;
         tasks.shutdown().await;
         retained_tasks.store(0, Ordering::Relaxed);
         Ok(())
@@ -347,7 +372,7 @@ mod tests {
 
     use agent_conductor_domain::{
         Actor, ActorId, ActorRole, AttemptId, Command, CommandKind, CorrelationId, IdempotencyKey,
-        LeaseStatus,
+        LeaseStatus, Task, TaskState,
     };
     use agent_conductor_store::Store;
     use conductor_protocol::{
@@ -765,6 +790,148 @@ mod tests {
                 .expect("daemon exits cleanly");
             assert!(!path.exists());
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn maintenance_requeues_expired_work_and_abandons_its_spawn_intent() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("conductor.sqlite3");
+        let path = directory.path().join("conductor.sock");
+        let store = Store::open(&database).await.expect("store opens");
+        let observer = store.clone();
+        let service = PersistentControlService::start(store, 100)
+            .await
+            .expect("runtime starts");
+        let server = LocalServer::bind(&path, service)
+            .expect("socket binds")
+            .with_maintenance_interval(Duration::from_millis(5));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        let requests = [
+            Request::RegisterProject {
+                actor_id: "operator".into(),
+                idempotency_key: "maintenance-project".into(),
+                id: "maintenance-project".into(),
+                path: directory.path().to_string_lossy().into_owned(),
+            },
+            Request::RegisterAgent {
+                actor_id: "operator".into(),
+                idempotency_key: "maintenance-worker".into(),
+                id: "maintenance-worker".into(),
+                adapter_kind: "fake".into(),
+                protocol_fingerprint: "v1".into(),
+                capability_hash: "sha256:maintenance".into(),
+                access_mode: "read_write".into(),
+            },
+            Request::CreateTask {
+                actor_id: "operator".into(),
+                idempotency_key: "maintenance-task".into(),
+                id: "maintenance-task".into(),
+                project_id: "maintenance-project".into(),
+                objective: "expire without manual reconciliation".into(),
+                priority: 0,
+                authority: serde_json::json!({}),
+                required_checks: vec![],
+            },
+        ];
+        for request in requests {
+            let envelope = RequestEnvelope::new(request);
+            assert!(matches!(
+                exchange(&path, &serde_json::to_vec(&envelope).expect("serialize"))
+                    .await
+                    .result,
+                ResponseResult::Ok(_)
+            ));
+        }
+
+        let ready = Command {
+            actor: Actor {
+                id: ActorId("operator".into()),
+                role: ActorRole::Operator,
+            },
+            expected_version: 0,
+            correlation_id: CorrelationId("maintenance-ready".into()),
+            idempotency_key: IdempotencyKey("maintenance-ready".into()),
+            reason: "ready for expiry test".into(),
+            kind: CommandKind::MarkReady,
+        };
+        let envelope = RequestEnvelope::new(Request::ApplyCommand {
+            task_id: "maintenance-task".into(),
+            command: ready,
+        });
+        assert!(matches!(
+            exchange(&path, &serde_json::to_vec(&envelope).expect("serialize"))
+                .await
+                .result,
+            ResponseResult::Ok(_)
+        ));
+
+        let claim = Command {
+            actor: Actor {
+                id: ActorId("operator".into()),
+                role: ActorRole::Operator,
+            },
+            expected_version: 1,
+            correlation_id: CorrelationId("maintenance-claim".into()),
+            idempotency_key: IdempotencyKey("maintenance-claim".into()),
+            reason: "claim briefly".into(),
+            kind: CommandKind::Claim {
+                attempt_id: AttemptId("maintenance-attempt".into()),
+                worker: ActorId("maintenance-worker".into()),
+                lease_duration_ms: 20,
+                worker_margin_ms: 5,
+                recovery_grace_ms: 10,
+            },
+        };
+        let envelope = RequestEnvelope::new(Request::ApplyCommand {
+            task_id: "maintenance-task".into(),
+            command: claim,
+        });
+        let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Ok(Response::CommandApplied(claimed)) = response.result else {
+            panic!("claim failed")
+        };
+        let effect_token = claimed
+            .effect_tokens
+            .first()
+            .expect("spawn effect token")
+            .clone();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let row = observer
+                    .task("maintenance-task")
+                    .await
+                    .expect("task reads")
+                    .expect("task exists");
+                let aggregate: Task =
+                    serde_json::from_str(&row.aggregate_json).expect("aggregate parses");
+                let effect = observer
+                    .effect(&effect_token)
+                    .await
+                    .expect("effect reads")
+                    .expect("effect exists");
+                if aggregate.state == TaskState::Ready
+                    && effect.status == agent_conductor_store::EffectStatus::Abandoned
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("maintenance converges without a manual command");
+
+        shutdown_tx.send(()).expect("shutdown sends");
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("shutdown is not blocked by maintenance")
+            .expect("daemon joins")
+            .expect("daemon stops");
     }
 
     #[tokio::test]
