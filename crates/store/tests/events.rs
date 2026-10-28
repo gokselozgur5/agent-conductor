@@ -44,6 +44,8 @@ fn event(id: &str, source: &str, generation: u32, causation_id: Option<&str>) ->
         topic: "task.changed".to_owned(),
         project_id: None,
         task_id: None,
+        attempt_id: None,
+        lease_epoch: None,
         path_scope: Some("/workspace/src".to_owned()),
         payload_json,
         created_at_ms: 100,
@@ -98,6 +100,39 @@ async fn duplicate_publish_replays_without_duplicate_delivery() {
         store.event_delivery_count("event-1").await.expect("count"),
         1
     );
+}
+
+#[tokio::test]
+async fn semantic_dedup_ignores_fresh_envelope_id_but_rejects_changed_content() {
+    let (_directory, store) = store_with_agents(&["source", "consumer"]).await;
+    store
+        .upsert_event_subscription(&subscription("sub-1", "consumer"))
+        .await
+        .expect("subscribe");
+    let original = event("event-1", "source", 0, None);
+    store
+        .publish_event(&original, &EventLimits::default())
+        .await
+        .expect("publish");
+
+    let mut fresh_envelope = original.clone();
+    fresh_envelope.id = "event-2".into();
+    assert_eq!(
+        store
+            .publish_event(&fresh_envelope, &EventLimits::default())
+            .await
+            .expect("semantic replay"),
+        PublishResult::Duplicate {
+            event_id: "event-1".into()
+        }
+    );
+
+    let mut changed = original;
+    changed.payload_json = r#"{"event":"changed"}"#.into();
+    assert!(matches!(
+        store.publish_event(&changed, &EventLimits::default()).await,
+        Err(EventStoreError::IdempotencyCollision)
+    ));
 }
 
 #[tokio::test]
@@ -218,6 +253,129 @@ async fn unacknowledged_delivery_replays_after_lease_expiry() {
         .expect("replayed delivery");
     assert_eq!(first.delivery_id, replay.delivery_id);
     assert_eq!(replay.attempts, 2);
+    assert_ne!(first.claim_token, replay.claim_token);
+}
+
+#[tokio::test]
+async fn stale_claim_token_and_expired_claim_cannot_ack_state() {
+    let (_directory, store) = store_with_agents(&["source", "consumer"]).await;
+    store
+        .upsert_event_subscription(&subscription("sub-1", "consumer"))
+        .await
+        .expect("subscribe");
+    let limits = EventLimits {
+        delivery_lease_ms: 10,
+        ..EventLimits::default()
+    };
+    store
+        .publish_event(&event("event-1", "source", 0, None), &limits)
+        .await
+        .expect("publish");
+    let first = store
+        .claim_event_delivery("consumer", 100, &limits)
+        .await
+        .expect("claim")
+        .expect("delivery");
+    let effect = ConsumerStateEffect {
+        namespace: "progress".into(),
+        key: "consumer".into(),
+        expected_version: None,
+        value_json: r#"{"stale":true}"#.into(),
+    };
+    assert!(matches!(
+        store
+            .acknowledge_event_with_state(
+                &first.delivery_id,
+                "consumer",
+                &first.claim_token,
+                &effect,
+                110,
+            )
+            .await,
+        Err(EventStoreError::DeliveryNotLeased)
+    ));
+    let second = store
+        .claim_event_delivery("consumer", 110, &limits)
+        .await
+        .expect("reclaim")
+        .expect("delivery");
+    assert!(matches!(
+        store
+            .acknowledge_event_with_state(
+                &first.delivery_id,
+                "consumer",
+                &first.claim_token,
+                &effect,
+                111,
+            )
+            .await,
+        Err(EventStoreError::DeliveryNotLeased)
+    ));
+    assert!(
+        store
+            .consumer_state("progress", "consumer")
+            .await
+            .expect("state")
+            .is_none()
+    );
+    store
+        .acknowledge_event_with_state(
+            &second.delivery_id,
+            "consumer",
+            &second.claim_token,
+            &effect,
+            111,
+        )
+        .await
+        .expect("current claim acks");
+}
+
+#[tokio::test]
+async fn event_age_expiry_rejects_ack_and_state_atomically() {
+    let (_directory, store) = store_with_agents(&["source", "consumer"]).await;
+    store
+        .upsert_event_subscription(&subscription("sub-1", "consumer"))
+        .await
+        .expect("subscribe");
+    let limits = EventLimits {
+        max_age_ms: 10,
+        delivery_lease_ms: 20,
+        ..EventLimits::default()
+    };
+    store
+        .publish_event(&event("event-1", "source", 0, None), &limits)
+        .await
+        .expect("publish");
+    let delivery = store
+        .claim_event_delivery("consumer", 100, &limits)
+        .await
+        .expect("claim")
+        .expect("delivery");
+    let effect = ConsumerStateEffect {
+        namespace: "progress".into(),
+        key: "consumer".into(),
+        expected_version: None,
+        value_json: r#"{"expired":true}"#.into(),
+    };
+    assert!(matches!(
+        store
+            .acknowledge_event_with_state(
+                &delivery.delivery_id,
+                "consumer",
+                &delivery.claim_token,
+                &effect,
+                110,
+            )
+            .await,
+        Err(EventStoreError::DeliveryNotLeased)
+    ));
+    assert!(
+        store
+            .consumer_state("progress", "consumer")
+            .await
+            .expect("state")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -246,7 +404,13 @@ async fn state_effect_and_ack_succeed_or_roll_back_together() {
 
     assert!(matches!(
         store
-            .acknowledge_event_with_state(&delivery.delivery_id, "intruder", &effect, 101)
+            .acknowledge_event_with_state(
+                &delivery.delivery_id,
+                "intruder",
+                &delivery.claim_token,
+                &effect,
+                101,
+            )
             .await,
         Err(EventStoreError::DeliveryNotLeased)
     ));
@@ -259,7 +423,13 @@ async fn state_effect_and_ack_succeed_or_roll_back_together() {
     );
 
     store
-        .acknowledge_event_with_state(&delivery.delivery_id, "consumer", &effect, 102)
+        .acknowledge_event_with_state(
+            &delivery.delivery_id,
+            "consumer",
+            &delivery.claim_token,
+            &effect,
+            102,
+        )
         .await
         .expect("atomic ack");
     assert_eq!(

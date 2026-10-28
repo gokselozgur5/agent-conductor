@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, Row, SqliteConnection};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::Store;
 
@@ -77,6 +78,8 @@ pub struct SemanticEvent {
     pub topic: String,
     pub project_id: Option<String>,
     pub task_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub lease_epoch: Option<u64>,
     pub path_scope: Option<String>,
     pub payload_json: String,
     pub created_at_ms: i64,
@@ -88,6 +91,7 @@ pub struct EventDelivery {
     pub delivery_id: String,
     pub event: SemanticEvent,
     pub attempts: u32,
+    pub claim_token: String,
     pub lease_expires_at_ms: i64,
 }
 
@@ -187,7 +191,7 @@ impl Store {
         let result = async {
             expire_stale_in_transaction(&mut writer, now_ms).await?;
             let row = sqlx::query(
-                "SELECT d.id, d.attempts, e.id, e.schema_version, e.idempotency_key, e.source_agent_id, e.source_session_id, e.correlation_id, e.causation_id, e.generation, e.topic, e.project_id, e.task_id, e.path_scope, e.payload_json, e.created_at_ms, e.max_retries FROM event_deliveries d JOIN semantic_events e ON e.id = d.event_id WHERE d.target_agent_id = ? AND ((d.status = 'pending' AND d.available_at_ms <= ?) OR (d.status = 'leased' AND d.lease_expires_at_ms <= ?)) AND e.expires_at_ms > ? AND d.attempts < e.max_retries ORDER BY e.created_at_ms, d.id LIMIT 1",
+                "SELECT d.id, d.attempts, e.id, e.schema_version, e.idempotency_key, e.source_agent_id, e.source_session_id, e.correlation_id, e.causation_id, e.generation, e.topic, e.project_id, e.task_id, e.attempt_id, e.lease_epoch, e.path_scope, e.payload_json, e.created_at_ms, e.max_retries FROM event_deliveries d JOIN semantic_events e ON e.id = d.event_id WHERE d.target_agent_id = ? AND ((d.status = 'pending' AND d.available_at_ms <= ?) OR (d.status = 'leased' AND d.lease_expires_at_ms <= ?)) AND e.expires_at_ms > ? AND d.attempts < e.max_retries ORDER BY e.created_at_ms, d.id LIMIT 1",
             )
             .bind(agent_id)
             .bind(now_ms)
@@ -197,14 +201,16 @@ impl Store {
             .await?;
             let Some(row) = row else { return Ok(None); };
             let delivery_id: String = row.try_get(0)?;
-            sqlx::query("UPDATE event_deliveries SET status = 'leased', attempts = attempts + 1, lease_expires_at_ms = ? WHERE id = ?")
+            let claim_token = Uuid::now_v7().to_string();
+            sqlx::query("UPDATE event_deliveries SET status = 'leased', attempts = attempts + 1, claim_token = ?, lease_expires_at_ms = ? WHERE id = ?")
+                .bind(&claim_token)
                 .bind(lease_expires_at_ms)
                 .bind(&delivery_id)
                 .execute(&mut *writer)
                 .await?;
             let prior_attempts: i64 = row.try_get(1)?;
             let attempts = u32::try_from(prior_attempts + 1).map_err(|_| EventStoreError::NumericRange)?;
-            Ok(Some(delivery_from_row(delivery_id, attempts, lease_expires_at_ms, &row)?))
+            Ok(Some(delivery_from_row(delivery_id, attempts, claim_token, lease_expires_at_ms, &row)?))
         }
         .await;
         finish_event_transaction(&mut writer, result).await
@@ -215,6 +221,7 @@ impl Store {
         &self,
         delivery_id: &str,
         consumer_agent_id: &str,
+        claim_token: &str,
         effect: &ConsumerStateEffect,
         now_ms: i64,
     ) -> Result<(), EventStoreError> {
@@ -224,6 +231,20 @@ impl Store {
         let mut writer = self.inner.writer.lock().await;
         writer.execute("BEGIN IMMEDIATE").await?;
         let result = async {
+            expire_stale_in_transaction(&mut writer, now_ms).await?;
+            let current_claim: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM event_deliveries d JOIN semantic_events e ON e.id = d.event_id WHERE d.id = ? AND d.target_agent_id = ? AND d.status = 'leased' AND d.claim_token = ? AND d.lease_expires_at_ms > ? AND e.expires_at_ms > ?",
+            )
+            .bind(delivery_id)
+            .bind(consumer_agent_id)
+            .bind(claim_token)
+            .bind(now_ms)
+            .bind(now_ms)
+            .fetch_optional(&mut *writer)
+            .await?;
+            if current_claim.is_none() {
+                return Err(EventStoreError::DeliveryNotLeased);
+            }
             let current = sqlx::query_scalar::<_, i64>(
                 "SELECT version FROM consumer_state WHERE namespace = ? AND state_key = ?",
             )
@@ -253,10 +274,11 @@ impl Store {
                 }
                 _ => return Err(EventStoreError::ConsumerStateConflict),
             }
-            let changed = sqlx::query("UPDATE event_deliveries SET status = 'acked', acked_at_ms = ?, lease_expires_at_ms = NULL WHERE id = ? AND target_agent_id = ? AND status = 'leased'")
+            let changed = sqlx::query("UPDATE event_deliveries SET status = 'acked', acked_at_ms = ?, claim_token = NULL, lease_expires_at_ms = NULL WHERE id = ? AND target_agent_id = ? AND status = 'leased' AND claim_token = ?")
                 .bind(now_ms)
                 .bind(delivery_id)
                 .bind(consumer_agent_id)
+                .bind(claim_token)
                 .execute(&mut *writer)
                 .await?;
             if changed.rows_affected() != 1 {
@@ -330,14 +352,16 @@ async fn publish_in_transaction(
     event: &SemanticEvent,
     limits: &EventLimits,
 ) -> Result<PublishResult, EventStoreError> {
-    if let Some(id) =
-        sqlx::query_scalar::<_, String>("SELECT id FROM semantic_events WHERE idempotency_key = ?")
-            .bind(&event.idempotency_key)
-            .fetch_optional(&mut *connection)
-            .await?
+    if let Some(row) = sqlx::query(
+        "SELECT id, schema_version, source_agent_id, source_session_id, correlation_id, causation_id, generation, topic, project_id, task_id, attempt_id, lease_epoch, path_scope, payload_json FROM semantic_events WHERE idempotency_key = ?",
+    )
+    .bind(&event.idempotency_key)
+    .fetch_optional(&mut *connection)
+    .await?
     {
-        if id == event.id {
-            return Ok(PublishResult::Duplicate { event_id: id });
+        let stored_id: String = row.try_get(0)?;
+        if event_matches_row(event, &row)? {
+            return Ok(PublishResult::Duplicate { event_id: stored_id });
         }
         return Err(EventStoreError::IdempotencyCollision);
     }
@@ -360,6 +384,11 @@ async fn publish_in_transaction(
         .created_at_ms
         .checked_add(limits.max_age_ms)
         .ok_or(EventStoreError::NumericRange)?;
+    let lease_epoch = event
+        .lease_epoch
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| EventStoreError::NumericRange)?;
     let subscriptions = sqlx::query_as::<_, (String, String)>(
         "SELECT id, agent_id FROM event_subscriptions WHERE active = 1 AND (topic_filter = ? OR (substr(topic_filter, -2) = '.*' AND ? LIKE substr(topic_filter, 1, length(topic_filter) - 1) || '%')) AND (project_id IS NULL OR project_id = ?) AND (path_prefix IS NULL OR ? LIKE path_prefix || '%') AND (echo_source = 1 OR agent_id <> ?) ORDER BY id",
     )
@@ -373,7 +402,7 @@ async fn publish_in_transaction(
     if subscriptions.len() > limits.max_fanout {
         return Err(EventStoreError::FanoutLimit);
     }
-    sqlx::query("INSERT INTO semantic_events (id, schema_version, idempotency_key, source_agent_id, source_session_id, correlation_id, causation_id, generation, topic, project_id, task_id, path_scope, payload_json, created_at_ms, expires_at_ms, max_retries) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO semantic_events (id, schema_version, idempotency_key, source_agent_id, source_session_id, correlation_id, causation_id, generation, topic, project_id, task_id, attempt_id, lease_epoch, path_scope, payload_json, created_at_ms, expires_at_ms, max_retries) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(&event.id)
         .bind(i64::from(event.schema_version))
         .bind(&event.idempotency_key)
@@ -385,6 +414,8 @@ async fn publish_in_transaction(
         .bind(&event.topic)
         .bind(&event.project_id)
         .bind(&event.task_id)
+        .bind(&event.attempt_id)
+        .bind(lease_epoch)
         .bind(&event.path_scope)
         .bind(&event.payload_json)
         .bind(event.created_at_ms)
@@ -417,7 +448,7 @@ async fn expire_stale_in_transaction(
         .bind(now_ms)
         .execute(&mut *connection)
         .await?;
-    sqlx::query("UPDATE event_deliveries SET status = 'stale', stale_reason = 'maximum queue age exceeded', lease_expires_at_ms = NULL WHERE status IN ('pending', 'leased') AND event_id IN (SELECT id FROM semantic_events WHERE expires_at_ms <= ?)")
+    sqlx::query("UPDATE event_deliveries SET status = 'stale', stale_reason = 'maximum queue age exceeded', claim_token = NULL, lease_expires_at_ms = NULL WHERE status IN ('pending', 'leased') AND event_id IN (SELECT id FROM semantic_events WHERE expires_at_ms <= ?)")
         .bind(now_ms)
         .execute(&mut *connection)
         .await?;
@@ -426,7 +457,7 @@ async fn expire_stale_in_transaction(
         .bind(now_ms)
         .execute(&mut *connection)
         .await?;
-    sqlx::query("UPDATE event_deliveries SET status = 'dead', stale_reason = 'maximum retries exceeded', lease_expires_at_ms = NULL WHERE status = 'leased' AND lease_expires_at_ms <= ? AND attempts >= (SELECT max_retries FROM semantic_events WHERE id = event_deliveries.event_id)")
+    sqlx::query("UPDATE event_deliveries SET status = 'dead', stale_reason = 'maximum retries exceeded', claim_token = NULL, lease_expires_at_ms = NULL WHERE status = 'leased' AND lease_expires_at_ms <= ? AND attempts >= (SELECT max_retries FROM semantic_events WHERE id = event_deliveries.event_id)")
         .bind(now_ms)
         .execute(&mut *connection)
         .await?;
@@ -436,6 +467,7 @@ async fn expire_stale_in_transaction(
 fn delivery_from_row(
     delivery_id: String,
     attempts: u32,
+    claim_token: String,
     lease_expires_at_ms: i64,
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<EventDelivery, EventStoreError> {
@@ -446,6 +478,7 @@ fn delivery_from_row(
         schema_version,
         delivery_id,
         attempts,
+        claim_token,
         lease_expires_at_ms,
         event: SemanticEvent {
             schema_version,
@@ -460,11 +493,41 @@ fn delivery_from_row(
             topic: row.try_get(10)?,
             project_id: row.try_get(11)?,
             task_id: row.try_get(12)?,
-            path_scope: row.try_get(13)?,
-            payload_json: row.try_get(14)?,
-            created_at_ms: row.try_get(15)?,
+            attempt_id: row.try_get(13)?,
+            lease_epoch: row
+                .try_get::<Option<i64>, _>(14)?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| EventStoreError::NumericRange)?,
+            path_scope: row.try_get(15)?,
+            payload_json: row.try_get(16)?,
+            created_at_ms: row.try_get(17)?,
         },
     })
+}
+
+fn event_matches_row(
+    event: &SemanticEvent,
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<bool, EventStoreError> {
+    let lease_epoch = row
+        .try_get::<Option<i64>, _>(11)?
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| EventStoreError::NumericRange)?;
+    Ok(i64::from(event.schema_version) == row.try_get::<i64, _>(1)?
+        && event.source_agent_id == row.try_get::<String, _>(2)?
+        && event.source_session_id == row.try_get::<String, _>(3)?
+        && event.correlation_id == row.try_get::<String, _>(4)?
+        && event.causation_id == row.try_get::<Option<String>, _>(5)?
+        && i64::from(event.generation) == row.try_get::<i64, _>(6)?
+        && event.topic == row.try_get::<String, _>(7)?
+        && event.project_id == row.try_get::<Option<String>, _>(8)?
+        && event.task_id == row.try_get::<Option<String>, _>(9)?
+        && event.attempt_id == row.try_get::<Option<String>, _>(10)?
+        && event.lease_epoch == lease_epoch
+        && event.path_scope == row.try_get::<Option<String>, _>(12)?
+        && event.payload_json == row.try_get::<String, _>(13)?)
 }
 
 async fn finish_event_transaction<T>(
