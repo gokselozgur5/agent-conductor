@@ -2,6 +2,11 @@
 
 ## Current result
 
+A continuous isolated control-plane endurance harness exercises real lifecycle,
+event deduplication, stale epochs, board/SQLite correspondence and resource
+budgets. [CONTROL_PLANE_SOAK.md](CONTROL_PLANE_SOAK.md) defines its evidence and
+limits; it never marks full native/v1 soak acceptance complete.
+
 Committed event deliveries and workflow admission now wake the sequential
 dispatcher through coalesced hints. SQLite still decides eligibility and ownership;
 a periodic fallback remains. See [WAKE_SCHEDULING.md](WAKE_SCHEDULING.md) for
