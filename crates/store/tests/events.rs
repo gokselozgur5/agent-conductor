@@ -538,3 +538,194 @@ async fn hook_baseline_and_deliveries_commit_together_or_not_at_all() {
         Err(EventStoreError::ConsumerStateConflict)
     ));
 }
+
+#[tokio::test]
+async fn subscribed_workflow_wake_is_atomic_once_only_and_survives_restart() {
+    let (_directory, store) = store_with_agents(&["source", "next:worker", "wrong"]).await;
+    let boot = store.start_runtime(1).await.unwrap().boot_generation;
+    store
+        .upsert_event_subscription(&subscription("wake", "next:worker"))
+        .await
+        .unwrap();
+    let plan = r#"{"wake_subscription":"wake"}"#;
+    assert!(store.enqueue_workflow("wrong", plan, 2).await.is_err());
+    assert!(store.workflows().await.unwrap().is_empty());
+    store.enqueue_workflow("next", plan, 2).await.unwrap();
+    store.enqueue_workflow("next", plan, 3).await.unwrap();
+    assert!(store.claim_workflow(boot, 100).await.unwrap().is_none());
+    let limits = EventLimits::default();
+    store
+        .publish_event(&event("self", "next:worker", 0, None), &limits)
+        .await
+        .unwrap();
+    assert!(store.claim_workflow(boot, 100).await.unwrap().is_none());
+    store
+        .publish_event(&event("external", "source", 0, None), &limits)
+        .await
+        .unwrap();
+    let (left, right) = tokio::join!(
+        store.claim_workflow(boot, 101),
+        store.claim_workflow(boot, 101)
+    );
+    assert_eq!(
+        usize::from(left.unwrap().is_some()) + usize::from(right.unwrap().is_some()),
+        1
+    );
+    let trigger = store.workflow_trigger("next").await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_str(&trigger).unwrap();
+    assert_eq!(value["id"], "external");
+    assert_eq!(value["correlation_id"], "correlation-1");
+    assert!(
+        store
+            .claim_event_delivery("next:worker", 102, &limits)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let restarted = store.start_runtime(103).await.unwrap().boot_generation;
+    store
+        .recover_workflow_dispatch(restarted, 104)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .claim_workflow(restarted, 105)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store.requeue_workflow("next", 1, 106).await.unwrap();
+    assert!(
+        store
+            .claim_workflow(restarted, 107)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store.workflow_trigger("next").await.unwrap().unwrap(),
+        trigger
+    );
+}
+
+#[tokio::test]
+async fn stale_or_exhausted_events_do_not_wake_or_block_unrelated_work() {
+    let (_directory, store) = store_with_agents(&["source", "next:worker"]).await;
+    let boot = store.start_runtime(1).await.unwrap().boot_generation;
+    store
+        .upsert_event_subscription(&subscription("wake", "next:worker"))
+        .await
+        .unwrap();
+    store
+        .enqueue_workflow("next", r#"{"wake_subscription":"wake"}"#, 2)
+        .await
+        .unwrap();
+    let limits = EventLimits {
+        max_age_ms: 10,
+        max_retries: 1,
+        ..EventLimits::default()
+    };
+    store
+        .publish_event(&event("old", "source", 0, None), &limits)
+        .await
+        .unwrap();
+    assert!(store.claim_workflow(boot, 110).await.unwrap().is_none());
+    let mut fresh = event("exhausted", "source", 0, None);
+    fresh.created_at_ms = 111;
+    store.publish_event(&fresh, &limits).await.unwrap();
+    store
+        .claim_event_delivery("next:worker", 111, &limits)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(store.claim_workflow(boot, 112).await.unwrap().is_none());
+    store.enqueue_workflow("ordinary", "{}", 113).await.unwrap();
+    assert_eq!(
+        store
+            .claim_workflow(boot, 114)
+            .await
+            .unwrap()
+            .unwrap()
+            .task_id,
+        "ordinary"
+    );
+    assert!(store.workflow_trigger("next").await.unwrap().is_none());
+    assert!(
+        store
+            .workflows()
+            .await
+            .unwrap()
+            .iter()
+            .find(|w| w.task_id == "next")
+            .unwrap()
+            .waiting_for_event
+    );
+}
+
+#[tokio::test]
+async fn wake_generation_limit_and_failed_claim_preserve_pending_delivery() {
+    use sqlx::Connection;
+    let (directory, store) = store_with_agents(&["source", "next:worker"]).await;
+    let boot = store.start_runtime(1).await.unwrap().boot_generation;
+    let limits = EventLimits::default();
+    for generation in 0..8 {
+        let parent = (generation > 0).then(|| format!("chain-{}", generation - 1));
+        store
+            .publish_event(
+                &event(
+                    &format!("chain-{generation}"),
+                    "source",
+                    generation,
+                    parent.as_deref(),
+                ),
+                &limits,
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .upsert_event_subscription(&subscription("wake", "next:worker"))
+        .await
+        .unwrap();
+    store
+        .enqueue_workflow("next", r#"{"wake_subscription":"wake"}"#, 2)
+        .await
+        .unwrap();
+    store
+        .publish_event(&event("chain-8", "source", 8, Some("chain-7")), &limits)
+        .await
+        .unwrap();
+    assert!(store.claim_workflow(boot, 101).await.unwrap().is_none());
+    store
+        .publish_event(&event("eligible", "source", 0, None), &limits)
+        .await
+        .unwrap();
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite://{}",
+        directory.path().join("events.sqlite").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER fail_wake BEFORE UPDATE OF status ON workflow_dispatch WHEN NEW.status='running' BEGIN SELECT RAISE(ABORT,'injected'); END").execute(&mut db).await.unwrap();
+    assert!(store.claim_workflow(boot, 102).await.is_err());
+    assert!(store.workflow_trigger("next").await.unwrap().is_none());
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM event_deliveries WHERE event_id='eligible'")
+            .fetch_one(&mut db)
+            .await
+            .unwrap();
+    assert_eq!(status, "pending");
+    sqlx::query("DROP TRIGGER fail_wake")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    assert!(store.claim_workflow(boot, 103).await.unwrap().is_some());
+    assert!(
+        store
+            .workflow_trigger("next")
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("eligible")
+    );
+}

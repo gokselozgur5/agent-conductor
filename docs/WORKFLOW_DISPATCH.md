@@ -100,3 +100,57 @@ independent review still required. The durable one-retry limit survives restart.
 Further recovery requires explicit operator continuation. A crash during receipt
 publication can leave a pending file or a two-link receipt; these conservatively
 require operator investigation and are never automatically treated as fenced.
+
+## One subscribed event can admit an approved workflow
+
+An optional `wake_subscription` field names an existing active subscription for
+`TASK_ID:worker`. Register that worker with the plan's exact adapter kind,
+conformance fingerprint, executable digest and `read_write` access, then register
+a non-echo subscription with the desired topic/project/path filters. Submit the
+otherwise unchanged native plan with, for example:
+
+```json
+"wake_subscription": "consumer-input-ready"
+```
+
+Submission authorizes one invocation of that exact plan when an eligible event
+arrives. The dispatcher must be enabled. Until then, CLI queue output exposes
+`waiting_for_event: true`, and the board labels the entry as waiting for a
+subscribed event. Waiting plans count toward the existing 256-plan capacity but
+do not prevent an unrelated eligible plan from being selected.
+
+Only pending, available, unexpired deliveries below their retry limit and causal
+generation8 are eligible. Source-self deliveries cannot admit a wake. Trigger
+context is limited to64KiB. Concurrency remains one running dispatch; plan/task
+identity and the existing lease/attempt rules prevent duplicate workers. No
+additional plan, subscription, model budget or authority is inferred from an event.
+
+Delivery acknowledgment, retained trigger and dispatch claim commit together.
+Acknowledgment means durable admission, not task acceptance. A crash after claim
+still requires the existing recovery/fencing rules. The trigger is retained across
+explicit continuation and included as labelled untrusted context in the writer's
+resume packet. Private-workspace events inherit its correlation, parent event ID
+and next causal generation. Direct one-shot launch refuses a gated plan without
+its durable wake admission. Required checks and independent verification are
+unchanged; a consumed event never marks a task completed.
+
+Storage regressions cover admission rollback for wrong subscriptions, no-event
+and source-self refusal, concurrent claims, once-only delivery consumption,
+restart/continuation context, expired/leased delivery refusal and queue progress.
+Real native acceptance and exact published CI are tracked separately.
+
+The real `wake-workflow-v1` probe observed zero executions before its event,
+then one native writer after duplicate publication of the same trigger. Its
+answer.txt event inherited correlation and generation1 with the original event
+as cause. Required checks passed, but the first independent verifier stopped
+without a verdict; the former generic diagnostic does not establish its cause.
+The task remained verifying. Retained-work continuation preserved the trigger,
+created a new epoch and completed through independent verification in83.27seconds.
+Evidence: private `wake-workflow-v1/initial-failure.json` and
+`continuation-receipt.json`. No initial failure was rewritten as success.
+
+Subsequent source retains trigger context for the reviewer alongside check
+receipts; that final context-preservation adjustment is source-inspected and
+covered by workspace checks, not a separate native run. Dispatch now exposes
+only allowlisted fixed verifier failure reasons; arbitrary error/vendor text
+remains hidden. The board wait label has not yet received a new browser acceptance.

@@ -238,11 +238,19 @@ impl<C: Clock> PersistentControlService<C> {
             }
             _ => return Err(invalid("owned baseline identity mismatch or missing")),
         };
+        let trigger = self
+            .store
+            .workflow_trigger(&packet.contract.task_id)
+            .await?
+            .map(|text| serde_json::from_str::<serde_json::Value>(&text))
+            .transpose()
+            .map_err(|_| invalid("invalid workflow trigger"))?;
         for event in &mut events {
             event
                 .source_session_id
                 .clone_from(&packet.contract.attempt_id);
             event.correlation_id = token.into();
+            inherit_trigger(event, trigger.as_ref())?;
             event.task_id = Some(packet.contract.task_id.clone());
             event.attempt_id = Some(packet.contract.attempt_id.clone());
             event.lease_epoch = Some(packet.contract.lease_epoch);
@@ -318,6 +326,32 @@ impl<C: Clock> PersistentControlService<C> {
             .map_err(|_| invalid("watch publication failed"))?;
         Ok(events.len())
     }
+}
+fn inherit_trigger(
+    event: &mut SemanticEvent,
+    trigger: Option<&serde_json::Value>,
+) -> Result<(), StoreError> {
+    if let Some(trigger) = trigger {
+        event.correlation_id = trigger["correlation_id"]
+            .as_str()
+            .ok_or_else(|| invalid("trigger correlation absent"))?
+            .into();
+        event.causation_id = Some(
+            trigger["id"]
+                .as_str()
+                .ok_or_else(|| invalid("trigger identity absent"))?
+                .into(),
+        );
+        event.generation = u32::try_from(
+            trigger["generation"]
+                .as_u64()
+                .ok_or_else(|| invalid("trigger generation absent"))?,
+        )
+        .map_err(|_| invalid("trigger generation overflow"))?
+        .checked_add(1)
+        .ok_or_else(|| invalid("trigger generation overflow"))?;
+    }
+    Ok(())
 }
 fn invalid(message: &str) -> StoreError {
     StoreError::Integrity(message.into())
