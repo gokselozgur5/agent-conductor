@@ -36,6 +36,7 @@ mod checkpoint;
 mod clock;
 #[cfg(unix)]
 mod instruction_policy;
+mod inventory;
 #[cfg(unix)]
 mod repository_watch;
 #[cfg(unix)]
@@ -769,6 +770,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     .ok_or_else(not_found)?;
                 Ok(Response::Task(Self::task_response(row)?))
             }
+            Request::Inventory { resource, after } => self.inventory(resource, after).await,
             Request::ListTaskPage { project_id, after } => {
                 if after.as_ref().is_some_and(String::is_empty) {
                     return Err(ErrorBody::new(

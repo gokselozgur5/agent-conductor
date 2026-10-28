@@ -15,6 +15,7 @@ const text = (tag, value, className) => {
 };
 function disconnect() {
   token = '';
+  clearInventory();
   closeHistory();
   closeCheckpoint();
   closeReassignment();
@@ -53,6 +54,9 @@ async function refresh() {
     el('connection').textContent = `Connected · ${new Date().toLocaleTimeString()}`;
     el('login').hidden = true;
     el('toolbar').hidden = false;
+    const firstInventory = el('inventory').hidden;
+    el('inventory').hidden = false;
+    if (firstInventory) loadInventory();
     el('dispatch').hidden = false;
     const healthResponse = await fetch('/api/health', {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
     if (currentToken !== token) return;
@@ -366,3 +370,54 @@ el('reassignment-submit').addEventListener('click',async()=>{
   }catch(_){if(currentToken===token&&generation===reassignmentGeneration)el('message').textContent='Reassignment outcome unknown. Refresh before retrying.';}
   finally{el('reassignment-submit').disabled=false;}
 });
+
+let inventoryRevision = 0;
+let inventoryNext = null;
+function clearInventory() {
+  inventoryRevision++;
+  inventoryNext = null;
+  el('inventory').hidden = true;
+  el('inventory-entries').replaceChildren();
+  el('inventory-message').textContent = '';
+  el('inventory-next').hidden = true;
+}
+async function loadInventory(after = null) {
+  const revision = ++inventoryRevision;
+  const currentToken = token;
+  const resource = el('inventory-resource').value;
+  inventoryNext = null;
+  el('inventory-next').hidden = true;
+  el('inventory-entries').replaceChildren();
+  if (!currentToken) return;
+  el('inventory-message').textContent = 'Loading…';
+  const params = new URLSearchParams({resource});
+  if (after !== null) params.set('after', after);
+  try {
+    const response = await fetch('/api/inventory?' + params, {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (revision !== inventoryRevision || currentToken !== token) return;
+    if (response.status === 401) { disconnect(); return; }
+    if (!response.ok) throw new Error(`Inventory unavailable (${response.status}).`);
+    const data = await response.json();
+    if (revision !== inventoryRevision || currentToken !== token) return;
+    if (data.type !== 'inventory' || data.resource !== resource || !Array.isArray(data.entries)) throw new Error('Unexpected inventory response.');
+    el('inventory-entries').replaceChildren(...data.entries.map(entry => {
+      const card = text('article', '', 'task');
+      card.append(text('h3', entry.id));
+      const details = text('dl', '', 'details');
+      for (const [name, value] of Object.entries(entry)) {
+        if (name === 'id') continue;
+        details.append(text('dt', name.replaceAll('_', ' ')), text('dd', value === null ? '—' : String(value)));
+      }
+      card.append(details);
+      return card;
+    }));
+    inventoryNext = data.next_after;
+    el('inventory-next').hidden = !inventoryNext;
+    el('inventory-message').textContent = `${data.entries.length} ${resource} on this page · Snapshot ${new Date().toLocaleTimeString()}${inventoryNext ? ' · more available' : ''}`;
+  } catch (error) {
+    if (revision === inventoryRevision && currentToken === token) el('inventory-message').textContent = error.message;
+  }
+}
+el('inventory-resource').addEventListener('change', () => loadInventory());
+el('inventory-first').addEventListener('click', () => loadInventory());
+el('inventory-next').addEventListener('click', () => { if (inventoryNext) loadInventory(inventoryNext); });

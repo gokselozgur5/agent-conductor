@@ -47,6 +47,10 @@ impl RequestEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    Inventory {
+        resource: InventoryResource,
+        after: Option<String>,
+    },
     Health,
     CheckInvariants,
     SubmitWorkflow {
@@ -180,6 +184,11 @@ pub enum ResponseResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
+    Inventory {
+        resource: InventoryResource,
+        entries: Vec<Value>,
+        next_after: Option<String>,
+    },
     WorkflowQueued {
         task_id: String,
     },
@@ -555,4 +564,15 @@ mod tests {
             assert_eq!(decoded, response);
         }
     }
+}
+
+/// Bounded, read-only operator metadata collections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryResource {
+    Projects,
+    Agents,
+    Events,
+    Subscriptions,
+    Deliveries,
 }
