@@ -22,8 +22,16 @@ Task lists use bounded pages after the required synthetic scale exposed an
 all-list response failure; see [TASK_PAGINATION.md](TASK_PAGINATION.md).
 Controlled cancellation now confirms group absence before reporting a stop; see
 [PROCESS_STOP.md](PROCESS_STOP.md) for the observed race and refusal boundary.
+Explicit dependencies now gate dispatch on independent completed acceptance and
+can seed one successor from a selected accepted predecessor tree. Frozen source
+binding and any wake acknowledgement share one transaction. Read-only reviewer
+bundles include the starting manifest to verify preservation requirements.
+A real two-task Claude/checks/Codex chain passed in 123.56 seconds, including
+restart and a changed-input refusal before worker creation. Local validation
+passed 195 tests and strict lint/build. See
+[WORKFLOW_DEPENDENCIES.md](WORKFLOW_DEPENDENCIES.md) for limits and evidence.
 The working local workflow is not full v1 acceptance. Remaining work includes
-broader project/agent/event/checkpoint visibility, task dependencies, outer advisory
+broader project/agent/event/checkpoint visibility, outer advisory
 discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,
 load/restore/redaction validation and seven-day soak. Issue #20 retains an
 unresolved historical supervision deadline; do not infer a cause from green tests.

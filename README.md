@@ -26,7 +26,7 @@ preparing plans with accepted adapter pins, event-triggered tasks and restart.
 The Rust runtime supports durable task/lease state, private dirty Git snapshots,
 pinned native Claude writers, independent Codex/Claude review, macOS isolated
 checks, retained-work continuation, attributed repository events and subscribed
-workflow wake admission. The authenticated local board submits plans and projects
+workflow wake admission, and [verified predecessor handoff](docs/WORKFLOW_DEPENDENCIES.md). The authenticated local board submits plans and projects
 the same state as the CLI. Workers cannot complete or verify their own tasks.
 
 The local socket is privileged operator access. Native file-only writer fencing
