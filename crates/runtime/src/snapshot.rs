@@ -216,6 +216,13 @@ fn entry(path: &str, content: Option<&(Vec<u8>, bool)>) -> SnapshotEntry {
     }
 }
 fn read_source(root: &File, path: &str) -> Result<Option<(Vec<u8>, bool)>, SnapshotError> {
+    read_source_bounded(root, path, FILE_LIMIT)
+}
+pub(crate) fn read_source_bounded(
+    root: &File,
+    path: &str,
+    limit: u64,
+) -> Result<Option<(Vec<u8>, bool)>, SnapshotError> {
     let mut directory = root.try_clone().map_err(|_| SnapshotError::Io)?;
     let components: Vec<_> = path.split('/').collect();
     for (index, component) in components.iter().enumerate() {
@@ -243,15 +250,15 @@ fn read_source(root: &File, path: &str) -> Result<Option<(Vec<u8>, bool)>, Snaps
         if !before.is_file() || before.nlink() != 1 {
             return Err(SnapshotError::Unsupported);
         }
-        if before.len() > FILE_LIMIT {
+        if before.len() > limit {
             return Err(SnapshotError::Bounds);
         }
         let mut bytes = Vec::new();
         (&file)
-            .take(FILE_LIMIT + 1)
+            .take(limit + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| SnapshotError::Io)?;
-        if bytes.len() as u64 > FILE_LIMIT {
+        if bytes.len() as u64 > limit {
             return Err(SnapshotError::Bounds);
         }
         let after = file.metadata().map_err(|_| SnapshotError::Io)?;

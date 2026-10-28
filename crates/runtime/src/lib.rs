@@ -52,3 +52,8 @@ pub use checks::*;
 mod terminal_receipt;
 #[cfg(unix)]
 pub use terminal_receipt::*;
+
+#[cfg(unix)]
+mod instructions;
+#[cfg(unix)]
+pub use instructions::*;

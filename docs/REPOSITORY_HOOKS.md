@@ -86,3 +86,21 @@ This does not establish the cause of the earlier socket-permit timeout.
 The final default-parallel full workspace run passed all 166 tests after the
 readiness correction (`hooks-workspace-readiness.log`); strict Clippy, formatting
 and credential/media scans passed. Exact-head remote CI is still required.
+
+## Instruction boundary in progress
+
+The runtime now reads operator-pinned instruction files before wrapper ACK and
+release, rather than echoing unverified hashes. Every renewal rechecks the pins;
+a mismatch or unavailable source stops the worker with
+`instruction_changed_or_unavailable`. Native command construction includes only
+verified UTF-8 texts in frozen order. Files are limited to 64 KiB each and 256 KiB in
+aggregate; missing files, symlinks, hardlinks, special files and hash mismatch
+are refused. This currently supports workspace-contained pins only.
+
+Regressions demonstrate refusal before ACK/release, a live worker stopped after
+instruction replacement, rejected bounded/file-type/content cases, ordered prompt
+text and debug redaction. These are synthetic local process/command tests, not
+new native model conformance runs. Native workflow plan construction still emits
+an empty pin list; operator-approved source discovery/staging, outer-workspace
+sources, task-level invalidation and continuation policy are not yet connected.
+The runtime boundary alone does not complete instruction-change handling.

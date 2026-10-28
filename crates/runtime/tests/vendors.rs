@@ -110,3 +110,24 @@ fn writer_admission_is_enforced_by_the_adapter_boundary() {
         }
     }
 }
+
+#[test]
+fn instruction_prompt_uses_only_verified_text_in_frozen_order() {
+    use conductor_runtime::InstructionPin;
+    use sha2::{Digest, Sha256};
+    let (_directory, pin, mut packet) = fixture(AdapterKind::Claude);
+    for name in ["outer-policy", "project-policy"] {
+        let path = packet.contract.workspace.join(name);
+        fs::write(&path, name).unwrap();
+        packet.contract.instructions.push(InstructionPin {
+            path,
+            sha256: format!("{:x}", Sha256::digest(name.as_bytes())),
+        });
+    }
+    let spec = native_vendor_command(&pin, &packet, BTreeMap::new()).unwrap();
+    let prompt = spec.arguments.last().unwrap();
+    assert!(prompt.contains("[\"outer-policy\",\"project-policy\"]"));
+    assert!(!format!("{spec:?}").contains("outer-policy"));
+    fs::write(&packet.contract.instructions[0].path, "replacement").unwrap();
+    assert!(native_vendor_command(&pin, &packet, BTreeMap::new()).is_err());
+}
