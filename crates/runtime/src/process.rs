@@ -143,21 +143,24 @@ pub async fn run_process_captured(
     match outcome {
         Ok(()) => {}
         Err(error) => {
-            group.fence()?;
+            group.stop_owned_group().await?;
             child.wait().await?;
+            group.confirm_absent().await?;
             return Err(error);
         }
     }
     let status = tokio::select! {
         result = child.wait() => result?,
         () = tokio::time::sleep_until(deadline) => {
-            group.fence()?;
+            group.stop_owned_group().await?;
             child.wait().await?;
+            group.confirm_absent().await?;
             return Err(ProcessError::Timeout);
         },
         _ = cancellation.changed() => {
-            group.fence()?;
+            group.stop_owned_group().await?;
             child.wait().await?;
+            group.confirm_absent().await?;
             return Err(ProcessError::Cancelled);
         },
     };
@@ -175,6 +178,39 @@ struct ProcessGroup {
     armed: bool,
 }
 impl ProcessGroup {
+    // Best-effort repeated signalling while the unreaped leader still pins the
+    // group identity. A fork concurrent with one signal may survive that pass.
+    // These retries are not stop evidence; confirm_absent is still mandatory.
+    async fn stop_owned_group(&mut self) -> Result<(), ProcessError> {
+        self.fence()?;
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            // macOS can return EPERM on retries before the leader is reaped.
+            // These are cleanup retries only;
+            // errors cannot establish absence and the final probe decides.
+            let _ = self.fence();
+        }
+        Ok(())
+    }
+
+    // A successful group signal plus a reaped leader does not establish that
+    // every group member has disappeared. Never send another signal after the
+    // leader is reaped: its numeric identity may have been reused. Signal zero
+    // only observes; reuse can cause a conservative refusal, not a foreign kill.
+    async fn confirm_absent(&self) -> Result<(), ProcessError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        loop {
+            match killpg(self.pid, None) {
+                Err(Errno::ESRCH) => return Ok(()),
+                Ok(()) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Ok(()) => return Err(ProcessError::Fence(Errno::EBUSY)),
+                Err(error) => return Err(ProcessError::Fence(error)),
+            }
+        }
+    }
+
     fn fence(&mut self) -> Result<(), ProcessError> {
         match killpg(self.pid, Signal::SIGKILL) {
             Ok(()) | Err(Errno::ESRCH) => {
@@ -206,4 +242,33 @@ async fn bounded_read(
         return Err(ProcessError::OutputLimit);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    async fn residual_live_group_is_not_a_confirmed_stop() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("5").kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        let mut child = command.spawn().unwrap();
+        let group = ProcessGroup {
+            pid: Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap()),
+            armed: false,
+        };
+        let result = group.confirm_absent().await;
+        let still_running = child.try_wait().unwrap().is_none();
+        // Cleanup while the direct child is still owned; this is not recovery
+        // or signalling a numeric identity after reaping.
+        child.kill().await.unwrap();
+        assert!(matches!(result, Err(ProcessError::Fence(Errno::EBUSY))));
+        assert!(
+            still_running,
+            "the refusal must not itself kill a live process"
+        );
+        group.confirm_absent().await.unwrap();
+    }
 }
