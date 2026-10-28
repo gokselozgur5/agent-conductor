@@ -87,6 +87,7 @@ pub struct Store {
 struct StoreInner {
     writer: Mutex<SqliteConnection>,
     readers: SqlitePool,
+    dispatch_changes: tokio::sync::watch::Sender<()>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,6 +316,7 @@ impl Store {
             inner: Arc::new(StoreInner {
                 writer: Mutex::new(writer),
                 readers,
+                dispatch_changes: tokio::sync::watch::channel(()).0,
             }),
         })
     }

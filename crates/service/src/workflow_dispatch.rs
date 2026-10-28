@@ -5,6 +5,12 @@ use conductor_protocol::{ErrorBody, ErrorCode, Response};
 use std::collections::BTreeMap;
 
 impl<C: Clock> PersistentControlService<C> {
+    /// Subscribes to coalesced post-commit scheduling hints, not execution grants.
+    #[must_use]
+    pub fn dispatch_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.store.dispatch_changes()
+    }
+
     pub(super) async fn submit_workflow(&self, input: &str) -> Result<Response, ErrorBody> {
         if input.len() > 131_072 {
             return Err(ErrorBody::new(

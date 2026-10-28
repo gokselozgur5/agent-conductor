@@ -457,6 +457,7 @@ async fn hook_baseline_and_deliveries_commit_together_or_not_at_all() {
         .upsert_event_subscription(&subscription("watch-sub", "consumer"))
         .await
         .unwrap();
+    let mut changes = store.dispatch_changes();
     let mut observation = RepositoryObservation {
         id: "watch",
         config_json: "{}",
@@ -468,6 +469,7 @@ async fn hook_baseline_and_deliveries_commit_together_or_not_at_all() {
         .publish_repository_observation(&observation, &[], &limits)
         .await
         .unwrap();
+    assert!(!changes.has_changed().unwrap());
     observation.expected_version = Some(0);
     observation.snapshot_json = "{\"after\":true}";
     let good = event("watch-1", "source", 0, None);
@@ -478,6 +480,7 @@ async fn hook_baseline_and_deliveries_commit_together_or_not_at_all() {
             .await
             .is_err()
     );
+    assert!(!changes.has_changed().unwrap());
     assert_eq!(
         store
             .repository_observation("watch")
@@ -497,6 +500,8 @@ async fn hook_baseline_and_deliveries_commit_together_or_not_at_all() {
         .publish_repository_observation(&observation, std::slice::from_ref(&good), &limits)
         .await
         .unwrap();
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
     // A replay with a stale baseline cannot publish extra events or advance it.
     assert!(matches!(
         store
@@ -1004,4 +1009,48 @@ async fn wake_rechecks_current_subscription_before_consuming_delivery() {
             .await
             .unwrap();
     assert_eq!(old_status, "pending");
+}
+
+#[tokio::test]
+async fn dispatch_notification_follows_commit_and_survives_scan_to_wait_race() {
+    let (_root, store) = store_with_agents(&["source", "worker"]).await;
+    let mut changes = store.dispatch_changes();
+    store
+        .upsert_event_subscription(&subscription("sub", "worker"))
+        .await
+        .unwrap();
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    let limits = EventLimits::default();
+    let first = event("first", "source", 0, None);
+    // The receiver has observed the old version, but has not started waiting.
+    store.publish_event(&first, &limits).await.unwrap();
+    assert!(changes.has_changed().unwrap());
+    changes.changed().await.unwrap();
+    assert_eq!(
+        store
+            .claim_event_delivery("worker", 100, &limits)
+            .await
+            .unwrap()
+            .unwrap()
+            .event
+            .id,
+        "first"
+    );
+    // Replays and failed transactions do not wake a waiting dispatcher.
+    store.publish_event(&first, &limits).await.unwrap();
+    assert!(!changes.has_changed().unwrap());
+    let invalid = event("invalid", "missing-agent", 0, None);
+    assert!(store.publish_event(&invalid, &limits).await.is_err());
+    assert!(!changes.has_changed().unwrap());
+    // Multiple commits coalesce without requiring an unbounded signal queue.
+    for name in ["second", "third"] {
+        store
+            .publish_event(&event(name, "source", 0, None), &limits)
+            .await
+            .unwrap();
+    }
+    assert!(changes.has_changed().unwrap());
+    changes.changed().await.unwrap();
+    assert!(!changes.has_changed().unwrap());
 }

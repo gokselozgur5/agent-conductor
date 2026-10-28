@@ -174,6 +174,7 @@ impl Store {
         .bind(subscription.created_at_ms)
         .execute(&mut *writer)
         .await?;
+        self.signal_dispatch();
         Ok(())
     }
 
@@ -187,7 +188,11 @@ impl Store {
         let mut connection = self.inner.writer.lock().await;
         let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = publish_in_transaction(&mut writer, event, limits).await;
-        finish_event_transaction(writer, result).await
+        let committed = finish_event_transaction(writer, result).await?;
+        if matches!(committed, PublishResult::Published { fanout, .. } if fanout > 0) {
+            self.signal_dispatch();
+        }
+        Ok(committed)
     }
 
     /// Reads the last atomically published repository observation.
@@ -249,7 +254,11 @@ impl Store {
                 .bind(observation.snapshot_json).bind(observation.now_ms).execute(&mut *writer).await?;
             Ok(())
         }.await;
-        finish_event_transaction(writer, result).await
+        finish_event_transaction(writer, result).await?;
+        if !events.is_empty() {
+            self.signal_dispatch();
+        }
+        Ok(())
     }
 
     /// Claims one delivery. An expired lease is deliberately replayable.

@@ -15,7 +15,9 @@ pub async fn serve(
 ) {
     let worker = authentication("ANTHROPIC_API_KEY");
     let verifier = authentication("CODEX_HOME");
+    let mut changes = service.dispatch_changes();
     loop {
+        changes.borrow_and_update();
         if *stop.borrow() {
             return;
         }
@@ -31,10 +33,15 @@ pub async fn serve(
                     eprintln!("native dispatcher stopped: dispatch ownership/storage requires reconciliation");
                     return;
                 }
+                if matches!(result, Ok(true)) {
+                    continue;
+                }
             }
         }
         tokio::select! {
+            biased;
             _ = stop.changed() => return,
+            _ = changes.changed() => {}
             () = tokio::time::sleep(Duration::from_millis(500)) => {}
         }
     }

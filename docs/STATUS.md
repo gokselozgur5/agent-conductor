@@ -2,6 +2,11 @@
 
 ## Current result
 
+Committed event deliveries and workflow admission now wake the sequential
+dispatcher through coalesced hints. SQLite still decides eligibility and ownership;
+a periodic fallback remains. See [WAKE_SCHEDULING.md](WAKE_SCHEDULING.md) for
+controlled latency evidence and limits.
+
 Checkpoint free-text claims now redact recognized credential shapes before new
 persistence, operator display and continuation. Legacy stored bytes and backups
 remain unchanged; this is a scoped literal policy, not general secret detection.
