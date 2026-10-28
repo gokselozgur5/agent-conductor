@@ -645,7 +645,7 @@ async fn git_common_directory_identifies_one_project() {
         })
         .await
         .expect_err("same repository cannot be registered twice");
-    assert!(matches!(error, StoreError::Database(_)));
+    assert!(matches!(error, StoreError::ProjectIdentityConflict));
     assert_eq!(count(store.readers(), "projects").await, 1);
 }
 

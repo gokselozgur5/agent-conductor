@@ -37,6 +37,8 @@ pub enum StoreError {
     },
     #[error("idempotency key was reused with a different request")]
     IdempotencyCollision,
+    #[error("project path, filesystem, or Git identity is already registered")]
+    ProjectIdentityConflict,
     #[error(
         "invalid task version step for {task_id}; expected the successor of {expected_version}, got {new_version}"
     )]
@@ -300,7 +302,7 @@ impl Store {
         .execute(&mut *writer)
         .await
         .map(|_| ())
-        .map_err(StoreError::from);
+        .map_err(project_insert_error);
         finish_transaction(&mut writer, result).await
     }
 
@@ -591,6 +593,17 @@ async fn finish_transaction<T>(
     }
 }
 
+fn project_insert_error(error: sqlx::Error) -> StoreError {
+    if error
+        .as_database_error()
+        .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
+    {
+        StoreError::ProjectIdentityConflict
+    } else {
+        StoreError::Database(error)
+    }
+}
+
 async fn persist_in_transaction(
     connection: &mut SqliteConnection,
     batch: &CommitBatch,
@@ -619,7 +632,8 @@ async fn persist_in_transaction(
             .bind(&project.git_common_dir_identity)
             .bind(project.created_at_ms)
             .execute(&mut *connection)
-            .await?;
+            .await
+            .map_err(project_insert_error)?;
     }
 
     if let Some(agent) = &batch.agent {

@@ -45,7 +45,7 @@ impl RequestEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Health,
     CheckInvariants,
@@ -53,9 +53,7 @@ pub enum Request {
         actor_id: String,
         idempotency_key: String,
         id: String,
-        canonical_path: String,
-        filesystem_identity: String,
-        git_common_dir_identity: Option<String>,
+        path: String,
     },
     RegisterAgent {
         actor_id: String,
@@ -375,5 +373,20 @@ mod tests {
             request.validate(),
             Err(ProtocolError::UnsupportedVersion(PROTOCOL_VERSION + 1))
         );
+    }
+
+    #[test]
+    fn caller_cannot_supply_project_identity_fields() {
+        let value = serde_json::json!({
+            "type": "register_project",
+            "actor_id": "operator",
+            "idempotency_key": "project-1",
+            "id": "project-1",
+            "path": "/workspace/project",
+            "filesystem_identity": "spoofed"
+        });
+        let error = serde_json::from_value::<Request>(value)
+            .expect_err("caller-supplied identity must be rejected");
+        assert!(error.to_string().contains("unknown field"));
     }
 }

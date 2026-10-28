@@ -26,10 +26,7 @@ enum Command {
         actor_id: String,
         idempotency_key: String,
         id: String,
-        canonical_path: String,
-        filesystem_identity: String,
-        #[arg(long)]
-        git_common_dir_identity: Option<String>,
+        path: String,
     },
     RegisterAgent {
         actor_id: String,
@@ -114,16 +111,12 @@ fn command_request(command: Command) -> Request {
             actor_id,
             idempotency_key,
             id,
-            canonical_path,
-            filesystem_identity,
-            git_common_dir_identity,
+            path,
         } => Request::RegisterProject {
             actor_id,
             idempotency_key,
             id,
-            canonical_path,
-            filesystem_identity,
-            git_common_dir_identity,
+            path,
         },
         Command::RegisterAgent {
             actor_id,

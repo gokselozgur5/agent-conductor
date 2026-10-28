@@ -693,9 +693,7 @@ mod tests {
             actor_id: "operator".into(),
             idempotency_key: "project-1".into(),
             id: "project-1".into(),
-            canonical_path: "/workspace/project".into(),
-            filesystem_identity: "dev:1:ino:2".into(),
-            git_common_dir_identity: None,
+            path: directory.path().to_string_lossy().into_owned(),
         };
         let agent = Request::RegisterAgent {
             actor_id: "operator".into(),
@@ -741,6 +739,26 @@ mod tests {
             let response =
                 exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
             assert!(matches!(response.result, ResponseResult::Ok(_)));
+        }
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("project-alias");
+            std::os::unix::fs::symlink(directory.path(), &alias).expect("create project alias");
+            let duplicate = RequestEnvelope::new(Request::RegisterProject {
+                actor_id: "operator".into(),
+                idempotency_key: "project-alias".into(),
+                id: "project-alias".into(),
+                path: alias.to_string_lossy().into_owned(),
+            });
+            let response = exchange(
+                &path,
+                &serde_json::to_vec(&duplicate).expect("serialize duplicate"),
+            )
+            .await;
+            let ResponseResult::Error(error) = response.result else {
+                panic!("duplicate project alias succeeded")
+            };
+            assert_eq!(error.code, ErrorCode::Conflict);
         }
         let ready = Command {
             actor: Actor {

@@ -1,8 +1,13 @@
 use std::{
+    fs,
     future::Future,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Instant,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use agent_conductor_domain::{
     Actor, ActorId, ActorRole, ClockReading, Command, CommandKind, CorrelationId, EffectIntentSpec,
@@ -325,24 +330,17 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                 actor_id,
                 idempotency_key,
                 id,
-                canonical_path,
-                filesystem_identity,
-                git_common_dir_identity,
+                path,
             } => {
-                validate_text(&[&id, &canonical_path, &filesystem_identity])?;
+                validate_text(&[&id, &path])?;
                 let now = self.clock.read(self.boot_generation).wall_unix_ms;
+                let project = trusted_project_registration(id.clone(), &path, now)?;
                 let out = Response::ProjectRegistered { id: id.clone() };
                 self.persist_creation(
                     actor_id,
                     idempotency_key,
                     &request,
-                    Some(ProjectRegistration {
-                        id,
-                        canonical_path,
-                        filesystem_identity,
-                        git_common_dir_identity,
-                        created_at_ms: now,
-                    }),
+                    Some(project),
                     None,
                     None,
                     out,
@@ -769,9 +767,9 @@ fn rejection_error(e: Rejection) -> ErrorBody {
 #[allow(clippy::needless_pass_by_value)]
 fn store_error(e: StoreError) -> ErrorBody {
     let code = match e {
-        StoreError::VersionConflict { .. } | StoreError::IdempotencyCollision => {
-            ErrorCode::Conflict
-        }
+        StoreError::VersionConflict { .. }
+        | StoreError::IdempotencyCollision
+        | StoreError::ProjectIdentityConflict => ErrorCode::Conflict,
         StoreError::Integrity(_) | StoreError::InvalidVersionStep { .. } => {
             ErrorCode::InvariantViolation
         }
@@ -840,6 +838,117 @@ fn validate_text(v: &[&str]) -> Result<(), ErrorBody> {
         Ok(())
     }
 }
+
+fn trusted_project_registration(
+    id: String,
+    path: &str,
+    created_at_ms: i64,
+) -> Result<ProjectRegistration, ErrorBody> {
+    let requested = Path::new(path);
+    if !requested.is_absolute() {
+        return Err(ErrorBody::new(
+            ErrorCode::Validation,
+            "project path must be absolute",
+        ));
+    }
+    let canonical = fs::canonicalize(requested).map_err(|error| {
+        ErrorBody::new(
+            ErrorCode::Validation,
+            format!("project path cannot be resolved: {error}"),
+        )
+    })?;
+    let metadata = fs::metadata(&canonical).map_err(project_path_error)?;
+    if !metadata.is_dir() {
+        return Err(ErrorBody::new(
+            ErrorCode::Validation,
+            "project path must resolve to a directory",
+        ));
+    }
+    Ok(ProjectRegistration {
+        id,
+        canonical_path: path_text(&canonical)?,
+        filesystem_identity: metadata_identity(&metadata)?,
+        git_common_dir_identity: git_common_directory(&canonical)?
+            .map(|common| fs::metadata(common).map_err(project_path_error))
+            .transpose()?
+            .map(|common| metadata_identity(&common))
+            .transpose()?,
+        created_at_ms,
+    })
+}
+
+fn git_common_directory(project: &Path) -> Result<Option<PathBuf>, ErrorBody> {
+    let dot_git = project.join(".git");
+    if dot_git.is_dir() {
+        return fs::canonicalize(dot_git)
+            .map(Some)
+            .map_err(project_path_error);
+    }
+    if !dot_git.is_file() {
+        return Ok(None);
+    }
+    let pointer = fs::read_to_string(&dot_git).map_err(project_path_error)?;
+    let git_dir = pointer
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ErrorBody::new(ErrorCode::Validation, "invalid .git pointer"))?;
+    let git_dir =
+        fs::canonicalize(resolve_from(project, Path::new(git_dir))).map_err(project_path_error)?;
+    let common_pointer = git_dir.join("commondir");
+    if !common_pointer.is_file() {
+        return Ok(Some(git_dir));
+    }
+    let common = fs::read_to_string(common_pointer).map_err(project_path_error)?;
+    let common = common.trim();
+    if common.is_empty() {
+        return Err(ErrorBody::new(
+            ErrorCode::Validation,
+            "empty Git common-directory pointer",
+        ));
+    }
+    fs::canonicalize(resolve_from(&git_dir, Path::new(common)))
+        .map(Some)
+        .map_err(project_path_error)
+}
+
+fn resolve_from(base: &Path, value: &Path) -> PathBuf {
+    if value.is_absolute() {
+        value.to_owned()
+    } else {
+        base.join(value)
+    }
+}
+
+#[cfg(unix)]
+#[allow(clippy::unnecessary_wraps)]
+fn metadata_identity(metadata: &fs::Metadata) -> Result<String, ErrorBody> {
+    Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn metadata_identity(_metadata: &fs::Metadata) -> Result<String, ErrorBody> {
+    Err(ErrorBody::new(
+        ErrorCode::InvariantViolation,
+        "trusted filesystem identity is unsupported on this host",
+    ))
+}
+
+fn path_text(path: &Path) -> Result<String, ErrorBody> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| ErrorBody::new(ErrorCode::Validation, "project path is not valid UTF-8"))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn project_path_error(error: std::io::Error) -> ErrorBody {
+    ErrorBody::new(
+        ErrorCode::Validation,
+        format!("project identity cannot be resolved: {error}"),
+    )
+}
+
 fn to_i64(v: u64) -> Result<i64, ErrorBody> {
     i64::try_from(v)
         .map_err(|_| ErrorBody::new(ErrorCode::InvariantViolation, "numeric range exceeded"))
@@ -851,6 +960,9 @@ fn hash(v: &str) -> String {
 mod effect_tests {
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     fn command(correlation_id: &str) -> Command {
         Command {
@@ -896,6 +1008,62 @@ mod effect_tests {
         assert_eq!(
             serde_json::from_str::<EffectIntentSpec>(&first.request_json).expect("typed request"),
             effect
+        );
+    }
+
+    #[test]
+    fn project_intake_rejects_relative_missing_and_file_paths() {
+        assert!(trusted_project_registration("p".into(), "relative", 1).is_err());
+        assert!(
+            trusted_project_registration("p".into(), "/definitely/missing/conductor", 1).is_err()
+        );
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let file = directory.path().join("file");
+        fs::write(&file, "not a project").expect("write file");
+        assert!(trusted_project_registration("p".into(), &file.to_string_lossy(), 1).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_aliases_resolve_to_one_trusted_identity() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let project = directory.path().join("project");
+        fs::create_dir(&project).expect("create project");
+        let alias = directory.path().join("alias");
+        symlink(&project, &alias).expect("create alias");
+
+        let direct = trusted_project_registration("direct".into(), &project.to_string_lossy(), 1)
+            .expect("direct identity");
+        let aliased = trusted_project_registration("alias".into(), &alias.to_string_lossy(), 1)
+            .expect("alias identity");
+        assert_eq!(direct.canonical_path, aliased.canonical_path);
+        assert_eq!(direct.filesystem_identity, aliased.filesystem_identity);
+    }
+
+    #[test]
+    fn worktree_pointer_resolves_to_main_git_identity() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let main = directory.path().join("main");
+        let common = main.join(".git");
+        let worktree_git = common.join("worktrees/w1");
+        let worktree = directory.path().join("worktree");
+        fs::create_dir_all(&worktree_git).expect("create worktree metadata");
+        fs::create_dir(&worktree).expect("create worktree");
+        fs::write(worktree_git.join("commondir"), "../..").expect("write common pointer");
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}", worktree_git.display()),
+        )
+        .expect("write git pointer");
+
+        let main_identity = trusted_project_registration("main".into(), &main.to_string_lossy(), 1)
+            .expect("main identity");
+        let worktree_identity =
+            trusted_project_registration("worktree".into(), &worktree.to_string_lossy(), 1)
+                .expect("worktree identity");
+        assert_eq!(
+            main_identity.git_common_dir_identity,
+            worktree_identity.git_common_dir_identity
         );
     }
 }
