@@ -49,6 +49,10 @@ Native worker checkpoint capture, continuation and read-only board/CLI visibilit
 are validated locally: 215 tests, strict lint, real Chrome and a real Claude
 pause/restart/continuation followed by independent Codex acceptance.
 See [CHECKPOINTS.md](CHECKPOINTS.md) for claim and backpressure boundaries.
+Explicit registered-worker reassignment now retains the immutable plan and prior
+evidence through an atomic successor/queue/audit record. A real interrupted local
+workflow completed under a distinct registered successor with independent review
+in 80.47 seconds; 221 tests and strict lint pass. See [WORKFLOW_REASSIGNMENT.md](WORKFLOW_REASSIGNMENT.md).
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, outer advisory
 discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,

@@ -17,6 +17,7 @@ function disconnect() {
   token = '';
   closeHistory();
   closeCheckpoint();
+  closeReassignment();
   clearInterval(timer);
   el('token').value = '';
   el('tasks').replaceChildren();
@@ -190,10 +191,13 @@ async function refreshQueue(currentToken) {
     for (const dependency of item.dependencies || []) {
       row.append(text('p', `${dependency.predecessor_task_id} · ${dependency.accepted_source || 'not yet admitted'}`, 'hint'));
     }
+    if(item.selected_worker) row.append(text('p', `Selected worker: ${item.selected_worker}`, 'hint'));
     const task=taskVersions.get(item.task_id);
     if (task && !['completed','cancelled'].includes(task.state) && ['finished','needs_recovery'].includes(item.status)) {
       const button=text('button','Continue retained work');
       button.addEventListener('click',()=>continueWorkflow(task,button)); row.append(button);
+      const reassign=text('button','Reassign retained work');
+      reassign.addEventListener('click',()=>{closeReassignment();reassignmentTask=task;el('reassignment-title').textContent=`Reassign · ${task.id}`;el('reassignment').hidden=false;});row.append(reassign);
     }
     return row;
   }));
@@ -336,3 +340,29 @@ async function loadCheckpoint(taskId) {
 }
 el('checkpoint-close').addEventListener('click',closeCheckpoint);
 el('checkpoint-refresh').addEventListener('click',()=>{if(checkpointTask)loadCheckpoint(checkpointTask);});
+
+let reassignmentTask=null;
+let reassignmentGeneration=0;
+function closeReassignment(){
+  reassignmentTask=null;reassignmentGeneration++;
+  el('reassignment').hidden=true;el('successor-id').value='';el('successor-pin').value='';
+}
+el('reassignment-close').addEventListener('click',closeReassignment);
+el('reassignment-submit').addEventListener('click',async()=>{
+  const task=reassignmentTask,currentToken=token,generation=reassignmentGeneration;
+  const worker=el('successor-id').value.trim(),file=el('successor-pin').files[0];
+  if(!task||!currentToken||!worker||!file||file.size>4096){el('message').textContent='Choose a registered agent and approved profile up to 4 KiB.';return;}
+  if(!window.confirm(`Reassign ${task.id} to ${worker}? New model work may start.`))return;
+  el('reassignment-submit').disabled=true;
+  try{
+    const pin=JSON.parse(await file.text());
+    if(currentToken!==token||generation!==reassignmentGeneration)return;
+    const response=await fetch('/api/workflows/reassign',{method:'POST',headers:{Authorization:`Bearer ${currentToken}`,'Content-Type':'application/json'},body:JSON.stringify({task_id:task.id,expected_version:task.version,worker_id:worker,pin}),signal:AbortSignal.timeout(5000)});
+    if(currentToken!==token||generation!==reassignmentGeneration)return;
+    if(response.ok)closeReassignment();
+    await refresh();
+    if(currentToken!==token)return;
+    el('message').textContent=response.ok?'Reassignment queued; previous evidence retained.':'Reassignment refused or unconfirmed. Inspect current ownership, profile and fence before retrying.';
+  }catch(_){if(currentToken===token&&generation===reassignmentGeneration)el('message').textContent='Reassignment outcome unknown. Refresh before retrying.';}
+  finally{el('reassignment-submit').disabled=false;}
+});
