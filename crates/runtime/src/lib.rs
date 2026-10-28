@@ -2,3 +2,8 @@
 mod contract;
 
 pub use contract::*;
+
+#[cfg(unix)]
+mod process;
+#[cfg(unix)]
+pub use process::*;
