@@ -67,11 +67,38 @@ an independently established ownership boundary and generation history.
 
 A process or power failure between directory renames can leave an archive and
 staging directory with the original path absent. Keep both directories and their
-receipts; do not launch the archive or rewrite packet paths. A failure after publication explicitly reports that state was already restored;
-inspect the restoration receipt and retained archive before retrying. Automated repair of
-that interrupted publication and full-host/state-loss recovery are not yet
-accepted. This command is not a zero-downtime backup, arbitrary migration downgrade
-or cross-host migration tool.
+receipts; do not launch the archive or rewrite packet paths. New restores publish
+a private version 2 archive record binding the original and staged directory
+device/inode identities, both paths and the shared runtime lock identity.
+
+```sh
+python3 tools/conductor --state /absolute/operator/state repair-restore --retained /absolute/operator/state-before-restore
+```
+
+Repair takes the same exclusive lock and checks the surviving original database's
+schema, integrity and quiescence. Before publication it moves the **original**
+state back to its original path, leaving the abandoned snapshot candidate guarded
+and preserved in its staging directory. The original token, generation and later
+task history remain intact. After publication it keeps the restored state and
+retained archive, checks both databases and removes only the leftover archive
+lock link. It never starts a daemon or task, merges histories or invents fences.
+Inspect the result and run the ordinary launcher separately.
+
+Repair can resume after its own directory move or lock-link cleanup. A repeated
+post-publication repair reports the same outcome. A repeated completed rollback
+is refused because its archive record has already been removed; it does not
+repeat the restore. Live locks, changed directory/lock identities, extra lock
+links, mismatched paths, corrupt databases and legacy archive records are refused.
+The record is local recovery evidence, not a signed defense against a malicious
+operator rewriting private files. Missing original state and unknown orphan
+writers still require a separately established ownership boundary.
+
+Tests abruptly exit real child processes at the publication boundaries and during
+repair, bypassing Python cleanup. CLI integration then reopens the actual daemon
+and checks invariants. These are process-crash tests, not physical power-loss or
+filesystem fault certification. File and parent-directory updates are flushed;
+missing or inconsistent surviving evidence is refused. This command is not a
+zero-downtime backup, arbitrary migration downgrade or cross-host migration tool.
 
 Unit controls cover the continuous lock, retained bytes, generation floor, token
 rotation, failed publication rollback, legacy/missing-state refusal, external

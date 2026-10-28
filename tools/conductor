@@ -75,6 +75,8 @@ def main():
     restore = sub.add_parser('restore', help='restore at the original stopped state root and retain current state')
     restore.add_argument('snapshot', type=Path)
     restore.add_argument('--retain-current', type=Path, required=True)
+    repair = sub.add_parser('repair-restore', help='repair an interrupted directory publication without launching tasks')
+    repair.add_argument('--retained', type=Path, required=True)
     sub.add_parser('status')
     inspect = sub.add_parser('inspect', help='show bounded advisory document references without model calls')
     inspect.add_argument('--workspace-root', type=Path)
@@ -129,6 +131,10 @@ def main():
         (state / 'plans').mkdir(mode=0o700)
         (state / 'artifacts').mkdir(mode=0o700)
         print(f'Initialized {state}\nRun tools/conductor --state {state} run --dispatch')
+        return
+    if args.command == 'repair-restore':
+        from restore_publication import repair
+        print(json.dumps(repair(state, args.retained), indent=2))
         return
     state = state.resolve(strict=True)
     if state.stat().st_mode & 0o077 or state.stat().st_uid != os.getuid():

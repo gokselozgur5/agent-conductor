@@ -8,6 +8,15 @@ Claude and Codex adapters have completed real writer → immutable capture → c
 → independent review workflows, including retained-work and fenced crash recovery.
 The original checkout remains unchanged; task completion belongs to the domain.
 
+Cold snapshots and same-path restore preserve the existing stopped state in a
+separate archive. `repair-restore` now repairs an interrupted directory switch
+using recorded directory/lock identities and fresh quiescence checks, without
+launching work. Abrupt child-process exits and actual daemon/CLI reopen controls
+cover both rollback and completed-publication outcomes. See
+[OPERATOR_RECOVERY.md](OPERATOR_RECOVERY.md). Missing authoritative state,
+uncertain orphan writers, cross-host recovery and physical power-loss acceptance
+remain outside this repair; the full operational recovery issue remains open.
+
 Repository hooks now observe configured source repositories and owned attempt
 trees, debounce changes, flush normal accepted terminal captures and admit one
 approved subscribed workflow through atomic delivery acknowledgement. Advisory

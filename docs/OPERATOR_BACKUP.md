@@ -47,8 +47,8 @@ Database packets retain absolute paths and identities. Do not relocate the state
 rewrite packet paths or start a second dispatcher from a copied database. New
 version 2 snapshots record external prerequisites for explicit `--external`
 verification; these records do not include external project/toolchain contents.
-Full state-loss and interrupted-publication recovery remain required before
-issue #59 closes.
+Recorded interrupted publications can now be repaired through `repair-restore`;
+full state-loss ownership and generation recovery remain open under issue #59.
 
 Validation covers state preservation, WAL export, manifest verification,
 tampering, live-lock refusal, active/unfenced work, unsupported schema, links,

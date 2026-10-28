@@ -43,10 +43,12 @@ jobs:
       - name: Build operator integration binaries
         run: cargo build --workspace
 
-      - name: Check operator backup refusals
+      - name: Check operator recovery and publication refusals
         env:
           CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
-        run: python3 -m unittest discover -s tests -p test_operator_backup.py -v
+        run: |
+          python3 -m unittest discover -s tests -p test_operator_backup.py -v
+          python3 -m unittest discover -s tests -p test_restore_publication.py -v
 
       - name: Reject committed credential material
         shell: bash

@@ -30,6 +30,22 @@ def sync_directory(path):
         os.close(fd)
 
 
+def write_record(path, value):
+    """Publish complete private JSON while the caller holds the runtime lock."""
+    if path.exists() or path.is_symlink():
+        raise ValueError('publication record already exists')
+    temporary = path.with_name(path.name + '.pending-' + uuid.uuid4().hex)
+    out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(out, 'w') as stream:
+        inode = os.fstat(stream.fileno()).st_ino
+        json.dump(value, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.rename(temporary, path)
+    sync_directory(path.parent)
+    return inode
+
+
 def restore(state, source, retained):
     snapshot.private_root(state)
     source = source.expanduser().absolute()
@@ -110,18 +126,19 @@ def restore(state, source, retained):
         try:
             retained.mkdir(mode=0o700)
             reserved = True
-            marker_fd = os.open(archive_marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(marker_fd, 'w') as stream:
-                marker_inode = os.fstat(stream.fileno()).st_ino
-                json.dump({'restored_to': str(state), 'dispatch_forbidden': True}, stream)
-                stream.flush()
-                os.fsync(stream.fileno())
-            sync_directory(state)
+            marker_inode = write_record(archive_marker, {
+                'version': 2, 'restored_to': str(state), 'dispatch_forbidden': True,
+                'retained': str(retained), 'staged': str(stage),
+                'original_identity': [state.stat().st_dev, state.stat().st_ino],
+                'staged_identity': [stage.stat().st_dev, stage.stat().st_ino],
+                'lock_identity': [info.st_dev, info.st_ino]})
             os.link(state / 'runtime.lock', stage / 'runtime.lock', follow_symlinks=False)
             linked = True
             snapshot.flush_directories(stage)
+            sync_directory(state.parent)
             os.rename(state, retained)
             try:
+                sync_directory(state.parent)
                 os.rename(stage, state)
             except BaseException:
                 if not state.exists():
