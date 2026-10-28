@@ -3,7 +3,7 @@ use crate::{PacketAcknowledgement, ResumePacket};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerLaunch {
     pub packet: ResumePacket,
@@ -12,6 +12,19 @@ pub struct RunnerLaunch {
     pub environment: BTreeMap<String, String>,
     pub output_limit: usize,
     pub heartbeat_timeout_ms: u64,
+}
+
+impl std::fmt::Debug for RunnerLaunch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunnerLaunch")
+            .field("executable", &self.executable)
+            .field("argument_count", &self.arguments.len())
+            .field(
+                "environment_keys",
+                &self.environment.keys().collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

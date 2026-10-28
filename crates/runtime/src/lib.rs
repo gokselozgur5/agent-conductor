@@ -32,3 +32,8 @@ pub use git_snapshot::*;
 mod sandbox;
 #[cfg(unix)]
 pub use sandbox::*;
+
+#[cfg(unix)]
+mod vendor;
+#[cfg(unix)]
+pub use vendor::*;
