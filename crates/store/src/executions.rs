@@ -81,6 +81,14 @@ pub enum ExecutionUpdate {
 }
 
 impl Store {
+    /// Lists observations requiring reconciliation after controller restart.
+    /// # Errors
+    /// Returns database or record decoding errors.
+    pub async fn unresolved_executions(&self) -> Result<Vec<ExecutionRecord>, StoreError> {
+        sqlx::query("SELECT * FROM executions WHERE state IN ('prepared', 'started', 'exited') ORDER BY effect_token")
+            .fetch_all(&self.inner.readers).await?.into_iter().map(decode).collect()
+    }
+
     /// Whether any recorded execution lacks explicit fencing evidence.
     /// Exit status, blocked status and elapsed leases are not fencing evidence.
     /// # Errors
@@ -273,10 +281,10 @@ fn apply_update(
             Ok("execution.exited")
         }
         ExecutionUpdate::Fenced { reason } | ExecutionUpdate::Blocked { reason } => {
-            if matches!(
-                record.state,
-                ExecutionState::Fenced | ExecutionState::Blocked
-            ) || reason.trim().is_empty()
+            if record.state == ExecutionState::Fenced
+                || (record.state == ExecutionState::Blocked
+                    && matches!(update, ExecutionUpdate::Blocked { .. }))
+                || reason.trim().is_empty()
             {
                 return Err(invalid());
             }

@@ -335,3 +335,44 @@ async fn exit_and_elapsed_time_are_not_reassignment_fences() {
         .expect("fence");
     assert!(!store.has_unfenced_execution("task").await.expect("fenced"));
 }
+
+#[tokio::test]
+async fn blocked_execution_can_record_later_fence_without_restarting() {
+    let (_directory, store) = seed().await;
+    store
+        .prepare_execution(&input(), audit("prepare"))
+        .await
+        .expect("prepare");
+    store
+        .update_execution(
+            "token",
+            0,
+            "blocked",
+            &ExecutionUpdate::Blocked {
+                reason: "wrapper lost".into(),
+            },
+            audit("blocked"),
+        )
+        .await
+        .expect("blocked");
+    assert!(
+        store
+            .update_execution("token", 1, "ack", &acknowledgement(), audit("ack"))
+            .await
+            .is_err()
+    );
+    let fenced = store
+        .update_execution(
+            "token",
+            1,
+            "fence",
+            &ExecutionUpdate::Fenced {
+                reason: "independently confirmed fixture fence".into(),
+            },
+            audit("fence"),
+        )
+        .await
+        .expect("reconciled fence");
+    assert_eq!(fenced.state, ExecutionState::Fenced);
+    assert!(!store.has_unfenced_execution("task").await.expect("clear"));
+}
