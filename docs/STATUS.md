@@ -41,8 +41,16 @@ runtime and there is no migration of real user task state to perform.
 
 The operator authorized continuing to a usable complete Conductor on 2026-10-28.
 Phase 2 requirements/design are recorded in [PHASE2_DESIGN.md](PHASE2_DESIGN.md).
-Current slice: validated runtime contracts and resume acknowledgement, followed
-by the fake-process recovery harness. Real agents have not been launched yet.
+Runtime contracts, bounded process supervision, and durable execution records
+are implemented. The independent `conductor-runner` wrapper acknowledges the
+packet before accepting a matching release, rejects late/mismatched renewals,
+and stops controlled process groups on parent loss or watchdog expiry. Its
+protocol tests cover pre-release refusal, parent loss, renewal and spawn failure.
+This is not a hostile-process sandbox: wrapper SIGKILL, escaping descendants and
+normal-exit orphan fencing still need stronger isolation and recovery evidence.
+Next: connect durable preparation/acknowledgement to wrapper release in the
+controller, then isolated source capture and real adapters. Real agents have
+not been launched yet.
 The full product workflow remains the target; later phase and soak requirements
 are not waived by the same-day usability objective.
 

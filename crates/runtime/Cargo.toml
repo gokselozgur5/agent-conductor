@@ -10,13 +10,17 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", features = ["signal", "process"] }
+nix = { version = "0.30", features = ["signal", "process", "time"] }
 
 [dev-dependencies]
 tempfile = "3.23"
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "conductor-runner"
+path = "src/bin/conductor-runner.rs"
