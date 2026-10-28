@@ -49,6 +49,14 @@ async fn emit(event: &RunnerEvent) -> Result<(), ()> {
     .map_err(|_| ())
 }
 
+async fn emit_terminal(
+    packet: &conductor_runtime::ResumePacket,
+    event: &RunnerEvent,
+) -> Result<(), ()> {
+    conductor_runtime::write_terminal_receipt(packet, event).map_err(|_| ())?;
+    emit(event).await
+}
+
 #[allow(clippy::too_many_lines)]
 async fn serve() -> Result<(), ()> {
     let mut input = BufReader::new(tokio::io::stdin());
@@ -70,6 +78,7 @@ async fn serve() -> Result<(), ()> {
         return Err(());
     }
     let packet_hash = launch.packet.sha256().map_err(|_| ())?;
+    let receipt_packet = launch.packet.clone();
     let acknowledgement = PacketAcknowledgement {
         version: 1,
         attempt_id: launch.packet.contract.attempt_id.clone(),
@@ -123,7 +132,7 @@ async fn serve() -> Result<(), ()> {
         tokio::select! {
             result = &mut process => {
                 let (result, captured) = result.map_err(|_| ())?;
-                return emit(&match result {
+                return emit_terminal(&receipt_packet,&match result {
                     Ok(output) => RunnerEvent::Finished { exit_code: output.exit_code, stdout: output.stdout, stderr: output.stderr },
                     Err(ProcessError::Cancelled | ProcessError::Timeout | ProcessError::OutputLimit) => RunnerEvent::Stopped { reason: "process_stopped".into(), stdout: captured },
                     // Failed fencing or I/O is not evidence that the worker stopped.
@@ -161,19 +170,25 @@ async fn serve() -> Result<(), ()> {
         // Cancellation can race a normal exit. Preserve the weaker observation:
         // normal exit did not fence descendants and must never become Stopped.
         Ok(output) => {
-            return emit(&RunnerEvent::Finished {
-                exit_code: output.exit_code,
-                stdout: output.stdout,
-                stderr: output.stderr,
-            })
+            return emit_terminal(
+                &receipt_packet,
+                &RunnerEvent::Finished {
+                    exit_code: output.exit_code,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                },
+            )
             .await;
         }
         Err(ProcessError::Cancelled | ProcessError::Timeout | ProcessError::OutputLimit) => {}
         Err(_) => return Err(()),
     }
-    emit(&RunnerEvent::Stopped {
-        reason: stopped.into(),
-        stdout: captured,
-    })
+    emit_terminal(
+        &receipt_packet,
+        &RunnerEvent::Stopped {
+            reason: stopped.into(),
+            stdout: captured,
+        },
+    )
     .await
 }

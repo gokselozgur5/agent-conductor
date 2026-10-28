@@ -12,8 +12,9 @@ pub struct WorkflowDispatch {
     pub boot_generation: Option<i64>,
     pub outcome_json: Option<String>,
     pub resume_version: Option<i64>,
+    pub auto_recovery_count: i64,
 }
-const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version FROM workflow_dispatch";
+const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version, auto_recovery_count FROM workflow_dispatch";
 impl Store {
     /// Persists one immutable operator-approved plan, replaying identical input.
     /// # Errors
@@ -130,6 +131,32 @@ impl Store {
         Ok(())
     }
 
+    /// Bounded unfinished claims eligible for one opt-in automatic continuation.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn interrupted_workflows(&self) -> Result<Vec<WorkflowDispatch>, StoreError> {
+        Ok(sqlx::query_as::<_,WorkflowDispatch>(&format!("{SELECT} WHERE status='needs_recovery' AND auto_recovery_count=0 ORDER BY created_at_ms,task_id LIMIT 256")).fetch_all(&self.inner.readers).await?)
+    }
+    /// Requeues at most once automatically, bound to the active daemon boot.
+    /// # Errors
+    /// Returns database or integer conversion errors; false means no admission.
+    pub async fn auto_requeue_workflow(
+        &self,
+        task_id: &str,
+        version: u64,
+        generation: u64,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let version =
+            i64::try_from(version).map_err(|_| StoreError::Integrity("version overflow".into()))?;
+        let generation =
+            i64::try_from(generation).map_err(|_| StoreError::BootGenerationOverflow)?;
+        let mut writer = self.inner.writer.lock().await;
+        let changed=sqlx::query("UPDATE workflow_dispatch SET status='queued',resume_version=?,auto_recovery_count=1,outcome_json=NULL,updated_at_ms=? WHERE task_id=? AND status='needs_recovery' AND auto_recovery_count=0 AND (SELECT boot_generation FROM runtime_metadata WHERE singleton=1)=? AND (SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running'))<256")
+            .bind(version).bind(now).bind(task_id).bind(generation).execute(&mut *writer).await?.rows_affected();
+        Ok(changed == 1)
+    }
+
     /// Returns the latest bounded dispatch receipts, not stored plan contents.
     /// # Errors
     /// Returns database errors.
@@ -145,6 +172,42 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn automatic_recovery_is_once_only_and_boot_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path().join("dispatch.sqlite3"))
+            .await
+            .unwrap();
+        let first = store.start_runtime(1).await.unwrap().boot_generation;
+        store.enqueue_workflow("a", "{}", 2).await.unwrap();
+        store.claim_workflow(first, 3).await.unwrap().unwrap();
+        let second = store.start_runtime(4).await.unwrap().boot_generation;
+        store.recover_workflow_dispatch(second, 5).await.unwrap();
+        assert_eq!(store.interrupted_workflows().await.unwrap().len(), 1);
+        assert!(!store.auto_requeue_workflow("a", 7, first, 6).await.unwrap());
+        assert!(
+            store
+                .auto_requeue_workflow("a", 7, second, 6)
+                .await
+                .unwrap()
+        );
+        let row = store.claim_workflow(second, 7).await.unwrap().unwrap();
+        assert_eq!(row.resume_version, Some(7));
+        assert_eq!(row.auto_recovery_count, 1);
+        let third = store.start_runtime(8).await.unwrap().boot_generation;
+        store.recover_workflow_dispatch(third, 9).await.unwrap();
+        assert!(store.interrupted_workflows().await.unwrap().is_empty());
+        assert!(
+            !store
+                .auto_requeue_workflow("a", 9, third, 10)
+                .await
+                .unwrap()
+        );
+        store.requeue_workflow("a", 9, 10).await.unwrap();
+        let row = store.claim_workflow(third, 11).await.unwrap().unwrap();
+        assert_eq!(row.auto_recovery_count, 1);
+        assert_eq!(row.resume_version, Some(9));
+    }
     #[tokio::test]
     async fn dispatch_is_single_claim_idempotent_and_restart_fenced() {
         let root = tempfile::tempdir().unwrap();

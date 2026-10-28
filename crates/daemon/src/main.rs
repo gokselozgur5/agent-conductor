@@ -24,6 +24,9 @@ struct Args {
     /// Execute explicitly submitted native plans sequentially; credentials stay in process memory.
     #[arg(long, conflicts_with = "run_plan")]
     dispatch: bool,
+    /// Allow one automatic continuation per interrupted workflow with a verified fence.
+    #[arg(long, requires = "dispatch")]
+    recover_fenced: bool,
     /// Optional authenticated loopback board; requires `CONDUCTOR_OPERATOR_TOKEN`.
     #[arg(long)]
     http: Option<std::net::SocketAddr>,
@@ -92,9 +95,13 @@ async fn main() {
     }
 
     let (dispatch_stop, dispatch_rx) = tokio::sync::watch::channel(false);
-    let dispatch_task = args
-        .dispatch
-        .then(|| tokio::spawn(dispatcher::serve(workflow_service, dispatch_rx)));
+    let dispatch_task = args.dispatch.then(|| {
+        tokio::spawn(dispatcher::serve(
+            workflow_service,
+            args.recover_fenced,
+            dispatch_rx,
+        ))
+    });
     if let Err(error) = server
         .run_until(async {
             if let Err(error) = tokio::signal::ctrl_c().await {

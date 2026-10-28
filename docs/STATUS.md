@@ -26,7 +26,7 @@ isolated Chrome run. Atomic verification/source publication shipped through PR #
 regression preserves task state after a late bind failure. Durable dispatch shipped through PR #12 after exact-head CI. Fenced-workspace
 continuation shipped through PR #14 after exact-head CI. Observed restricted
 writer stop evidence under issue #15 passed real writer-pause/restart/continuation
-acceptance and awaits exact-head CI.
+acceptance and shipped through PR #16 after exact-head CI.
 
 ## Implemented
 
@@ -48,9 +48,9 @@ acceptance and awaits exact-head CI.
 
 ## Evidence
 
-The latest local workspace run passed 159 tests, formatting, strict Clippy and
+The latest local workspace run passed 161 tests, formatting, strict Clippy and
 credential/media scans. Evidence is kept privately under
-`reviews/agent-conductor-runtime-20261028/writer-stop-workspace.log` and
+`reviews/agent-conductor-runtime-20261028/durable-recovery-workspace.log` and
 `native-workflow-v1/`. The model-call cap is not an actual spend measurement.
 
 Phase 1 has separate accepted evidence in [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md).
@@ -60,7 +60,7 @@ Control head `02e6954` passed both hosts and merged at `a761d94`.
 Atomic-source head `f461560` passed both hosts and merged at `2eb1f61`.
 Durable-dispatch head `eede6c9` passed both hosts and merged at `82496d3`.
 Continuation head `61de159` passed both hosts and merged at `cdd32b9`.
-The writer-stop branch still requires its own exact-SHA CI. Local results do not substitute for that remote check.
+Writer-stop head `a7baea7` passed both hosts and merged at `853899e`.
 
 ## Trust boundaries
 
@@ -101,7 +101,7 @@ and absence of the stored plan body from API output (`operator-queue-v1`).
 
 See [WORKFLOW_DISPATCH.md](WORKFLOW_DISPATCH.md). Dispatch `finished` is not task
 acceptance; interrupted claims become `needs_recovery`, retaining artifacts.
-Unfenced mid-writer crash recovery and automatic continuation remain open.
+Unfenced mid-writer crash recovery remains refused. Opt-in receipt-based automatic continuation is locally accepted below.
 
 ## Retained-work continuation acceptance
 
@@ -143,3 +143,27 @@ and a daemon restart followed by explicit retained-work continuation completed
 through independent verification in65.91seconds. New attempt/epoch, unchanged old
 files, copied retained output and stale/terminal refusals were verified. Evidence:
 `writer-pause-v2/receipt.json`. The first rejected fixture remains preserved.
+
+
+## Durable crash receipt acceptance
+
+The trusted wrapper now publishes private sanitized terminal evidence outside the
+writer tree even when its controller pipe is gone. With `--dispatch --recover-fenced`,
+a matching receipt admits one automatic retained-work continuation. Missing or
+invalid evidence remains blocked; explicit operator pause/cancel remains respected.
+
+A real synthetic writer created answer.txt, then the test killed only its daemon
+with SIGKILL. Restart reconciled the independent wrapper receipt and automatically
+created a fresh attempt, completed required checks and independent review in62.17s.
+Old bytes and the fresh retained copy were verified; terminal continuation was
+refused and the durable automatic-recovery count was exactly1. Evidence:
+`writer-crash-v2/receipt.json`. The first harness run mistook a stale socket path
+for server readiness; its artifacts remain in `writer-crash-v1`. The replacement
+checks an actual socket request before proceeding. No task verdict was overridden.
+
+161 workspace tests, strict Clippy, formatting and credential/media checks passed.
+Receipt negatives cover mismatch, hardlinks, symlinks, permissions, oversize and
+no-overwrite publication. Storage regression proves stale-boot refusal and the
+one-automatic-retry limit across another restart; explicit continuation remains
+available. This slice still requires exact-head CI. Generic hostile-process
+fencing, hooks, other-host isolation and full-product acceptance remain open.

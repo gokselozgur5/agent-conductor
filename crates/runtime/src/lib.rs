@@ -47,3 +47,8 @@ pub use vendor_output::*;
 mod checks;
 #[cfg(unix)]
 pub use checks::*;
+
+#[cfg(unix)]
+mod terminal_receipt;
+#[cfg(unix)]
+pub use terminal_receipt::*;

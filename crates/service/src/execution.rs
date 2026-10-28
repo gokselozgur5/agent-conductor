@@ -383,6 +383,7 @@ impl<C: Clock> PersistentControlService<C> {
                 )
                 .await?;
         }
+        self.recover_fenced_receipts().await?;
         // Also cover a crash after the record was blocked but before its task was
         // blocked. Scan task ownership, not just freshly changed execution rows.
         for row in self.store.tasks(None).await? {
@@ -401,6 +402,48 @@ impl<C: Clock> PersistentControlService<C> {
                 .await
                 .map_err(|error| runtime_error(&error.message))?;
             }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn recover_fenced_receipts(&self) -> Result<(), StoreError> {
+        let _guard = self.mutations.lock().await;
+        for record in self.store.blocked_executions().await? {
+            if record.wrapper_identity.is_none() {
+                continue;
+            }
+            let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
+                .map_err(|_| runtime_error("stored packet invalid"))?;
+            if packet.contract.adapter.kind != AdapterKind::Claude
+                || packet.contract.authority.allow_workspace_commands
+                || packet
+                    .sha256()
+                    .map_err(|_| runtime_error("packet hash failed"))?
+                    != record.preparation.packet_sha256
+            {
+                continue;
+            }
+            let Ok(receipt) = conductor_runtime::read_terminal_receipt(&packet) else {
+                continue;
+            };
+            let id = Uuid::now_v7().to_string();
+            self.store
+                .update_execution(
+                    &record.preparation.effect_token,
+                    record.revision,
+                    &format!("receipt:{}", record.preparation.packet_sha256),
+                    &ExecutionUpdate::Fenced {
+                        reason: serde_json::to_string(&receipt)
+                            .map_err(|_| runtime_error("receipt encoding failed"))?,
+                    },
+                    EffectAudit {
+                        id: &id,
+                        actor_id: "conductor-runtime",
+                        correlation_id: &record.preparation.effect_token,
+                        now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+                    },
+                )
+                .await?;
         }
         Ok(())
     }

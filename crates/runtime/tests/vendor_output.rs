@@ -155,3 +155,63 @@ fn stopped_writer_requires_observed_file_only_envelope_and_complete_prefix() {
     input.contract.adapter.kind = AdapterKind::Fake;
     assert!(!accepts_file_writer_stop(&input, &valid));
 }
+
+#[test]
+fn durable_receipt_is_private_bound_and_never_overwrites_evidence() {
+    use conductor_runtime::{RunnerEvent, read_terminal_receipt, write_terminal_receipt};
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("tree");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let mut input = packet(AdapterKind::Claude);
+    input.contract.workspace = workspace.clone();
+    input.contract.authority.read_roots = vec![workspace.clone()];
+    input.contract.authority.write_roots = vec![workspace.clone()];
+    input.contract.authority.allow_workspace_commands = false;
+    let event = RunnerEvent::Stopped {
+        reason: "private reason must not persist".into(),
+        stdout: output(&[
+            serde_json::json!({"type":"system","subtype":"init","tools":["Read","Write"]}),
+        ])
+        .stdout,
+    };
+    let path = workspace
+        .parent()
+        .unwrap()
+        .join(format!("terminal-{}.json", input.sha256().unwrap()));
+    assert!(read_terminal_receipt(&input).is_err());
+    write_terminal_receipt(&input, &event).unwrap();
+    assert_eq!(
+        read_terminal_receipt(&input).unwrap().observation,
+        "restricted_stop"
+    );
+    let bytes = fs::read(&path).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("private reason"));
+    assert!(!String::from_utf8_lossy(&bytes).contains("tools"));
+    assert!(write_terminal_receipt(&input, &event).is_err());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let link = root.path().join("alias");
+    fs::hard_link(&path, &link).unwrap();
+    assert!(read_terminal_receipt(&input).is_err());
+    fs::remove_file(&link).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(read_terminal_receipt(&input).is_err());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut changed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    changed["attempt_id"] = "different".into();
+    fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(read_terminal_receipt(&input).is_err());
+    fs::write(&path, vec![b'x'; 4097]).unwrap();
+    assert!(read_terminal_receipt(&input).is_err());
+    fs::rename(&path, &link).unwrap();
+    symlink(&link, &path).unwrap();
+    assert!(read_terminal_receipt(&input).is_err());
+    input.contract.attempt_id = "other".into();
+    input.contract.authority.allow_workspace_commands = true;
+    write_terminal_receipt(&input, &event).unwrap();
+    assert!(read_terminal_receipt(&input).is_err());
+}

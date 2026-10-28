@@ -33,8 +33,8 @@ Dispatch status is not task acceptance:
 - `finished`: the invocation returned. Inspect `completed` in its receipt and the
   authoritative task state; rejected checks/review and execution errors also
   finish an invocation without completing a task.
-- `needs_recovery`: an earlier boot held the claim when it stopped. No automatic
-  relaunch occurs. Task, execution records and private artifacts remain available.
+- `needs_recovery`: an earlier boot held the claim when it stopped. Automatic
+  relaunch requires the explicit recovery option below. Task, execution records and private artifacts remain available.
 
 Restart changes the boot identity, rejects stale claim/finish operations, preserves
 queued plans and marks prior running dispatches for reconciliation. It does not
@@ -77,3 +77,26 @@ admission, restart recovery, stale boot refusal and completed-claim refusal. Ful
 workspace checks cover protocol and existing ownership behavior. Real daemon and
 browser evidence is retained privately under the workspace review directory;
 consult STATUS for the exact accepted run and remaining scope.
+
+## Opt-in crash recovery
+
+Add `--recover-fenced` alongside `--dispatch` to allow at most one automatic
+continuation per interrupted workflow. It never retries a normally finished
+rejection or failure. Paused, cancelled, completed and operator-blocked tasks
+remain unchanged. A missing task or unconfirmed fence remains unfinished.
+
+After stopping/reaping an admitted restricted writer, the trusted wrapper writes
+an exclusive private terminal receipt outside the writer's allowed tree before
+publishing its terminal protocol frame. The receipt contains packet/attempt and
+output digests, never raw model output. On restart and maintenance, the service
+reconciles blocked executions against matching regular, single-link, mode-0600,
+bounded receipts. Missing, malformed, mismatched or linked files are refused.
+A receipt proves the existing trusted CLI capability boundary, not protection
+against a hostile process with the same host user identity.
+
+A verified receipt permits the existing retained-work continuation pipeline:
+new directory, attempt and epoch; original artifacts retained; checks and an
+independent review still required. The durable one-retry limit survives restart.
+Further recovery requires explicit operator continuation. A crash during receipt
+publication can leave a pending file or a two-link receipt; these conservatively
+require operator investigation and are never automatically treated as fenced.

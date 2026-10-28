@@ -7,6 +7,46 @@ use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt};
 use uuid::Uuid;
 
 impl<C: Clock> PersistentControlService<C> {
+    /// Reconciles durable receipt evidence and admits one bounded recovery per
+    /// interrupted workflow. Operator-paused/cancelled/blocked work is preserved.
+    /// # Errors
+    /// Returns storage errors; missing fence evidence never grants admission.
+    pub async fn recover_interrupted_workflows(&self) -> Result<usize, StoreError> {
+        self.recover_fenced_receipts().await?;
+        let _guard = self.mutations.lock().await;
+        let mut count = 0;
+        for job in self.store.interrupted_workflows().await? {
+            let task = match self.workflow_task(&job.task_id).await {
+                Ok(task) => task,
+                Err(StoreError::Integrity(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            let eligible=matches!(task.state,TaskState::Running|TaskState::Verifying|TaskState::Claimed|TaskState::Ready)
+                || (task.state==TaskState::Blocked && task.blocker.as_ref().is_some_and(|b|b.kind=="effect_inventory_contradiction" && b.detail=="controller restart left an execution without confirmed write fencing"));
+            if !eligible {
+                continue;
+            }
+            match self.continuation_packet(&job.task_id, task.version).await {
+                Ok(_) => {}
+                Err(StoreError::Integrity(_)) => continue,
+                Err(error) => return Err(error),
+            }
+            if self
+                .store
+                .auto_requeue_workflow(
+                    &job.task_id,
+                    task.version,
+                    self.boot_generation,
+                    self.clock.read(self.boot_generation).wall_unix_ms,
+                )
+                .await?
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     pub(super) async fn queue_continuation(
         &self,
         task_id: &str,
