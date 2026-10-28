@@ -1,5 +1,41 @@
 # Repository observation
 
+## Current issue #19 acceptance (2026-10-28)
+
+The scoped repository-hook integration is accepted. The historical milestones
+below retain their original limitations; this section supersedes their pending
+attribution, instruction and wake statements. This is not full-product acceptance.
+
+| Requirement | Implementation and evidence |
+| --- | --- |
+| Bounded observation and content-free events | Native dirty hints, bounded reconciliation, debounce and transactional batch drain described below. `hooks-current-v1` repeated real burst/create/update/delete/ignore/HEAD checks on release `fb6545e`. `native-watch-validation-manifest.json` retains linked-worktree, root-loss and 300-path drain evidence. |
+| Durable restart publication | Baseline and event/delivery writes share a transaction. Current real daemon SIGKILL/restart probe observed the stopped-period change once; transaction cancellation and lost-response controls are documented in STORE_TRANSACTIONS.md. This is not a physical power-loss durability claim. |
+| Filtering, echo and attribution | EVENT_ROUTING.md covers literal project/path/topic matching and retry admission. Current probe passed path separation and source echo suppression. Valid owned packets retain attempt/epoch; configured retained nonterminal workspaces without current ownership publish external identity. `unowned-validation-manifest.json` includes forged-packet and restart controls. |
+| Active instruction invalidation | `instruction-change-native-v2` changed an approved file after a real pinned Claude writer created output. The task blocked with `instruction_changed`; execution became fenced in 0.15 seconds. Continuation was queued but dispatch refused the changed pin before task mutation or another execution. Restoring bytes did not resume the task. |
+| Bounded wake and causal refusal | `causal-validation-manifest.json` binds two-consumer generations 0–8, generation-9 refusal, crash/lease/replay controls, and a real Claude/checks/Codex workflow whose generation-8 owned output could not wake a successor. Delivery acknowledgement and admission are atomic; repeated claims do not grant duplicate leases. |
+| Opt-in operation | Explicit watch configuration is required. Fixtures use isolated repositories and databases. No automatic user repository hook installation or source edits are performed. |
+
+The new instruction probe also restarted observation of the fenced retained tree:
+create/update/delete yielded three external deliveries, zero ordinary file
+subscriber deliveries, no lease/causation claim or raw content, and no duplicates
+after another restart. The task stayed blocked and the original checkout stayed
+clean. Elapsed time was 19.61 seconds, not a latency guarantee.
+
+Private evidence lives under `reviews/agent-conductor-runtime-20261028/`:
+`hooks-acceptance-manifest.json`, `hooks-current-v1/receipt.json`, and
+`instruction-change-native-v2/receipt.json`. The first instruction probe stopped
+at an incorrect synchronous-refusal assertion: the API acknowledges queueing,
+while the dispatcher validates pins before lifecycle mutation. The corrected
+probe tests that actual contract; no production refusal was weakened.
+
+Limits remain: bounded snapshots can miss transient intermediate filesystem
+states; watcher process health is not a freshness guarantee. Retained observation
+requires configured scope and excludes arbitrary orphan, superseded and terminal
+trees. The causal proof is not eight model-driven hops or detection of arbitrary
+external causal relationships. Host/Thor/Linux check isolation, issue #20,
+load/restore/redaction, broader recovery and seven-day soak remain separate work.
+
+
 The opt-in daemon watcher turns repository observations into the existing durable
 semantic-event/delivery system. It never directly launches a model. Native private
 workspaces carry authoritative attempt identity; explicitly approved subscribed
