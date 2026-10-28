@@ -1,3 +1,5 @@
+mod board;
+pub use board::OperatorBoard;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io;
