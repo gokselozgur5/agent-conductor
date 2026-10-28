@@ -59,6 +59,9 @@ async fn emit_terminal(
 
 #[allow(clippy::too_many_lines)]
 async fn serve() -> Result<(), ()> {
+    let identity =
+        conductor_runtime::RunnerProcessIdentity::from_arguments(std::env::args_os().skip(1))
+            .map_err(|_| ())?;
     let mut input = BufReader::new(tokio::io::stdin());
     let bytes = tokio::time::timeout(
         Duration::from_secs(5),
@@ -79,6 +82,12 @@ async fn serve() -> Result<(), ()> {
     }
     conductor_runtime::read_pinned_instructions(&launch.packet).map_err(|_| ())?;
     let packet_hash = launch.packet.sha256().map_err(|_| ())?;
+    if identity
+        .as_ref()
+        .is_some_and(|identity| identity.packet_sha256 != packet_hash)
+    {
+        return Err(());
+    }
     let receipt_packet = launch.packet.clone();
     let acknowledgement = PacketAcknowledgement {
         version: 1,

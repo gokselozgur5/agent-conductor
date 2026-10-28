@@ -2,6 +2,12 @@
 
 ## Current result
 
+Authority-bound native wrappers now expose scoped packet/wrapper correlation
+tags, checked before Ready. A bounded read-only process diagnostic reports
+correspondence with durable execution metadata.
+[RUNNER_PROCESS_IDENTITY.md](RUNNER_PROCESS_IDENTITY.md) explains the remaining
+process-identity/race limits; this observation is not fencing authority.
+
 A continuous isolated control-plane endurance harness exercises real lifecycle,
 event deduplication, stale epochs, board/SQLite correspondence and resource
 budgets. [CONTROL_PLANE_SOAK.md](CONTROL_PLANE_SOAK.md) defines its evidence and
