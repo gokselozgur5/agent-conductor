@@ -2,6 +2,12 @@
 
 ## Current result
 
+Migration 18 binds parent-observed native PID/start/host/boot metadata to durable
+wrapper acknowledgement, before release. Missing or malformed metadata refuses
+new authority-bound ACKs; legacy records remain unknown. Diagnostics distinguish
+stored bindings from native observations. These are not signalable handles or
+proof of escaped descendant fencing; see [RUNNER_PROCESS_IDENTITY.md](RUNNER_PROCESS_IDENTITY.md).
+
 Authority-bound native wrappers now expose scoped packet/wrapper correlation
 tags, checked before Ready. Kernel start-marker comparisons now discard observed
 PID changes around argument and database reads; this is not a pinned process

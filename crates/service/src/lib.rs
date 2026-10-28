@@ -2446,6 +2446,12 @@ mod effect_tests {
             .await
             .expect("launch");
         assert_eq!(record.state, ExecutionState::Started);
+        assert!(
+            record
+                .process
+                .as_ref()
+                .is_some_and(|process| process.pid > 0)
+        );
         assert_eq!(
             store.execution(&token).await.expect("read"),
             Some(record.clone())

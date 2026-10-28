@@ -47,7 +47,7 @@ impl RunnerConnection {
         record_acknowledgement: F,
     ) -> Result<Self, RunnerConnectionError>
     where
-        F: FnOnce(PacketAcknowledgement) -> Fut,
+        F: FnOnce(PacketAcknowledgement, crate::ChildIdentity) -> Fut,
         Fut: Future<Output = Result<u64, RunnerConnectionError>>,
     {
         launch
@@ -105,12 +105,28 @@ impl RunnerConnection {
             .packet
             .verify_ack(&acknowledgement)
             .map_err(|_| RunnerConnectionError::Protocol)?;
+        // The parent retains an unreaped child. Worker output cannot nominate this PID.
+        let pid = connection
+            .child
+            .id()
+            .ok_or(RunnerConnectionError::Protocol)?;
+        let birth =
+            tokio::time::timeout(Duration::from_secs(3), crate::ChildIdentity::observe(pid))
+                .await
+                .map_err(|_| RunnerConnectionError::Protocol)?
+                .map_err(|_| RunnerConnectionError::Protocol)?;
+        connection.require_unreaped_child()?;
         let continuous_deadline_ms = tokio::time::timeout(
             Duration::from_secs(3),
-            record_acknowledgement(acknowledgement),
+            record_acknowledgement(acknowledgement, birth.clone()),
         )
         .await
         .map_err(|_| RunnerConnectionError::Persistence)??;
+        tokio::time::timeout(Duration::from_secs(1), birth.revalidate())
+            .await
+            .map_err(|_| RunnerConnectionError::Protocol)?
+            .map_err(|_| RunnerConnectionError::Protocol)?;
+        connection.require_unreaped_child()?;
         if crate::continuous_millis().map_err(|_| RunnerConnectionError::Protocol)?
             >= continuous_deadline_ms
         {
@@ -123,6 +139,18 @@ impl RunnerConnection {
             })
             .await?;
         Ok(connection)
+    }
+
+    fn require_unreaped_child(&mut self) -> Result<(), RunnerConnectionError> {
+        if self
+            .child
+            .try_wait()
+            .map_err(|_| RunnerConnectionError::Transport)?
+            .is_some()
+        {
+            return Err(RunnerConnectionError::Protocol);
+        }
+        Ok(())
     }
 
     /// Sends a renewal only after the controller has checked current ownership.

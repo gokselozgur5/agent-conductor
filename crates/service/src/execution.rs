@@ -110,18 +110,14 @@ impl<C: Clock> PersistentControlService<C> {
             self.validate_runtime_owner(&launch.packet).await?;
         }
         let wrapper_identity = Uuid::now_v7().to_string();
-        let (authority, generation) = self.store.runtime_authority().await?;
-        if generation != self.boot_generation {
-            return Err(runtime_error("runner identity belongs to a stale boot"));
-        }
-        let identity = authority.map(|authority_id| conductor_runtime::RunnerProcessIdentity {
-            authority_id,
-            packet_sha256: record.preparation.packet_sha256.clone(),
-            wrapper_identity: wrapper_identity.clone(),
-        });
+        let identity = self.process_tag(&record, &wrapper_identity).await?;
         let mut acknowledged = None;
-        let connection =
-            RunnerConnection::launch(wrapper, launch, identity.as_ref(), |ack| async {
+        let acknowledgement_slot = &mut acknowledged;
+        let connection = RunnerConnection::launch(
+            wrapper,
+            launch,
+            identity.as_ref(),
+            |ack, birth| async move {
                 // The wrapper may take time to start. Recheck the monotonic lease,
                 // not just the SQL active flag, immediately before recording its ACK.
                 self.validate_runtime_owner(&launch.packet)
@@ -138,6 +134,7 @@ impl<C: Clock> PersistentControlService<C> {
                         &ExecutionUpdate::Acknowledge {
                             wrapper_identity: wrapper_identity.clone(),
                             packet_sha256: ack.packet_sha256,
+                            process: Some(persisted_process(birth)),
                         },
                         EffectAudit {
                             id: &audit_id,
@@ -153,15 +150,34 @@ impl<C: Clock> PersistentControlService<C> {
                     .validate_runtime_owner(&launch.packet)
                     .await
                     .map_err(|_| RunnerConnectionError::Persistence)?;
-                acknowledged = Some(result);
+                *acknowledgement_slot = Some(result);
                 Ok(deadline)
-            })
-            .await
-            .map_err(|_| runtime_error("wrapper release failed; reconcile durable execution"))?;
+            },
+        )
+        .await
+        .map_err(|_| runtime_error("wrapper release failed; reconcile durable execution"))?;
         Ok((
             acknowledged.ok_or_else(|| runtime_error("acknowledgement missing"))?,
             connection,
         ))
+    }
+
+    async fn process_tag(
+        &self,
+        record: &ExecutionRecord,
+        wrapper_identity: &str,
+    ) -> Result<Option<conductor_runtime::RunnerProcessIdentity>, StoreError> {
+        let (authority, generation) = self.store.runtime_authority().await?;
+        if generation != self.boot_generation {
+            return Err(runtime_error("runner identity belongs to a stale boot"));
+        }
+        Ok(
+            authority.map(|authority_id| conductor_runtime::RunnerProcessIdentity {
+                authority_id,
+                packet_sha256: record.preparation.packet_sha256.clone(),
+                wrapper_identity: wrapper_identity.into(),
+            }),
+        )
     }
 
     /// Renews only the current live execution under lifecycle serialization.
@@ -595,5 +611,17 @@ fn native_result_candidate(
         )
         .ok(),
         _ => None,
+    }
+}
+
+fn persisted_process(
+    birth: conductor_runtime::ChildIdentity,
+) -> agent_conductor_store::ExecutionProcess {
+    agent_conductor_store::ExecutionProcess {
+        platform: birth.host.platform,
+        host_id: birth.host.host_id,
+        boot_id: birth.host.boot_id,
+        pid: birth.pid,
+        start_marker: birth.start_marker,
     }
 }

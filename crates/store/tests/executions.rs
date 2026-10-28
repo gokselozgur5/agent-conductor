@@ -44,6 +44,7 @@ fn audit(id: &str) -> EffectAudit<'_> {
 }
 fn acknowledgement() -> ExecutionUpdate {
     ExecutionUpdate::Acknowledge {
+        process: None,
         wrapper_identity: "wrapper-nonce".into(),
         packet_sha256: input().packet_sha256,
     }
@@ -456,6 +457,7 @@ async fn evidence_links_execution_identity_without_packet_checkpoint_or_effect_t
             0,
             "start-evidence",
             &ExecutionUpdate::Acknowledge {
+                process: None,
                 wrapper_identity: "PRIVATE_WRAPPER".into(),
                 packet_sha256: preparation.packet_sha256.clone(),
             },
@@ -511,4 +513,128 @@ async fn evidence_links_execution_identity_without_packet_checkpoint_or_effect_t
     }
     assert_eq!(rows.last().unwrap().kind, "execution.prepared");
     assert!(store.task_evidence("other", None).await.unwrap().is_empty());
+}
+
+fn observed_process() -> agent_conductor_store::ExecutionProcess {
+    agent_conductor_store::ExecutionProcess {
+        platform: "linux".into(),
+        host_id: "a".repeat(64),
+        boot_id: "b".repeat(64),
+        pid: 42,
+        start_marker: "linux-start-ticks:12345".into(),
+    }
+}
+
+#[tokio::test]
+async fn native_birth_binding_rolls_back_with_ack_and_survives_reopen() {
+    let (directory, store) = seed().await;
+    store
+        .prepare_execution(&input(), audit("prepare"))
+        .await
+        .unwrap();
+    let path = directory.path().join("control.sqlite3");
+    let mut db = SqliteConnection::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    db.execute("UPDATE recovery_authority SET authority_id='bound'; CREATE TRIGGER reject_ack BEFORE INSERT ON audit_events WHEN NEW.kind='execution.started' BEGIN SELECT RAISE(ABORT,'fixture'); END;").await.unwrap();
+    let update = ExecutionUpdate::Acknowledge {
+        process: Some(observed_process()),
+        wrapper_identity: "wrapper".into(),
+        packet_sha256: input().packet_sha256,
+    };
+    assert!(
+        store
+            .update_execution("token", 0, "ack", &update, audit("ack"))
+            .await
+            .is_err()
+    );
+    let unchanged = store.execution("token").await.unwrap().unwrap();
+    assert_eq!(unchanged.state, ExecutionState::Prepared);
+    assert!(unchanged.process.is_none());
+    assert_eq!(unchanged.revision, 0);
+    db.execute("DROP TRIGGER reject_ack").await.unwrap();
+    let accepted = store
+        .update_execution("token", 0, "ack", &update, audit("ack"))
+        .await
+        .unwrap();
+    assert_eq!(accepted.process, Some(observed_process()));
+    assert_eq!(
+        store
+            .update_execution("token", 0, "ack", &update, audit("retry"))
+            .await
+            .unwrap(),
+        accepted
+    );
+    let mut changed = update.clone();
+    if let ExecutionUpdate::Acknowledge {
+        process: Some(process),
+        ..
+    } = &mut changed
+    {
+        process.pid += 1;
+    }
+    assert!(matches!(
+        store
+            .update_execution("token", 0, "ack", &changed, audit("collision"))
+            .await,
+        Err(StoreError::IdempotencyCollision)
+    ));
+    drop(db);
+    drop(store);
+    let reopened = Store::open(&path).await.unwrap();
+    assert_eq!(
+        reopened.execution("token").await.unwrap().unwrap().process,
+        Some(observed_process())
+    );
+}
+
+#[tokio::test]
+async fn bound_execution_refuses_missing_or_malformed_native_birth() {
+    let (directory, store) = seed().await;
+    store
+        .prepare_execution(&input(), audit("prepare"))
+        .await
+        .unwrap();
+    let path = directory.path().join("control.sqlite3");
+    let mut db = SqliteConnection::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    db.execute("UPDATE recovery_authority SET authority_id='bound'")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .update_execution("token", 0, "ack", &acknowledgement(), audit("ack"))
+            .await
+            .is_err()
+    );
+    for (pid, platform, marker) in [
+        (0, "linux", "linux-start-ticks:1"),
+        (42, "linux", "macos-start-us:1:2"),
+        (42, "macos", "macos-start-us:1:1000000"),
+        (42, "linux", "linux-start-ticks:-1"),
+    ] {
+        let mut process = observed_process();
+        process.pid = pid;
+        process.platform = platform.into();
+        process.start_marker = marker.into();
+        let update = ExecutionUpdate::Acknowledge {
+            process: Some(process),
+            wrapper_identity: "wrapper".into(),
+            packet_sha256: input().packet_sha256,
+        };
+        assert!(
+            store
+                .update_execution("token", 0, "bad", &update, audit("bad"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.execution("token").await.unwrap().unwrap().state,
+            ExecutionState::Prepared
+        );
+    }
+    assert_eq!(audit_count(&store).await, 1);
+    let legacy = serde_json::to_string(&acknowledgement()).unwrap();
+    assert!(!legacy.contains("process"));
 }

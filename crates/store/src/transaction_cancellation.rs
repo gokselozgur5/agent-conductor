@@ -278,6 +278,7 @@ async fn run(store: &Store, owner: Owner, delivery: Option<&EventDelivery>) -> R
                     0,
                     "ack",
                     &ExecutionUpdate::Acknowledge {
+                        process: None,
                         wrapper_identity: "wrapper".into(),
                         packet_sha256: preparation().packet_sha256,
                     },

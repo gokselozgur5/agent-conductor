@@ -83,3 +83,8 @@ pub use scoped_advisory::*;
 mod process_identity;
 #[cfg(unix)]
 pub use process_identity::RunnerProcessIdentity;
+
+mod host_epoch;
+pub use host_epoch::HostEpoch;
+mod child_identity;
+pub use child_identity::ChildIdentity;

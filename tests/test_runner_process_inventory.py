@@ -25,6 +25,21 @@ class ProcessInventory(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(inventory.parse_tag(text))
 
+    def test_persisted_binding_requires_pid_marker_and_native_boot(self):
+        import json
+        host = dict(platform='linux', host_id='a' * 64, boot_id='b' * 64)
+        value = dict(host, pid=42, start_marker='linux-start-ticks:123')
+        check = lambda raw, pid=42, start='linux-start-ticks:123', current=host: inventory.process_binding(raw, pid, start, current)
+        raw = json.dumps(value)
+        self.assertEqual(check(raw), 'matching_observation')
+        self.assertEqual(check(raw, current=None), 'host_boot_unchecked')
+        self.assertEqual(check(raw, pid=43), 'pid_mismatch')
+        self.assertEqual(check(raw, start='linux-start-ticks:124'), 'kernel_marker_mismatch')
+        self.assertEqual(check(raw, current=dict(host, boot_id='c' * 64)), 'host_boot_mismatch')
+        self.assertEqual(check(None), 'legacy_unavailable')
+        for bad in ['{}', '[]', 'x' * 1025, json.dumps(dict(value, pid=True))]:
+            self.assertEqual(check(bad), 'invalid_recorded_process')
+
     def test_runner_names_handle_spaces_without_reading_other_arguments(self):
         self.assertEqual(inventory.runner_pids('  12 /path with spaces/conductor-runner\n13 unrelated\n14 conductor-runner\n'), [12, 14])
         with self.assertRaisesRegex(ValueError, 'too_many_runner_observations'):
