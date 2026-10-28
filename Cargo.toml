@@ -6,6 +6,7 @@ members = [
     "crates/store",
     "crates/daemon",
     "crates/cli",
+    "crates/testkit",
 ]
 resolver = "2"
 
