@@ -365,6 +365,14 @@ async fn publish_in_transaction(
         }
         return Err(EventStoreError::IdempotencyCollision);
     }
+    if sqlx::query_scalar::<_, String>("SELECT idempotency_key FROM semantic_events WHERE id = ?")
+        .bind(&event.id)
+        .fetch_optional(&mut *connection)
+        .await?
+        .is_some()
+    {
+        return Err(EventStoreError::IdempotencyCollision);
+    }
     if let Some(causation_id) = &event.causation_id {
         let parent_generation: Option<i64> =
             sqlx::query_scalar("SELECT generation FROM semantic_events WHERE id = ?")

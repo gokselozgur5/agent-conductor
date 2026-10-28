@@ -850,12 +850,30 @@ mod tests {
         };
         assert_eq!(published.fanout, 1, "source echo must be suppressed");
         assert!(!published.duplicate);
-        let envelope = RequestEnvelope::new(publish);
+        let mut semantic_retry = publish.clone();
+        let Request::PublishEvent { event } = &mut semantic_retry else {
+            unreachable!("publish request")
+        };
+        event.id = "event-2".into();
+        let envelope = RequestEnvelope::new(semantic_retry);
         let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
         let ResponseResult::Ok(Response::EventPublished(duplicate)) = response.result else {
             panic!("duplicate publish failed")
         };
         assert!(duplicate.duplicate);
+        assert_eq!(duplicate.event_id, "event-1");
+
+        let mut changed = publish;
+        let Request::PublishEvent { event } = &mut changed else {
+            unreachable!("publish request")
+        };
+        event.payload = serde_json::json!({"state": "changed"});
+        let envelope = RequestEnvelope::new(changed);
+        let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Error(error) = response.result else {
+            panic!("changed content reused an event idempotency key")
+        };
+        assert_eq!(error.code, ErrorCode::Conflict);
         let envelope = RequestEnvelope::new(Request::ClaimEvent {
             agent_id: "source".into(),
         });

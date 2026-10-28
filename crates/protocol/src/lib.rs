@@ -411,6 +411,24 @@ mod tests {
     #[test]
     fn every_response_variant_round_trips() {
         let task = sample_task_response();
+        let event = SemanticEventResponse {
+            schema_version: 1,
+            id: "event-1".into(),
+            idempotency_key: "key-1".into(),
+            source_agent_id: "agent-1".into(),
+            source_session_id: "session-1".into(),
+            correlation_id: "correlation-1".into(),
+            causation_id: None,
+            generation: 0,
+            topic: "task.changed".into(),
+            project_id: Some("project-1".into()),
+            task_id: Some("task-1".into()),
+            attempt_id: Some("attempt-1".into()),
+            lease_epoch: Some(1),
+            path_scope: None,
+            payload: serde_json::json!({"state": "ready"}),
+            created_at_ms: 1,
+        };
         let responses = vec![
             Response::Health(HealthResponse {
                 status: HealthStatus::Ready,
@@ -442,6 +460,16 @@ mod tests {
                 duplicate: false,
             }),
             Response::EventDelivery { delivery: None },
+            Response::EventDelivery {
+                delivery: Some(Box::new(EventDeliveryResponse {
+                    schema_version: 1,
+                    delivery_id: "delivery-1".into(),
+                    event,
+                    attempts: 1,
+                    claim_token: "claim-1".into(),
+                    lease_expires_at_ms: 10,
+                })),
+            },
             Response::EventAcknowledged {
                 delivery_id: "delivery-1".into(),
             },
