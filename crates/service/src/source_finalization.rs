@@ -71,6 +71,23 @@ impl<C: Clock> PersistentControlService<C> {
                 .sha256()
                 .map_err(|_| invalid("source hash failed"))?
         ));
+        self.publish_captured_source(&packet, token, &id, source)
+            .await?;
+        Ok(manifest)
+    }
+    async fn publish_captured_source(
+        &self,
+        packet: &ResumePacket,
+        token: &str,
+        id: &str,
+        source: SourceIdentity,
+    ) -> Result<(), StoreError> {
+        let mut row = self
+            .store
+            .task(&packet.contract.task_id)
+            .await?
+            .ok_or_else(|| invalid("task missing"))?;
+        let mut batches = Vec::new();
         for (actor, kind, label) in [
             (
                 Actor {
@@ -92,29 +109,34 @@ impl<C: Clock> PersistentControlService<C> {
                 "bind",
             ),
         ] {
-            let row = self
-                .store
-                .task(&packet.contract.task_id)
-                .await?
-                .ok_or_else(|| invalid("task missing"))?;
             let task: Task =
                 serde_json::from_str(&row.aggregate_json).map_err(|_| invalid("invalid task"))?;
-            self.apply_row(
-                row,
-                Command {
-                    actor,
-                    expected_version: task.version,
-                    correlation_id: CorrelationId(token.into()),
-                    idempotency_key: IdempotencyKey(format!("finalize:{id}:{label}")),
-                    reason: "bind restricted writer captured source for independent verification"
-                        .into(),
-                    kind,
-                },
-            )
-            .await
-            .map_err(|_| invalid("source lifecycle publication failed"))?;
+            let command = Command {
+                actor,
+                expected_version: task.version,
+                correlation_id: CorrelationId(token.into()),
+                idempotency_key: IdempotencyKey(format!("finalize:{id}:{label}")),
+                reason: "bind restricted writer captured source for independent verification"
+                    .into(),
+                kind,
+            };
+            let request_json = serde_json::to_string(&(row.id.as_str(), &command))
+                .map_err(|_| invalid("source command serialization failed"))?;
+            let (batch, response) = self
+                .prepare_command_batch(
+                    row.clone(),
+                    command,
+                    crate::hash(&request_json),
+                    request_json,
+                )
+                .await
+                .map_err(|_| invalid("source lifecycle preparation failed"))?;
+            row.aggregate_json = serde_json::to_string(&response.task.aggregate)
+                .map_err(|_| invalid("source aggregate serialization failed"))?;
+            batches.push(batch);
         }
-        Ok(manifest)
+        self.store.persist_sequence(&batches).await?;
+        Ok(())
     }
 }
 fn invalid(message: &str) -> StoreError {

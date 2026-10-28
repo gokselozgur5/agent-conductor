@@ -21,8 +21,9 @@ state, checks and independent acceptance. Two Chrome probes verified rendering,
 wrong-token refusal, injection-as-text, live refresh, stale-state indication and
 disconnect. The read-only board shipped through PR #6 after exact-head macOS/Linux CI.
 Version-bound ready/pause/resume/cancel controls are implemented under issue #7
-and validated through real SQLite/HTTP tests and an isolated Chrome run; this
-control branch awaits its own CI.
+and shipped through PR #8 after macOS/Linux CI, real SQLite/HTTP tests and an
+isolated Chrome run. Atomic verification/source publication is the next change
+under issue #9; its fault regression preserves task state after a late bind failure.
 
 ## Implemented
 
@@ -46,13 +47,14 @@ control branch awaits its own CI.
 
 The latest local workspace run passed 156 tests, formatting, strict Clippy and
 credential/media scans. Evidence is kept privately under
-`reviews/agent-conductor-runtime-20261028/operator-controls-workspace.log` and
+`reviews/agent-conductor-runtime-20261028/atomic-source-workspace.log` and
 `native-workflow-v1/`. The model-call cap is not an actual spend measurement.
 
 Phase 1 has separate accepted evidence in [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md).
 Native workflow head `5520583` and race-fix head `277d653` passed macOS/Linux CI
 before their respective merges. Board head `2937f43` also passed both hosts and merged at `3fc64c7`.
-The operator-control branch still requires its own exact-SHA CI. Local results do not substitute for that remote check.
+Control head `02e6954` passed both hosts and merged at `a761d94`.
+The atomic-source branch still requires its own exact-SHA CI. Local results do not substitute for that remote check.
 
 ## Trust boundaries
 
@@ -67,7 +69,7 @@ See [ADAPTER_CONFORMANCE.md](ADAPTER_CONFORMANCE.md) and [SANDBOX.md](SANDBOX.md
 ## Remaining full-product work
 
 - Native interruption/recovery acceptance and automatic continuation from retained
-  checkpoints; source begin/bind crash reconciliation and durable review recovery.
+  checkpoints; recovery of retained fenced captures and durable review recovery.
 - Continuous scheduling and complete operator start/pause/resume/cancel workflow.
 - Operator plan submission and broader operator API; coalesced filesystem/Git hooks.
 - Host protocol, Thor acceptance and supported host isolation beyond macOS checks.

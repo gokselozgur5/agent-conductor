@@ -448,6 +448,27 @@ impl Store {
         finish_transaction(&mut writer, result).await
     }
 
+    /// Persists an ordered set of domain batches atomically. A late conflict or
+    /// invalid append rolls back earlier batches, including their replay records.
+    /// # Errors
+    /// Returns the first persistence error; no batch is committed on failure.
+    pub async fn persist_sequence(
+        &self,
+        batches: &[CommitBatch],
+    ) -> Result<Vec<CommitResult>, StoreError> {
+        let mut writer = self.inner.writer.lock().await;
+        writer.execute("BEGIN IMMEDIATE").await?;
+        let result = async {
+            let mut results = Vec::with_capacity(batches.len());
+            for batch in batches {
+                results.push(persist_in_transaction(&mut writer, batch).await?);
+            }
+            Ok(results)
+        }
+        .await;
+        finish_transaction(&mut writer, result).await
+    }
+
     /// Verifies the database and atomically begins a new daemon boot era.
     ///
     /// # Errors

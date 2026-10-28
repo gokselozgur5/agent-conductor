@@ -89,3 +89,13 @@ Automatic continuation after interruption, all failure-path native acceptance,
 continuous scheduling, UI, hooks, Thor and long-running hardening remain open.
 The restricted-writer fence relies on the trusted pinned CLI capability boundary,
 as documented in ADAPTER_CONFORMANCE; it is not a generic escaped-process fence.
+
+### Atomic source publication
+
+After source capture, the existing BeginVerification and BindVerificationSource
+commands are prepared through the domain and committed in one SQLite transaction,
+including both audit and idempotency records. A late binding failure rolls back
+both transitions. The captured files and previously recorded execution fence are
+retained; this does not itself implement retry after a fenced capture or restart.
+The fault regression injects an audit failure in the second command and verifies
+unchanged task state and absent partial audit/replay records.

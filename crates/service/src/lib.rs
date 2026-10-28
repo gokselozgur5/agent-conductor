@@ -461,6 +461,26 @@ impl<C: Clock> PersistentControlService<C> {
             value.replayed = true;
             return Ok(value);
         }
+        let (batch, response) = self
+            .prepare_command_batch(row, command, request_hash, request_json)
+            .await?;
+        match self.store.persist(&batch).await.map_err(store_error)? {
+            CommitResult::Applied { .. } => Ok(response),
+            CommitResult::Replayed { outcome_json } => {
+                let mut value: CommandAppliedResponse =
+                    serde_json::from_str(&outcome_json).map_err(json_error)?;
+                value.replayed = true;
+                Ok(value)
+            }
+        }
+    }
+    async fn prepare_command_batch(
+        &self,
+        row: PersistedTask,
+        command: Command,
+        request_hash: String,
+        request_json: String,
+    ) -> Result<(CommitBatch, CommandAppliedResponse), ErrorBody> {
         self.validate_claim_worker(&command).await?;
         self.validate_execution_fence(&row.id, &command).await?;
         let old: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
@@ -527,15 +547,7 @@ impl<C: Clock> PersistentControlService<C> {
             committed_at_ms: clock.wall_unix_ms,
             expires_at_ms: clock.wall_unix_ms.saturating_add(86_400_000),
         };
-        match self.store.persist(&batch).await.map_err(store_error)? {
-            CommitResult::Applied { .. } => Ok(response),
-            CommitResult::Replayed { outcome_json } => {
-                let mut value: CommandAppliedResponse =
-                    serde_json::from_str(&outcome_json).map_err(json_error)?;
-                value.replayed = true;
-                Ok(value)
-            }
-        }
+        Ok((batch, response))
     }
 }
 
@@ -2277,7 +2289,12 @@ mod effect_tests {
         use agent_conductor_store::{EffectAudit, ExecutionState};
         use conductor_runtime::{AdapterKind, PacketAcknowledgement, RunnerEvent};
         use std::os::unix::fs::PermissionsExt;
-        for (valid, replace_packet) in [(true, false), (false, false), (true, true)] {
+        for (valid, replace_packet, fail_publication) in [
+            (true, false, false),
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
             let (directory, store) = lifecycle_store().await;
             let service =
                 PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
@@ -2403,6 +2420,48 @@ mod effect_tests {
                 assert!(!directory.path().join("refused").exists());
                 assert!(store.has_unfenced_execution("task").await.unwrap());
                 candidate.file_only_tools = true;
+                if fail_publication {
+                    let mut connection = SqliteConnection::connect(&format!(
+                        "sqlite://{}",
+                        directory.path().join("state.sqlite3").display()
+                    ))
+                    .await
+                    .unwrap();
+                    connection.execute("CREATE TRIGGER refuse_source_binding BEFORE INSERT ON audit_events WHEN NEW.kind = 'bind_verification_source' BEGIN SELECT RAISE(ABORT, 'injected late publication failure'); END").await.unwrap();
+                    let before = store.task("task").await.unwrap().unwrap();
+                    assert!(
+                        service
+                            .finalize_native_source(
+                                &token,
+                                &candidate,
+                                &directory.path().join("failed-final"),
+                                &[]
+                            )
+                            .await
+                            .is_err()
+                    );
+                    let after = store.task("task").await.unwrap().unwrap();
+                    assert_eq!(
+                        before.aggregate_json, after.aggregate_json,
+                        "begin transition must roll back with bind failure"
+                    );
+                    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE kind IN ('begin_verification', 'bind_verification_source')").fetch_one(&mut connection).await.unwrap();
+                    assert_eq!(count, 0, "audit must roll back too");
+                    let replay_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM command_idempotency WHERE idempotency_key LIKE 'finalize:%'").fetch_one(&mut connection).await.unwrap();
+                    assert_eq!(replay_count, 0, "no phantom replay receipt");
+                    assert_eq!(
+                        store.execution(&token).await.unwrap().unwrap().state,
+                        ExecutionState::Fenced
+                    );
+                    assert!(
+                        directory
+                            .path()
+                            .join("failed-final/tree/result.txt")
+                            .exists(),
+                        "capture preserved for recovery"
+                    );
+                    continue;
+                }
                 let captured = service
                     .finalize_native_source(
                         &token,
