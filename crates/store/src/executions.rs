@@ -156,6 +156,24 @@ impl Store {
         rows.into_iter().next().map(decode).transpose()
     }
 
+    /// Finds the unique recorded execution for an exact task/workspace pair.
+    /// # Errors
+    /// Refuses ambiguous matches; returns database or record errors.
+    pub async fn execution_for_workspace(
+        &self,
+        task_id: &str,
+        workspace: &str,
+    ) -> Result<Option<ExecutionRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM executions WHERE task_id=? AND json_extract(packet_json,'$.contract.workspace')=? LIMIT 2")
+            .bind(task_id).bind(workspace).fetch_all(&self.inner.readers).await?;
+        if rows.len() > 1 {
+            return Err(StoreError::Integrity(
+                "ambiguous workspace execution".into(),
+            ));
+        }
+        rows.into_iter().next().map(decode).transpose()
+    }
+
     /// Persists an immutable packet before any wrapper is launched. Duplicate
     /// preparation returns the current record, never a new permission to spawn.
     /// # Errors

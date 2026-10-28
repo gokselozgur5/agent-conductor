@@ -172,3 +172,13 @@ selected history. The same read is available locally:
 Use the returned `next_before` cursor unchanged. Each page contains at most 100
 entries; command/checkpoint payloads are omitted. This view does not acknowledge
 semantic events or change the task. See [TASK_HISTORY.md](TASK_HISTORY.md).
+
+## Initial evidence during continuation
+
+Keep the task's original artifact directory, including `work/manifest.json`.
+Continuation copies retained unfinished files into a new attempt, but preservation
+review now uses the initial task manifest bound to the first durable execution.
+A missing, linked, changed or unbound initial manifest refuses continuation before
+another attempt starts. The task and prior work remain intact. Older packets that
+lack a baseline digest cannot establish this evidence; do not manufacture a new
+baseline from their dirty work to bypass the refusal.

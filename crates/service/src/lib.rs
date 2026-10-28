@@ -39,6 +39,8 @@ mod repository_watch;
 #[cfg(unix)]
 mod workflow;
 #[cfg(unix)]
+mod workflow_baseline;
+#[cfg(unix)]
 mod workflow_continuation;
 #[cfg(unix)]
 mod workflow_dependencies;

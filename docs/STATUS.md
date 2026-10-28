@@ -30,6 +30,10 @@ A real two-task Claude/checks/Codex chain passed in 123.56 seconds, including
 restart and a changed-input refusal before worker creation. Local validation
 passed 195 tests and strict lint/build. See
 [WORKFLOW_DEPENDENCIES.md](WORKFLOW_DEPENDENCIES.md) for limits and evidence.
+Dependent-writer pause/restart/continuation now preserves initial task evidence
+separately from retained unfinished work. The real continuation passed independent
+review in 78.96 seconds; corrupt initial evidence was refused before another
+attempt. The correction passes 198 local tests and strict lint/build.
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, outer advisory
 discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,

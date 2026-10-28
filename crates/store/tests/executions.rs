@@ -376,3 +376,58 @@ async fn blocked_execution_can_record_later_fence_without_restarting() {
     assert_eq!(fenced.state, ExecutionState::Fenced);
     assert!(!store.has_unfenced_execution("task").await.expect("clear"));
 }
+
+#[tokio::test]
+async fn original_workspace_lookup_is_task_scoped_and_rejects_ambiguity() {
+    let (directory, store) = seed().await;
+    let mut original = input();
+    let mut packet: serde_json::Value = serde_json::from_str(&original.packet_json).unwrap();
+    packet["contract"]["workspace"] = "/artifacts/work/tree".into();
+    original.packet_json = packet.to_string();
+    original.packet_sha256 = format!("{:x}", Sha256::digest(original.packet_json.as_bytes()));
+    store
+        .prepare_execution(&original, audit("initial"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .execution_for_workspace("task", "/artifacts/work/tree")
+            .await
+            .unwrap()
+            .unwrap()
+            .preparation,
+        original
+    );
+    assert!(
+        store
+            .execution_for_workspace("other", "/artifacts/work/tree")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .execution_for_workspace("task", "/artifacts/continuation/work/tree")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut db = SqliteConnection::connect(&format!(
+        "sqlite://{}",
+        directory.path().join("control.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    db.execute("UPDATE attempts SET ended_at_ms=1 WHERE id='attempt';
+        INSERT INTO attempts (id,task_id,worker_id,lease_epoch,instruction_hashes_json,required_checks_json,capability_hash,started_at_ms) VALUES ('attempt2','task','worker',8,'[]','[]','hash',1);
+        INSERT INTO effect_intents (token,task_id,attempt_id,lease_epoch,correlation_id,effect_kind,request_json,status,runner_id,claim_deadline_ms,created_at_ms,updated_at_ms) VALUES ('token2','task','attempt2',8,'correlation','worker.spawn','{}','claimed','runner',10000,1,1);
+        INSERT INTO executions (effect_token,task_id,attempt_id,lease_epoch,runner_id,packet_json,packet_sha256,state,created_at_ms,updated_at_ms) SELECT 'token2',task_id,'attempt2',8,runner_id,packet_json,packet_sha256,state,1,1 FROM executions WHERE effect_token='token';").await.unwrap();
+    assert!(
+        store
+            .execution_for_workspace("task", "/artifacts/work/tree")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous workspace execution")
+    );
+}
