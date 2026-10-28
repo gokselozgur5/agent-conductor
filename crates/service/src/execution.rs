@@ -34,7 +34,7 @@ impl<C: Clock> PersistentControlService<C> {
             .await
     }
 
-    /// Launches the pinned restricted Claude file-tool writer. Its authentication
+    /// Launches a pinned native writer admitted by its runtime adapter. Its authentication
     /// environment is forwarded only through the private wrapper pipe, never SQL.
     /// Command-capable writers remain refused pending descendant fencing evidence.
     /// The pin must be selected by trusted daemon configuration, not worker text.
@@ -49,21 +49,8 @@ impl<C: Clock> PersistentControlService<C> {
         effect_token: &str,
         runner_id: &str,
     ) -> Result<(ExecutionRecord, RunnerConnection), StoreError> {
-        if pin.kind != AdapterKind::Claude || packet.contract.authority.allow_workspace_commands {
-            return Err(runtime_error(
-                "command-capable writer fencing is not accepted",
-            ));
-        }
-        let spec = conductor_runtime::native_vendor_command(pin, packet, authentication)
-            .map_err(|_| runtime_error("native adapter identity or capability refused"))?;
-        let launch = RunnerLaunch {
-            packet: packet.clone(),
-            executable: spec.executable,
-            arguments: spec.arguments,
-            environment: spec.environment,
-            output_limit: 1024 * 1024,
-            heartbeat_timeout_ms: 1000.min(packet.contract.max_runtime_ms),
-        };
+        let launch = conductor_runtime::native_writer_launch(pin, packet, authentication)
+            .map_err(|_| runtime_error("native writer adapter refused the contract"))?;
         self.launch_execution(wrapper, &launch, effect_token, runner_id)
             .await
     }

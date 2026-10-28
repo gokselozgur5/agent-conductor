@@ -95,3 +95,18 @@ fn environment_injection_is_refused_and_debug_never_contains_auth_values_or_prom
         "synthetic-auth-sentinel-83c2"
     );
 }
+
+#[test]
+fn writer_admission_is_enforced_by_the_adapter_boundary() {
+    for kind in [AdapterKind::Claude, AdapterKind::Codex] {
+        let (_directory, pin, packet) = fixture(kind);
+        let result = conductor_runtime::native_writer_launch(&pin, &packet, BTreeMap::new());
+        if kind == AdapterKind::Claude {
+            let launch = result.expect("restricted file writer");
+            assert_eq!(launch.packet, packet);
+            assert!(launch.arguments.iter().any(|arg| arg == "--restricted"));
+        } else {
+            assert!(matches!(result, Err(VendorError::Capability)));
+        }
+    }
+}

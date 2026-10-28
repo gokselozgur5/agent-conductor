@@ -127,3 +127,12 @@ through the authoritative lifecycle transaction. It requires confirmed writer
 fencing and a matching bound snapshot; a task mutation during execution prevents
 publication. A real-process cancellation race regression passed. Native task
 orchestration and independent verification remain unfinished.
+
+### Responsibility review
+
+The operator requested explicit per-agent responsibility and SOLID boundaries.
+[RESPONSIBILITIES.md](RESPONSIBILITIES.md) maps ownership and forbidden decisions.
+Native writer admission moved from service to the runtime adapter factory without
+introducing a plugin framework. Claude tool-envelope observations are parsed as
+adapter evidence only; they do not by themselves establish writer fencing or
+completion. The integrated workflow remains the next delivery priority.

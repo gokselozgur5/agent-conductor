@@ -209,3 +209,28 @@ pub fn binary_sha256(path: &std::path::Path) -> Result<String, VendorError> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
+
+/// Prepares a write attempt using an adapter whose writer capability has been
+/// accepted. Vendor-specific admission stays here, outside task coordination.
+/// Credentials remain in the private launch environment, never the contract.
+/// # Errors
+/// Refuses command-capable writers until their descendant fencing is accepted,
+/// and propagates native identity/capability/environment validation failures.
+pub fn native_writer_launch(
+    pin: &VendorPin,
+    packet: &ResumePacket,
+    authentication: BTreeMap<String, String>,
+) -> Result<crate::RunnerLaunch, VendorError> {
+    if pin.kind != AdapterKind::Claude || packet.contract.authority.allow_workspace_commands {
+        return Err(VendorError::Capability);
+    }
+    let spec = native_vendor_command(pin, packet, authentication)?;
+    Ok(crate::RunnerLaunch {
+        packet: packet.clone(),
+        executable: spec.executable,
+        arguments: spec.arguments,
+        environment: spec.environment,
+        output_limit: 1024 * 1024,
+        heartbeat_timeout_ms: 1000.min(packet.contract.max_runtime_ms),
+    })
+}
