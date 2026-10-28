@@ -193,7 +193,22 @@ async fn invariant_scan_reports_projection_ownership_boot_and_completion_contrad
     })
     .to_string();
     sqlx::query("INSERT INTO tasks (id, project_id, objective, state, priority, version, authority_json, aggregate_json, created_at_ms, updated_at_ms) VALUES ('task-self-verified', 'project-1', 'invalid self verification', 'completed', 0, 4, '{}', ?, 1, 2)")
-        .bind(self_verified).execute(&mut seed).await.expect("self-verified task seeds");
+        .bind(&self_verified).execute(&mut seed).await.expect("self-verified task seeds");
+    for (id, resolved) in [
+        ("task-open-decision", false),
+        ("task-closed-decision", true),
+    ] {
+        let mut aggregate: serde_json::Value = serde_json::from_str(&self_verified).unwrap();
+        aggregate["id"] = serde_json::json!(id);
+        aggregate["verification"]["checks"][0]["recorded_by"] = serde_json::json!("independent");
+        aggregate["verification"]["verdict"]["verifier"] = serde_json::json!("independent");
+        aggregate["decisions"] = serde_json::json!([{
+            "id":"format", "question":"Which format?", "opened_by":"operator", "opened_at_ms":1,
+            "resolution": if resolved { serde_json::json!({"rationale":"Text", "resolved_by":"operator", "resolved_at_ms":2}) } else { serde_json::Value::Null }
+        }]);
+        sqlx::query("INSERT INTO tasks(id,project_id,objective,state,priority,version,authority_json,aggregate_json,created_at_ms,updated_at_ms) VALUES(?,'project-1','decision fixture','completed',0,4,'{}',?,1,2)")
+            .bind(id).bind(aggregate.to_string()).execute(&mut seed).await.unwrap();
+    }
     drop(seed);
 
     let violations = store
@@ -205,6 +220,18 @@ async fn invariant_scan_reports_projection_ownership_boot_and_completion_contrad
     assert!(codes.contains(&"lease_identity_mismatch"));
     assert!(codes.contains(&"lease_boot_generation_mismatch"));
     assert!(codes.contains(&"incomplete_completed_task"));
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.code == "incomplete_completed_task"
+                && v.context_json.contains("task-open-decision"))
+    );
+    assert!(
+        !violations
+            .iter()
+            .any(|v| v.code == "incomplete_completed_task"
+                && v.context_json.contains("task-closed-decision"))
+    );
     assert!(violations.iter().any(|violation| {
         violation.code == "incomplete_completed_task"
             && violation.context_json.contains("task-self-verified")

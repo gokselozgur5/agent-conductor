@@ -7,7 +7,8 @@ pub use command::{Command, CommandKind};
 pub use error::Rejection;
 pub use model::{
     Actor, ActorId, ActorRole, Attempt, AttemptId, Blocker, CheckId, CheckResult, ClockReading,
-    CorrelationId, EffectIntentSpec, EffectKind, IdempotencyKey, Lease, LeaseStatus, RequiredCheck,
-    SourceIdentity, Task, TaskId, TaskState, TransitionRecord, Verdict, Verification,
+    CorrelationId, DecisionResolution, EffectIntentSpec, EffectKind, IdempotencyKey, Lease,
+    LeaseStatus, RequiredCheck, SourceIdentity, Task, TaskDecision, TaskId, TaskState,
+    TransitionRecord, Verdict, Verification,
 };
 pub use transition::{Outcome, apply};

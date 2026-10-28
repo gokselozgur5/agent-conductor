@@ -77,7 +77,7 @@ function renderTask(item) {
   field('Worker', task.attempt?.worker);
   field('Attempt', task.attempt?.id);
   field('Verifier', task.verification?.verdict?.verifier);
-  field('Decision', task.verification?.verdict ? (task.verification.verdict.accepted ? 'Accepted' : 'Rejected') : 'Pending');
+  field('Review verdict', task.verification?.verdict ? (task.verification.verdict.accepted ? 'Accepted' : 'Rejected') : 'Pending');
   field('Source', task.verification?.source);
   card.append(details);
   const results = new Map((task.verification?.checks || []).map(check => [check.check_id, check]));
@@ -102,6 +102,37 @@ function renderTask(item) {
     button.addEventListener('click', () => control(task, action));
     controls.append(button);
   }
+  const editableDecisions = ['backlog', 'ready', 'paused', 'blocked'].includes(task.state);
+  const decisions = task.decisions || [];
+  const decisionBox = text('section', '', 'decisions');
+  decisionBox.append(text('h3', `Task decisions · ${decisions.filter(d => !d.resolution).length} open`));
+  decisionBox.append(text('p', 'Open decisions prevent completion. Pause active work before changing decisions; continue retained work afterward to deliver the new context.', 'hint'));
+  for (const decision of decisions) {
+    const row = text('div', '', 'decision');
+    row.append(text('p', `${decision.resolution ? 'Resolved' : 'Open'} · ${decision.id} · ${decision.question}`));
+    row.append(text('p', `Opened by ${decision.opened_by} · ${new Date(decision.opened_at_ms).toISOString()}`, 'hint'));
+    if (decision.resolution) {
+      row.append(text('p', decision.resolution.rationale));
+      row.append(text('p', `Resolved by ${decision.resolution.resolved_by} · ${new Date(decision.resolution.resolved_at_ms).toISOString()}`, 'hint'));
+    } else if (editableDecisions) {
+      const resolve = text('button', 'Resolve decision');
+      resolve.addEventListener('click', () => {
+        const rationale = window.prompt('Resolution and rationale (maximum 2048 bytes). This records a decision; it does not grant new capabilities.');
+        if (rationale?.trim()) control(task, 'resolve_decision', {decision_id: decision.id, rationale});
+      });
+      row.append(resolve);
+    }
+    decisionBox.append(row);
+  }
+  if (editableDecisions && decisions.length < 32) {
+    const open = text('button', 'Open decision');
+    open.addEventListener('click', () => {
+      const question = window.prompt('Question that must be resolved before completion (maximum 1024 bytes):');
+      if (question?.trim()) control(task, 'open_decision', {decision_id: crypto.randomUUID(), question});
+    });
+    controls.append(open);
+  }
+  if (decisions.length) card.append(decisionBox);
   const history = text('button', 'View history');
   history.addEventListener('click', () => loadHistory(task.id));
   controls.append(history);
@@ -113,7 +144,7 @@ el('refresh').addEventListener('click', refresh);
 el('disconnect').addEventListener('click', disconnect);
 el('token').addEventListener('keydown', event => { if (event.key === 'Enter') el('connect').click(); });
 
-async function control(task, action) {
+async function control(task, action, fields = {}) {
   if (mutating || !token) return;
   if (action === 'cancel' && !window.confirm(`Cancel task ${task.id}? Retained artifacts will be preserved.`)) return;
   mutating = true;
@@ -123,13 +154,14 @@ async function control(task, action) {
   try {
     const response = await fetch('/api/control', {
       method: 'POST', headers: {Authorization: `Bearer ${currentToken}`, 'Content-Type': 'application/json'},
-      body: JSON.stringify({task_id: task.id, expected_version: task.version, idempotency_key: crypto.randomUUID(), action}),
+      body: JSON.stringify({task_id: task.id, expected_version: task.version, idempotency_key: crypto.randomUUID(), action, ...fields}),
       signal: AbortSignal.timeout(5000)
     });
     if (currentToken !== token) return;
     if (response.status === 401) { disconnect(); message = 'Authentication failed.'; }
     else if (response.status === 409) message = 'Task changed or action is not allowed. Refreshed state; inspect it before retrying.';
     else if (!response.ok) message = 'Action was not confirmed. Inspect refreshed state before retrying.';
+    else if (['open_decision', 'resolve_decision'].includes(action)) message = 'Decision recorded. Existing instruction pins and capability limits remain authoritative.';
     else message = ['ready', 'resume'].includes(action) ? 'Task is ready. Use the workflow queue to start or continue approved work.' : 'Action applied. Active execution stops after ownership revocation is observed.';
   } catch (_) {
     message = 'Action outcome unknown. Inspect refreshed state before retrying.';

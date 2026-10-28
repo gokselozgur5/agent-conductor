@@ -75,7 +75,7 @@ async fn controls_preserve_auth_versions_idempotency_and_terminal_state() {
             .starts_with("HTTP/1.1 400")
     );
     assert!(
-        post(address, &auth, "", &"x".repeat(4097))
+        post(address, &auth, "", &"x".repeat(16_385))
             .await
             .starts_with("HTTP/1.1 413")
     );
@@ -320,4 +320,117 @@ async fn task_pages_do_not_omit_or_duplicate_rows_when_new_tasks_arrive() {
     };
     assert_eq!(tasks[0].aggregate.id.0, "a-new-earlier-id");
     assert_state(&service, "backlog", 0).await;
+}
+
+#[tokio::test]
+async fn decisions_persist_with_atomic_audit_and_reject_stale_or_duplicate_resolution() {
+    use sqlx::Connection;
+    let directory = tempfile::tempdir().unwrap();
+    let service = fixture(directory.path()).await;
+    let token = "synthetic-decision-credential-00000000";
+    let board = OperatorBoard::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        token.into(),
+        service.clone(),
+    )
+    .await
+    .unwrap();
+    let address = board.address();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(board.run_until(async {
+        let _ = stopped.await;
+    }));
+    let auth = format!("Authorization: Bearer {token}\r\n");
+    let mut open = serde_json::json!({"task_id":"controlled","expected_version":0,"idempotency_key":"decision-open","action":"open_decision","decision_id":"format","question":"<script>Which format?</script>"});
+    assert!(
+        post(address, "", "", &open.to_string())
+            .await
+            .starts_with("HTTP/1.1 401")
+    );
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        directory.path().join("state.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER reject_decision_audit BEFORE INSERT ON audit_events WHEN NEW.kind='open_decision' BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END").execute(&mut db).await.unwrap();
+    let failed = post(address, &auth, "", &open.to_string()).await;
+    assert!(!failed.starts_with("HTTP/1.1 204"));
+    assert_state(&service, "backlog", 0).await;
+    sqlx::query("DROP TRIGGER reject_decision_audit")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        assert!(
+            post(address, &auth, "", &open.to_string())
+                .await
+                .starts_with("HTTP/1.1 204")
+        );
+    }
+    assert_state(&service, "backlog", 1).await;
+    open["question"] = serde_json::json!("conflicting duplicate");
+    assert!(
+        !post(address, &auth, "", &open.to_string())
+            .await
+            .starts_with("HTTP/1.1 204")
+    );
+    let mut resolve = serde_json::json!({"task_id":"controlled","expected_version":0,"idempotency_key":"decision-resolve","action":"resolve_decision","decision_id":"format","rationale":"Use plain text."});
+    assert!(
+        post(address, &auth, "", &resolve.to_string())
+            .await
+            .starts_with("HTTP/1.1 409")
+    );
+    resolve["expected_version"] = serde_json::json!(1);
+    for _ in 0..2 {
+        assert!(
+            post(address, &auth, "", &resolve.to_string())
+                .await
+                .starts_with("HTTP/1.1 204")
+        );
+    }
+    resolve["expected_version"] = serde_json::json!(2);
+    resolve["idempotency_key"] = serde_json::json!("new-resolution");
+    assert!(
+        !post(address, &auth, "", &resolve.to_string())
+            .await
+            .starts_with("HTTP/1.1 204")
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE task_id='controlled' AND kind IN ('open_decision','resolve_decision')").fetch_one(&mut db).await.unwrap();
+    assert_eq!(count, 2);
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
+    drop(service);
+    db.close().await.unwrap();
+    assert_restarted_decision(directory.path()).await;
+}
+
+async fn assert_restarted_decision(path: &std::path::Path) {
+    let restarted = PersistentControlService::start(
+        Store::open(path.join("state.sqlite3")).await.unwrap(),
+        100,
+    )
+    .await
+    .unwrap();
+    let ControlResponse::Task(task) = restarted
+        .handle(ControlRequest::GetTask {
+            task_id: "controlled".into(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("task");
+    };
+    assert_eq!(task.aggregate.version, 2);
+    assert_eq!(task.aggregate.decisions.len(), 1);
+    let decision = &task.aggregate.decisions[0];
+    assert_eq!(decision.question, "<script>Which format?</script>");
+    assert_eq!(
+        decision.resolution.as_ref().unwrap().rationale,
+        "Use plain text."
+    );
+    assert_eq!(
+        decision.resolution.as_ref().unwrap().resolved_by.0,
+        "local-board-operator"
+    );
 }

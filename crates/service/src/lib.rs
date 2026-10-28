@@ -1206,6 +1206,8 @@ fn command_kind(v: &CommandKind) -> &'static str {
         CommandKind::RejectVerification => "reject_verification",
         CommandKind::Complete { .. } => "complete",
         CommandKind::AddRequiredCheck { .. } => "add_required_check",
+        CommandKind::OpenDecision { .. } => "open_decision",
+        CommandKind::ResolveDecision { .. } => "resolve_decision",
         CommandKind::Cancel => "cancel",
     }
 }

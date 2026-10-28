@@ -8,6 +8,9 @@ license = "MIT"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints.rust]
 unsafe_code = "forbid"
 

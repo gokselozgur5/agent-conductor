@@ -21,6 +21,9 @@ struct Input {
     expected_version: u64,
     idempotency_key: String,
     action: Action,
+    decision_id: Option<String>,
+    question: Option<String>,
+    rationale: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +32,8 @@ enum Action {
     Pause,
     Resume,
     Cancel,
+    OpenDecision,
+    ResolveDecision,
 }
 
 pub(super) async fn apply<S: ControlService>(
@@ -43,14 +48,16 @@ pub(super) async fn apply<S: ControlService>(
     {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    let bytes =
-        match tokio::time::timeout(Duration::from_secs(3), to_bytes(request.into_body(), 4096))
-            .await
-        {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
-            Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
-        };
+    let bytes = match tokio::time::timeout(
+        Duration::from_secs(3),
+        to_bytes(request.into_body(), 16_384),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
+    };
     let Ok(input) = serde_json::from_slice::<Input>(&bytes) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -65,11 +72,34 @@ pub(super) async fn apply<S: ControlService>(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    let has_decision_fields =
+        input.decision_id.is_some() || input.question.is_some() || input.rationale.is_some();
+    if has_decision_fields
+        && !matches!(input.action, Action::OpenDecision | Action::ResolveDecision)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let kind = match input.action {
         Action::Ready => CommandKind::MarkReady,
         Action::Pause => CommandKind::Pause,
         Action::Resume => CommandKind::Resume,
         Action::Cancel => CommandKind::Cancel,
+        Action::OpenDecision => {
+            let (Some(id), Some(question), None) =
+                (input.decision_id, input.question, input.rationale)
+            else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            CommandKind::OpenDecision { id, question }
+        }
+        Action::ResolveDecision => {
+            let (Some(id), None, Some(rationale)) =
+                (input.decision_id, input.question, input.rationale)
+            else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            CommandKind::ResolveDecision { id, rationale }
+        }
     };
     let request = ControlRequest::ApplyCommand {
         task_id: input.task_id,

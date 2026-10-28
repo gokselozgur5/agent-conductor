@@ -72,5 +72,13 @@ pub enum CommandKind {
     AddRequiredCheck {
         check: RequiredCheck,
     },
+    OpenDecision {
+        id: String,
+        question: String,
+    },
+    ResolveDecision {
+        id: String,
+        rationale: String,
+    },
     Cancel,
 }

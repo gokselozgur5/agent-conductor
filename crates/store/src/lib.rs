@@ -622,7 +622,7 @@ impl Store {
                 violations.push(RuntimeInvariantViolation {
                     code: "incomplete_completed_task".to_owned(),
                     summary:
-                        "completed task lacks a closed lease or accepted source-bound verification"
+                        "completed task lacks closed decisions, a closed lease or accepted source-bound verification"
                             .to_owned(),
                     context_json: serde_json::json!({"task_id": task_id}).to_string(),
                 });
@@ -782,7 +782,21 @@ fn completion_projection_is_valid(aggregate: &serde_json::Value) -> bool {
             })
         })
     });
-    source.is_some() && verdict_valid && lease_ended && checks_valid
+    let decisions_closed = aggregate.get("decisions").is_none_or(|value| {
+        value.as_array().is_some_and(|decisions| {
+            decisions.iter().all(|decision| {
+                decision
+                    .pointer("/resolution/rationale")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty())
+                    && decision
+                        .pointer("/resolution/resolved_by")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|actor| !actor.is_empty() && Some(actor) != worker)
+            })
+        })
+    });
+    source.is_some() && verdict_valid && lease_ended && checks_valid && decisions_closed
 }
 
 async fn verify_integrity(connection: &mut SqliteConnection) -> Result<(), StoreError> {

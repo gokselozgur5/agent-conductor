@@ -786,3 +786,324 @@ fn optimistic_version_and_terminal_states_fail_closed() {
         Err(Rejection::IllegalTransition { .. })
     ));
 }
+
+#[test]
+fn decisions_are_bounded_independent_and_editable_only_before_work_or_after_pause() {
+    let task = ready_task();
+    let open = CommandKind::OpenDecision {
+        id: "storage".into(),
+        question: "Which retention policy?".into(),
+    };
+    for role in [ActorRole::Worker, ActorRole::System] {
+        assert!(
+            apply(
+                &task,
+                &command(&task, actor("worker", role), open.clone()),
+                clock(1)
+            )
+            .is_err()
+        );
+    }
+    let task = apply(
+        &task,
+        &command(&task, actor("operator", ActorRole::Operator), open.clone()),
+        clock(1),
+    )
+    .unwrap()
+    .task;
+    assert_eq!(task.decisions[0].opened_by.0, "operator");
+    assert!(
+        apply(
+            &task,
+            &command(&task, actor("operator", ActorRole::Operator), open.clone()),
+            clock(2)
+        )
+        .is_err()
+    );
+    for candidate in [running_task(), verifying_task()] {
+        assert!(
+            apply(
+                &candidate,
+                &command(
+                    &candidate,
+                    actor("operator", ActorRole::Operator),
+                    open.clone()
+                ),
+                clock(40)
+            )
+            .is_err()
+        );
+    }
+    let running = running_task();
+    let mut paused = apply(
+        &running,
+        &command(
+            &running,
+            actor("operator", ActorRole::Operator),
+            CommandKind::Pause,
+        ),
+        clock(40),
+    )
+    .unwrap()
+    .task;
+    paused.decisions.clone_from(&task.decisions);
+    let resolve = CommandKind::ResolveDecision {
+        id: "storage".into(),
+        rationale: "Retain artifacts until explicit operator cleanup.".into(),
+    };
+    for role in [ActorRole::Worker, ActorRole::Operator, ActorRole::Verifier] {
+        assert!(
+            apply(
+                &paused,
+                &command(&paused, actor("worker", role), resolve.clone()),
+                clock(41)
+            )
+            .is_err()
+        );
+    }
+    let resolved = apply(
+        &paused,
+        &command(
+            &paused,
+            actor("independent", ActorRole::Verifier),
+            resolve.clone(),
+        ),
+        clock(42),
+    )
+    .unwrap()
+    .task;
+    assert_eq!(
+        resolved.decisions[0]
+            .resolution
+            .as_ref()
+            .unwrap()
+            .resolved_by
+            .0,
+        "independent"
+    );
+    assert!(
+        apply(
+            &resolved,
+            &command(&resolved, actor("operator", ActorRole::Operator), resolve),
+            clock(43)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn decision_text_capacity_and_duplicate_identity_are_bounded() {
+    let task = ready_task();
+    let task = apply(
+        &task,
+        &command(
+            &task,
+            actor("operator", ActorRole::Operator),
+            CommandKind::OpenDecision {
+                id: "storage".into(),
+                question: "Retention?".into(),
+            },
+        ),
+        clock(1),
+    )
+    .unwrap()
+    .task;
+    for (id, question) in [
+        (String::new(), "question".into()),
+        ("x".repeat(129), "question".into()),
+        ("new".into(), " ".into()),
+        ("new".into(), "q".repeat(1025)),
+    ] {
+        assert!(
+            apply(
+                &task,
+                &command(
+                    &task,
+                    actor("operator", ActorRole::Operator),
+                    CommandKind::OpenDecision { id, question }
+                ),
+                clock(2)
+            )
+            .is_err()
+        );
+    }
+    let mut full = task.clone();
+    full.decisions = vec![task.decisions[0].clone(); 32];
+    assert!(
+        apply(
+            &full,
+            &command(
+                &full,
+                actor("operator", ActorRole::Operator),
+                CommandKind::OpenDecision {
+                    id: "new".into(),
+                    question: "question".into()
+                }
+            ),
+            clock(2)
+        )
+        .is_err()
+    );
+    for rationale in [" ".into(), "x".repeat(2049)] {
+        assert!(
+            apply(
+                &task,
+                &command(
+                    &task,
+                    actor("operator", ActorRole::Operator),
+                    CommandKind::ResolveDecision {
+                        id: "storage".into(),
+                        rationale
+                    }
+                ),
+                clock(2)
+            )
+            .is_err()
+        );
+    }
+}
+
+fn enact(task: &Task, id: &str, role: ActorRole, kind: CommandKind) -> Task {
+    apply(task, &command(task, actor(id, role), kind), clock(50))
+        .unwrap()
+        .task
+}
+
+fn review_decision_attempt(task: &Task) -> Task {
+    let attempt = AttemptId(format!("decision-attempt-{}", task.last_lease_epoch + 1));
+    let task = enact(
+        task,
+        "worker",
+        ActorRole::Worker,
+        CommandKind::Claim {
+            attempt_id: attempt.clone(),
+            worker: ActorId::from("worker"),
+            lease_duration_ms: LEASE_MS,
+            worker_margin_ms: MARGIN_MS,
+            recovery_grace_ms: 10,
+        },
+    );
+    let epoch = task.last_lease_epoch;
+    let task = enact(
+        &task,
+        "worker",
+        ActorRole::Worker,
+        CommandKind::Start {
+            attempt_id: attempt.clone(),
+            lease_epoch: epoch,
+        },
+    );
+    let mut task = enact(
+        &task,
+        "worker",
+        ActorRole::Worker,
+        CommandKind::BeginVerification {
+            attempt_id: attempt,
+            lease_epoch: epoch,
+        },
+    );
+    let source = SourceIdentity::from("immutable:source");
+    for (role, kind) in [
+        (
+            ActorRole::System,
+            CommandKind::BindVerificationSource {
+                source: source.clone(),
+            },
+        ),
+        (
+            ActorRole::System,
+            CommandKind::RecordCheck {
+                check_id: CheckId::from("tests"),
+                passed: true,
+                source: source.clone(),
+            },
+        ),
+        (
+            ActorRole::Verifier,
+            CommandKind::RecordVerdict {
+                accepted: true,
+                source,
+            },
+        ),
+    ] {
+        task = enact(&task, "independent", role, kind);
+    }
+    task
+}
+
+#[test]
+fn unresolved_decision_blocks_valid_completion_until_resolved_and_fresh_attempt_reviewed() {
+    let ready = ready_task();
+    let decided = enact(
+        &ready,
+        "operator",
+        ActorRole::Operator,
+        CommandKind::OpenDecision {
+            id: "acceptance".into(),
+            question: "Confirm deliverable format".into(),
+        },
+    );
+    let task = review_decision_attempt(&decided);
+    assert_eq!(task.decisions, decided.decisions);
+    let complete = CommandKind::Complete {
+        observed_source: SourceIdentity::from("immutable:source"),
+    };
+    assert_eq!(
+        apply(
+            &task,
+            &command(&task, actor("system", ActorRole::System), complete.clone()),
+            clock(50)
+        ),
+        Err(Rejection::VerificationIncomplete(
+            "task has unresolved decisions"
+        ))
+    );
+    let paused = enact(&task, "operator", ActorRole::Operator, CommandKind::Pause);
+    let resolved = enact(
+        &paused,
+        "operator",
+        ActorRole::Operator,
+        CommandKind::ResolveDecision {
+            id: "acceptance".into(),
+            rationale: "Text artifact is required.".into(),
+        },
+    );
+    let resumed = enact(
+        &resolved,
+        "operator",
+        ActorRole::Operator,
+        CommandKind::Resume,
+    );
+    let reviewed = review_decision_attempt(&resumed);
+    assert_eq!(reviewed.last_lease_epoch, task.last_lease_epoch + 1);
+    assert_eq!(reviewed.decisions, resolved.decisions);
+    let completed = enact(&reviewed, "system", ActorRole::System, complete);
+    assert_eq!(completed.state, TaskState::Completed);
+    assert!(
+        apply(
+            &completed,
+            &command(
+                &completed,
+                actor("operator", ActorRole::Operator),
+                CommandKind::OpenDecision {
+                    id: "later".into(),
+                    question: "late".into()
+                }
+            ),
+            clock(51)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn legacy_task_without_decisions_decodes_as_empty() {
+    let mut old = serde_json::to_value(ready_task()).unwrap();
+    old.as_object_mut().unwrap().remove("decisions");
+    assert!(
+        serde_json::from_value::<Task>(old)
+            .unwrap()
+            .decisions
+            .is_empty()
+    );
+}

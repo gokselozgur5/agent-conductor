@@ -39,6 +39,10 @@ reconciliation, preserving full content validation and debounce/drain polling.
 A controlled release comparison measured 31.05% → 2.88% of one CPU at idle;
 linked-worktree event/restart/root-loss and 300-file drain checks passed.
 See [REPOSITORY_HOOKS.md](REPOSITORY_HOOKS.md) for accounting and timing limits.
+Task decisions now persist through the same versioned command/audit path and
+block completion until resolved. The board exposes operator actions; subsequent
+attempts receive labelled decision context. See [TASK_DECISIONS.md](TASK_DECISIONS.md)
+for authority, compatibility and remaining intake limits.
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, outer advisory
 discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,
