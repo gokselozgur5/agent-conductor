@@ -69,8 +69,11 @@ Event routing uses literal, case-sensitive prefixes and rechecks current filters
 before delivery leasing or workflow wake. See [EVENT_ROUTING.md](EVENT_ROUTING.md)
 for subscription updates and the in-flight acknowledgement boundary.
 
+The board and CLI now expose bounded project, agent, event, subscription and
+delivery metadata pages. See [OPERATOR_INVENTORY.md](OPERATOR_INVENTORY.md) for
+snapshot semantics, omitted payloads/tokens and pagination boundaries.
 The working local workflow is not full v1 acceptance. Remaining work includes
-broader project/agent/event/checkpoint visibility, abnormal ownership recovery,
+task/process lease, evidence and reported usage visibility, abnormal ownership recovery,
 host protocol/Thor/Linux isolation,
 load/restore/redaction validation and seven-day soak. Issue #20 retains an
 unresolved historical supervision deadline; do not infer a cause from green tests.

@@ -87,6 +87,13 @@ enum Command {
     GetTask {
         task_id: String,
     },
+    /// Read at most 100 metadata records in ID order.
+    Inventory {
+        #[arg(value_parser = ["projects", "agents", "events", "subscriptions", "deliveries"])]
+        resource: String,
+        #[arg(long)]
+        after: Option<String>,
+    },
     /// Read at most 100 tasks in task-ID order; use `next_after` to advance.
     ListTaskPage {
         #[arg(long)]
@@ -284,6 +291,10 @@ fn command_request(command: Command) -> Request {
         },
         Command::TaskCheckpoint { task_id } => Request::TaskCheckpoint { task_id },
         Command::GetTask { task_id } => Request::GetTask { task_id },
+        Command::Inventory { resource, after } => Request::Inventory {
+            resource: parse_json(&format!("\"{resource}\""), "inventory resource"),
+            after,
+        },
         Command::ListTaskPage { project_id, after } => Request::ListTaskPage { project_id, after },
         Command::TaskHistory { task_id, before } => Request::TaskHistory { task_id, before },
         Command::ListTasks { project_id } => Request::ListTasks { project_id },

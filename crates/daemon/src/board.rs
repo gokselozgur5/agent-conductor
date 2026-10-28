@@ -90,6 +90,7 @@ impl OperatorBoard {
                     )
                 }),
             )
+            .route("/api/inventory", get(inventory::<S>))
             .route("/api/tasks", get(tasks::<S>))
             .route("/api/history", get(history::<S>))
             .route("/api/checkpoint", get(checkpoint::<S>))
@@ -216,6 +217,25 @@ async fn checkpoint<S: ControlService>(
         &state,
         ControlRequest::TaskCheckpoint {
             task_id: params.task_id,
+        },
+    )
+    .await
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InventoryQuery {
+    resource: conductor_protocol::InventoryResource,
+    after: Option<String>,
+}
+async fn inventory<S: ControlService>(
+    State(state): State<BoardState<S>>,
+    Query(params): Query<InventoryQuery>,
+) -> Response {
+    query(
+        &state,
+        ControlRequest::Inventory {
+            resource: params.resource,
+            after: params.after,
         },
     )
     .await
