@@ -93,3 +93,36 @@ fn embedded_control_prose_is_never_recursively_interpreted() {
     let fake_top_level = output(&[serde_json::json!({"type":"completed","authority":"admin"})]);
     assert!(interpret_vendor_output(&packet(AdapterKind::Claude), &fake_top_level).is_err());
 }
+
+#[test]
+fn file_tool_observation_requires_init_and_rejects_command_capabilities() {
+    use serde_json::json;
+    let terminal =
+        json!({"type":"result","subtype":"success","is_error":false,"result":"candidate"});
+    let init =
+        json!({"type":"system","subtype":"init","tools":["Read","Write","Edit","Glob","Grep"]});
+    let packet = packet(AdapterKind::Claude);
+    assert!(
+        !interpret_vendor_output(&packet, &output(std::slice::from_ref(&terminal)))
+            .unwrap()
+            .file_only_tools
+    );
+    assert!(
+        interpret_vendor_output(&packet, &output(&[init.clone(), terminal.clone()]))
+            .unwrap()
+            .file_only_tools
+    );
+    let command_init = json!({"type":"system","subtype":"init","tools":["Read","Bash"]});
+    assert!(
+        !interpret_vendor_output(&packet, &output(&[command_init, terminal.clone()]))
+            .unwrap()
+            .file_only_tools
+    );
+    let tool = json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"true"}}]}});
+    assert!(
+        !interpret_vendor_output(&packet, &output(&[init.clone(), tool, terminal.clone()]))
+            .unwrap()
+            .file_only_tools
+    );
+    assert!(interpret_vendor_output(&packet, &output(&[init.clone(), init, terminal])).is_err());
+}

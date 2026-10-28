@@ -11,6 +11,8 @@ pub struct VendorCandidate {
     pub text: String,
     pub event_count: usize,
     pub failed_tools: usize,
+    /// Observed restricted Claude tool envelope; not an OS fence by itself.
+    pub file_only_tools: bool,
 }
 impl std::fmt::Debug for VendorCandidate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -92,6 +94,7 @@ pub fn interpret_vendor_output(
         text: state.text,
         event_count: state.events,
         failed_tools: state.failed_tools,
+        file_only_tools: state.tool_init == Some(true) && !state.non_file_tool,
     })
 }
 #[derive(Default)]
@@ -101,6 +104,8 @@ struct StreamState {
     text: String,
     failed_tools: usize,
     turn_started: bool,
+    tool_init: Option<bool>,
+    non_file_tool: bool,
 }
 impl StreamState {
     fn claude(&mut self, event: &Value) -> Result<(), VendorOutputError> {
@@ -129,8 +134,29 @@ impl StreamState {
                         .count();
                 }
             }
+            Some("system") if event.get("subtype").and_then(Value::as_str) == Some("init") => {
+                if self.tool_init.is_some() {
+                    return Err(VendorOutputError::Protocol);
+                }
+                let tools = event
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .ok_or(VendorOutputError::Protocol)?;
+                self.tool_init =
+                    Some(!tools.is_empty() && tools.iter().all(|tool| file_tool(tool.as_str())));
+            }
+            Some("assistant") => {
+                if let Some(content) = event.pointer("/message/content").and_then(Value::as_array) {
+                    for part in content {
+                        if part.get("type").and_then(Value::as_str) == Some("tool_use") {
+                            self.non_file_tool |=
+                                !file_tool(part.get("name").and_then(Value::as_str));
+                        }
+                    }
+                }
+            }
             Some(
-                "system" | "assistant" | "rate_limit_event" | "stream_event" | "tool_progress"
+                "system" | "rate_limit_event" | "stream_event" | "tool_progress"
                 | "tool_use_summary",
             ) => {}
             _ => return Err(VendorOutputError::Protocol),
@@ -181,4 +207,8 @@ impl StreamState {
         }
         Ok(())
     }
+}
+
+fn file_tool(name: Option<&str>) -> bool {
+    matches!(name, Some("Read" | "Write" | "Edit" | "Glob" | "Grep"))
 }
