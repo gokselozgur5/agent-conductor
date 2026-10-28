@@ -71,6 +71,10 @@ def main():
     backup.add_argument('destination', type=Path)
     verify = sub.add_parser('verify-backup', help='verify a cold snapshot without opening the original runtime')
     verify.add_argument('destination', type=Path)
+    verify.add_argument('--external', action='store_true', help='also verify recorded external files and directory identities')
+    restore = sub.add_parser('restore', help='restore at the original stopped state root and retain current state')
+    restore.add_argument('snapshot', type=Path)
+    restore.add_argument('--retain-current', type=Path, required=True)
     sub.add_parser('status')
     inspect = sub.add_parser('inspect', help='show bounded advisory document references without model calls')
     inspect.add_argument('--workspace-root', type=Path)
@@ -98,10 +102,12 @@ def main():
     os.umask(0o077)
     if args.command == 'verify-backup':
         from operator_backup import verify
-        print(json.dumps(verify(args.destination), indent=2))
+        print(json.dumps(verify(args.destination, external=args.external), indent=2))
         return
     state = args.state.expanduser().absolute()
-    if len(os.fsencode(state / 'control.sock')) > 100:
+    if args.command == 'run' and (state / 'ARCHIVED_STATE.json').exists():
+        raise ValueError('retained archive cannot be started as another dispatcher')
+    if args.command in ('run', 'ctl', 'status', 'submit') and len(os.fsencode(state / 'control.sock')) > 100:
         raise ValueError('choose a shorter --state path for the Unix socket')
     if args.command == 'init':
         project = args.project.expanduser().resolve(strict=True)
@@ -127,6 +133,10 @@ def main():
     state = state.resolve(strict=True)
     if state.stat().st_mode & 0o077 or state.stat().st_uid != os.getuid():
         raise ValueError('state directory must be private and owned by the operator')
+    if args.command == 'restore':
+        from operator_restore import restore
+        print(json.dumps(restore(state, args.snapshot, args.retain_current), indent=2))
+        return
     config = json.loads(private_read(state / 'operator.json'))
     if args.command == 'backup':
         from operator_backup import backup
@@ -195,6 +205,8 @@ def main():
             target = args.plan.resolve(strict=True)
         print(json.dumps(call(config, state, 'submit-workflow', target), indent=2))
     elif args.command == 'run':
+        if (state / 'ARCHIVED_STATE.json').exists():
+            raise ValueError('retained archive cannot be started as another dispatcher')
         if args.recover_fenced and not args.dispatch:
             raise ValueError('--recover-fenced requires --dispatch')
         daemon = str(Path(config['bin_dir']) / 'conductor-daemon')

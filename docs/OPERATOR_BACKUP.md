@@ -34,8 +34,9 @@ dispatch a task, change authority or read the original project.
 
 ## Recovery limits
 
-This is a cold state snapshot, not yet a complete disaster-recovery command.
-There is no automated restore command in this slice; issue #59 remains open.
+This is a cold state snapshot. Existing, stopped state can be restored with the
+[same-path recovery command](OPERATOR_RECOVERY.md); full state-loss recovery is
+not yet accepted and issue #59 remains open.
 Binary directories, lock/socket files and database sidecars are excluded. External
 project checkouts, accepted vendor executables, approved instruction files and
 credentials outside state need their own recovery procedure. A successful hash
@@ -43,10 +44,11 @@ check proves snapshot consistency, not authenticity against an attacker who can
 rewrite both payload and manifest, or availability of those external resources.
 
 Database packets retain absolute paths and identities. Do not relocate the state,
-rewrite packet paths or start a second dispatcher from a copied database. The
-same-host restore workflow must validate these prerequisites and ownership before
-publishing state; completed/interrupted recovery and corruption refusals remain
-required before issue #59 closes.
+rewrite packet paths or start a second dispatcher from a copied database. New
+version 2 snapshots record external prerequisites for explicit `--external`
+verification; these records do not include external project/toolchain contents.
+Full state-loss and interrupted-publication recovery remain required before
+issue #59 closes.
 
 Validation covers state preservation, WAL export, manifest verification,
 tampering, live-lock refusal, active/unfenced work, unsupported schema, links,
