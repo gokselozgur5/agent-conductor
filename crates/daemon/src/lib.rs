@@ -195,6 +195,10 @@ where
 mod tests {
     use std::time::Duration;
 
+    use agent_conductor_domain::{
+        Actor, ActorId, ActorRole, AttemptId, Command, CommandKind, CorrelationId, IdempotencyKey,
+        LeaseStatus,
+    };
     use agent_conductor_store::Store;
     use conductor_protocol::{HealthStatus, Request, Response, ResponseResult};
     use conductor_service::{InMemoryControlService, PersistentControlService};
@@ -348,6 +352,247 @@ mod tests {
                 .expect("daemon exits cleanly");
             assert!(!path.exists());
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn persistent_mutations_replay_and_survive_daemon_restart() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("conductor.sqlite3");
+        let path = directory.path().join("conductor.sock");
+        let project = Request::RegisterProject {
+            actor_id: "operator".into(),
+            idempotency_key: "project-1".into(),
+            id: "project-1".into(),
+            canonical_path: "/workspace/project".into(),
+            filesystem_identity: "dev:1:ino:2".into(),
+            git_common_dir_identity: None,
+        };
+        let agent = Request::RegisterAgent {
+            actor_id: "operator".into(),
+            idempotency_key: "agent-1".into(),
+            id: "worker-1".into(),
+            adapter_kind: "codex_cli".into(),
+            protocol_fingerprint: "codex-v1".into(),
+            capability_hash: "sha256:abc".into(),
+            access_mode: "read_write".into(),
+        };
+        let create = Request::CreateTask {
+            actor_id: "operator".into(),
+            idempotency_key: "task-1".into(),
+            id: "task-1".into(),
+            project_id: "project-1".into(),
+            objective: "persist across restart".into(),
+            priority: 1,
+            authority: serde_json::json!({}),
+            required_checks: vec![],
+        };
+        let create_two = Request::CreateTask {
+            actor_id: "operator".into(),
+            idempotency_key: "task-2".into(),
+            id: "task-2".into(),
+            project_id: "project-1".into(),
+            objective: "second task".into(),
+            priority: 0,
+            authority: serde_json::json!({}),
+            required_checks: vec![],
+        };
+
+        let store = Store::open(&database).await.expect("store opens");
+        let service = PersistentControlService::start(store, 100)
+            .await
+            .expect("runtime starts");
+        let server = LocalServer::bind(&path, service).expect("socket binds");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+        for request in [project, agent.clone(), agent, create, create_two] {
+            let envelope = RequestEnvelope::new(request);
+            let response =
+                exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+            assert!(matches!(response.result, ResponseResult::Ok(_)));
+        }
+        let ready = Command {
+            actor: Actor {
+                id: ActorId("operator".into()),
+                role: ActorRole::Operator,
+            },
+            expected_version: 0,
+            correlation_id: CorrelationId("ready-correlation".into()),
+            idempotency_key: IdempotencyKey("ready-1".into()),
+            reason: "ready for worker".into(),
+            kind: CommandKind::MarkReady,
+        };
+        let envelope = RequestEnvelope::new(Request::ApplyCommand {
+            task_id: "task-1".into(),
+            command: ready.clone(),
+        });
+        assert!(matches!(
+            exchange(&path, &serde_json::to_vec(&envelope).expect("serialize"))
+                .await
+                .result,
+            ResponseResult::Ok(_)
+        ));
+        let envelope = RequestEnvelope::new(Request::ApplyCommand {
+            task_id: "task-1".into(),
+            command: ready.clone(),
+        });
+        let replay = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Ok(Response::CommandApplied(replay)) = replay.result else {
+            panic!("lifecycle command did not replay")
+        };
+        assert!(replay.replayed);
+        let envelope = RequestEnvelope::new(Request::ApplyCommand {
+            task_id: "task-2".into(),
+            command: ready,
+        });
+        let cross_task = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Error(error) = cross_task.result else {
+            panic!("cross-task idempotency replay succeeded")
+        };
+        assert_eq!(error.code, ErrorCode::Conflict);
+        let ready_two = Command {
+            actor: Actor {
+                id: ActorId("operator".into()),
+                role: ActorRole::Operator,
+            },
+            expected_version: 0,
+            correlation_id: CorrelationId("ready-two".into()),
+            idempotency_key: IdempotencyKey("ready-2".into()),
+            reason: "ready second task".into(),
+            kind: CommandKind::MarkReady,
+        };
+        let envelope = RequestEnvelope::new(Request::ApplyCommand {
+            task_id: "task-2".into(),
+            command: ready_two,
+        });
+        assert!(matches!(
+            exchange(&path, &serde_json::to_vec(&envelope).expect("serialize"))
+                .await
+                .result,
+            ResponseResult::Ok(_)
+        ));
+        let unknown = Command {
+            actor: Actor {
+                id: ActorId("operator".into()),
+                role: ActorRole::Operator,
+            },
+            expected_version: 1,
+            correlation_id: CorrelationId("unknown-worker".into()),
+            idempotency_key: IdempotencyKey("unknown-worker".into()),
+            reason: "unknown assignment".into(),
+            kind: CommandKind::Claim {
+                attempt_id: AttemptId("attempt-unknown".into()),
+                worker: ActorId("missing-worker".into()),
+                lease_duration_ms: 10_000,
+                worker_margin_ms: 1_000,
+                recovery_grace_ms: 2_000,
+            },
+        };
+        let envelope = RequestEnvelope::new(Request::ApplyCommand {
+            task_id: "task-2".into(),
+            command: unknown,
+        });
+        let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Error(error) = response.result else {
+            panic!("unknown worker was accepted")
+        };
+        assert_eq!(error.code, ErrorCode::Validation);
+        let claim = Command {
+            actor: Actor {
+                id: ActorId("operator".into()),
+                role: ActorRole::Operator,
+            },
+            expected_version: 1,
+            correlation_id: CorrelationId("claim-correlation".into()),
+            idempotency_key: IdempotencyKey("claim-1".into()),
+            reason: "assign worker".into(),
+            kind: CommandKind::Claim {
+                attempt_id: AttemptId("attempt-1".into()),
+                worker: ActorId("worker-1".into()),
+                lease_duration_ms: 10_000,
+                worker_margin_ms: 1_000,
+                recovery_grace_ms: 2_000,
+            },
+        };
+        let envelope = RequestEnvelope::new(Request::ApplyCommand {
+            task_id: "task-1".into(),
+            command: claim,
+        });
+        let mut disconnected = UnixStream::connect(&path).await.expect("connect");
+        disconnected
+            .write_all(&serde_json::to_vec(&envelope).expect("serialize"))
+            .await
+            .expect("write");
+        disconnected.shutdown().await.expect("half close");
+        drop(disconnected);
+        let observer = Store::open(&database).await.expect("observer opens");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM effect_intents WHERE effect_kind = 'worker.spawn' AND status = 'pending'")
+                    .fetch_one(observer.readers()).await.expect("effect count");
+                if count == 1 { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("committed effect becomes visible");
+        shutdown_tx.send(()).expect("shutdown");
+        task.await.expect("join").expect("clean exit");
+
+        let store = Store::open(&database).await.expect("store reopens");
+        let effects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM effect_intents WHERE effect_kind = 'worker.spawn' AND status = 'pending'").fetch_one(store.readers()).await.expect("effect count");
+        assert_eq!(effects, 1, "committed effect survives disconnect");
+        let service = PersistentControlService::start(store, 200)
+            .await
+            .expect("runtime restarts");
+        let server = LocalServer::bind(&path, service).expect("socket binds");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+        let envelope = RequestEnvelope::new(Request::GetTask {
+            task_id: "task-1".into(),
+        });
+        let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Ok(Response::Task(task_response)) = response.result else {
+            panic!("task did not survive restart")
+        };
+        assert_eq!(task_response.aggregate.id.0, "task-1");
+        assert_eq!(
+            task_response
+                .aggregate
+                .attempt
+                .as_ref()
+                .expect("attempt")
+                .lease
+                .status,
+            LeaseStatus::RecoveryPending
+        );
+        let stale = Command {
+            actor: Actor {
+                id: ActorId("worker-1".into()),
+                role: ActorRole::Worker,
+            },
+            expected_version: task_response.aggregate.version,
+            correlation_id: CorrelationId("stale-correlation".into()),
+            idempotency_key: IdempotencyKey("stale-start".into()),
+            reason: "stale worker start".into(),
+            kind: CommandKind::Start {
+                attempt_id: AttemptId("attempt-1".into()),
+                lease_epoch: 0,
+            },
+        };
+        let envelope = RequestEnvelope::new(Request::ApplyCommand {
+            task_id: "task-1".into(),
+            command: stale,
+        });
+        let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Error(error) = response.result else {
+            panic!("stale epoch was accepted")
+        };
+        assert_eq!(error.code, ErrorCode::Conflict);
+        shutdown_tx.send(()).expect("shutdown");
+        task.await.expect("join").expect("clean exit");
     }
 
     #[test]

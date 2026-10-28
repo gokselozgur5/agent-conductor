@@ -13,6 +13,7 @@ path = "src/main.rs"
 clap.workspace = true
 conductor-protocol = { path = "../protocol" }
 serde_json.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

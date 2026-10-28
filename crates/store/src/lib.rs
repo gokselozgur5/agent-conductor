@@ -408,15 +408,16 @@ impl Store {
             let boot_generation = u64::try_from(generation)
                 .map_err(|_| StoreError::Integrity("negative boot generation".to_owned()))?;
             sqlx::query(
-                "UPDATE leases SET status = 'recovery_pending', boot_generation = ?, remaining_ms = MIN(remaining_ms, grace_ms), display_expires_at_ms = ? + MIN(remaining_ms, grace_ms) WHERE status IN ('active', 'recovery_pending')",
+                "UPDATE leases SET status = 'recovery_pending', boot_generation = ?, remaining_ms = MIN(remaining_ms, grace_ms), display_expires_at_ms = ? + MIN(remaining_ms, grace_ms) WHERE status = 'active'",
             )
             .bind(generation)
             .bind(started_at_ms)
             .execute(&mut *writer)
             .await?;
             let rows = sqlx::query_as::<_, (String, String, i64, i64)>(
-                "SELECT task_id, attempt_id, epoch, remaining_ms FROM leases WHERE status = 'recovery_pending' ORDER BY task_id",
+                "SELECT task_id, attempt_id, epoch, remaining_ms FROM leases WHERE status = 'recovery_pending' AND boot_generation = ? ORDER BY task_id",
             )
+            .bind(generation)
             .fetch_all(&mut *writer)
             .await?;
             let mut recovery_pending = Vec::with_capacity(rows.len());
