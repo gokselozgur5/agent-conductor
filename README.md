@@ -4,51 +4,75 @@ Agent Conductor is a local-first control plane for durable, evidence-backed work
 
 It does not trust a conversation to remain alive and it does not accept a worker's claim of completion as proof. Tasks, leases, checkpoints, events, subscriptions, deliveries, and verification decisions live in SQLite.
 
-## Executable spike
+## Current implementation
 
-- Explicit task lifecycle: `queued -> claimed -> running -> verifying -> completed`
-- Exclusive task leases with heartbeat renewal
-- Crash recovery that preserves checkpoints and re-queues expired work
-- Independent verification: a worker cannot approve its own task
-- Required acceptance checks before completion
-- Idempotent event publication
-- Topic/path subscriptions with bounded event generations
-- No source-agent echo by default, preventing simple hook loops
-- Deterministic polling hooks that route only matching topic/path changes
-- Project path intake with rule/doc discovery, Git state, and a live Kanban projection
+Phase 1 implements the Rust control core: a local Unix-socket daemon, transactional
+SQLite store, task/attempt lifecycle, fenced leases, durable events and delivery,
+independent verification records, and fake-effect recovery tests. Acceptance and
+remaining boundaries are tracked in [STATUS](docs/STATUS.md) and the
+[Phase 1 evidence matrix](docs/PHASE1_ACCEPTANCE.md).
 
-The spike is retained as behavioral evidence. Production Phase 1 is a Rust
-control core with a long-running local daemon, SQLite single-writer ownership,
-epoch-fenced leases, transactional effect intents, and immutable-source
-verification. See `docs/REQUIREMENTS.md`, `docs/DESIGN.md`, and
-`docs/THREAT_MODEL.md` before implementation.
+The socket is privileged single-operator access, not authenticated agent transport.
+Verification sources and check outcomes are operator/test inputs in this phase;
+Conductor does not yet capture Git trees, run checks, or fence filesystem writes.
 
-## Quick start
+## Rust quick start
+
+The pinned toolchain is installed through rustup. From the repository root:
+
+```bash
+cargo build --workspace
+cargo run -p conductor-daemon --bin conductor-daemon
+```
+
+In another terminal at the same repository root:
+
+```bash
+cargo run -p conductor-cli --bin conductorctl -- --json health
+cargo run -p conductor-cli --bin conductorctl -- register-project operator register-demo demo "$PWD"
+cargo run -p conductor-cli --bin conductorctl -- create-task operator create-demo demo-task demo "Exercise the control core"
+cargo run -p conductor-cli --bin conductorctl -- --json list-tasks
+cargo run -p conductor-cli --bin conductorctl -- check-invariants
+```
+
+Defaults live under ignored `state/`: `conductor.sqlite3`, `conductor.sock`, and
+`conductor.lock`. Stop the foreground daemon with Ctrl-C. Reusing the same command
+identity and payload returns its stored outcome. A changed payload requires a new
+idempotency key. Use the same lock path for every owner of a database.
+
+`conductorctl apply TASK_ID COMMAND_JSON` submits a versioned domain command.
+`bind-verification-source TASK_ID EXPECTED_VERSION IDEMPOTENCY_KEY SOURCE`
+binds a labelled fake/operator source through the daemon's internal System actor.
+It is not proof of a Git snapshot or a sandbox. External System-role commands are
+rejected. Use `--help` for registration, event subscription/publication, delivery
+claim/acknowledgement, and structured query commands.
+
+Development gates:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+## Retained Python spike
+
+The Python implementation is separate behavioral evidence; its database is not
+the Rust database. Do not point the two implementations at the same file.
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
-conductor --db ./state/conductor.db init
-conductor --db ./state/conductor.db register-agent codex-main codex
-conductor --db ./state/conductor.db add-project /absolute/path/to/project
-conductor --db ./state/conductor.db create-task "Build the API" --project-id PROJECT_ID --check tests --check docs
-conductor --db ./state/conductor.db list-tasks
-conductor --db ./state/conductor.db board
-conductor --db ./state/conductor.db subscribe test-agent 'file.*' --path-pattern 'src/*'
-conductor --db ./state/conductor.db watch-once . --snapshot ./state/project-snapshot.json
-```
-
-For development:
-
-```bash
+conductor --db ./state/spike.db init
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-Real vendor adapters, write-capable worktree control, HTTP service, and the
-dashboard are later phases. The production state machine comes first so those
-surfaces cannot silently invent lifecycle semantics.
+Real Codex/Claude adapters, worktree control, instruction discovery in the Rust
+runtime, filesystem hooks, HTTP/dashboard, and multi-host operation remain later
+phases. See [phases](docs/PHASES.md), [requirements](docs/REQUIREMENTS.md),
+[design](docs/DESIGN.md), and [threat model](docs/THREAT_MODEL.md).
 
-## Path intake
+## Python spike path intake
 
-The operator supplies an absolute project path. Conductor records its canonical path and produces a bounded resume packet containing applicable `AGENTS.md` files, known status/phase documents, current Git status, and the project's Kanban projection. Agents receive the packet and read the referenced files in order; Conductor does not dump an entire repository into model context.
+In the retained spike, the operator supplies an absolute project path. Conductor records its canonical path and produces a bounded resume packet containing applicable `AGENTS.md` files, known status/phase documents, current Git status, and the project's Kanban projection. Agents receive the packet and read the referenced files in order; Conductor does not dump an entire repository into model context.

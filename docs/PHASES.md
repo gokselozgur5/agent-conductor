@@ -24,6 +24,9 @@ Status: complete, retained as behavioral evidence rather than production archite
 
 ## Phase 1 — Production control core
 
+Status: implementation independently accepted; exact-SHA macOS/Linux CI pending.
+Evidence and explicit scope limits: [Phase 1 acceptance](PHASE1_ACCEPTANCE.md).
+
 - Rust workspace and versioned migrations
 - Project/task/agent/event/audit domain model
 - Transactional state machine

@@ -2,52 +2,52 @@
 
 ## Current gate
 
-Requirements v1 is accepted for design. Phase 1 design was revised on
-2026-10-27 after a second independent Claude Fable 5.1 architecture review.
-The local consistency pass accepted the design gate; production development has
-not started.
+Phase 1 implementation and final independent reproducer review are accepted at
+`5d26e14`. No reproduced review findings remain open. The exact published
+commit's macOS/Linux CI is the remaining acceptance gate.
+The implementation has passed local formatting, strict Clippy and repeated full
+workspace tests. See [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md) for exact evidence
+and the distinction between core tests and deferred end-to-end v1 behavior.
 
-## Executable spike
+## Implemented
 
-The Python/SQLite spike is clean at commit `15f6639` with 14 passing tests. It proves selected lifecycle and path-intake behaviors but is not the production architecture.
+- Seven-crate Rust workspace, versioned SQLite migrations and read-only projections.
+- Local Unix socket, exclusive runtime lock, bounded requests/responses, connection
+  timeouts, completed-handler draining, orderly shutdown, human and JSON CLI.
+- Transactional lifecycle/audit/idempotency; frozen attempt contracts and epochs.
+- Restart boot generation and recovery heartbeat; automatic bounded periodic
+  expiry reconciliation preserving durable task state.
+- Semantic event deduplication, source attribution, bounded delivery, expiring
+  claim tokens and atomic consumer-state/ack transactions.
+- Independently attributed checks/verdicts and completion invariants. The privileged
+  source-binding request is reachable through the CLI and real daemon socket.
+- Fake effect intent/claim/observation/completion crash harness and an internal
+  audited lifecycle port for inventory contradictions.
 
-## Decisions
+## Authority and evidence limits
 
-- Process: requirements → design → development → feedback for every bounded phase.
-- Local-first and single-operator by default.
-- Durable protocol enforcement, not prompt-only compliance.
-- Kanban is derived from authoritative task state.
-- Workers cannot self-verify.
-- No real adapter launches before fake-process failure tests.
-- Lease epochs fence stale workers; expiry alone never proves a process is dead.
-- Repository content is untrusted unless the operator pins an instruction by hash.
-- Verification is bound to an immutable tree hash and a read-only independent verifier.
-- Sensitive-action policy must be enforced by adapter capabilities, not only prompts.
-- A long-running daemon owns the SQLite writer and serves a local Unix socket.
-- Suspend-aware monotonic deadlines are recovered through a boot generation and
-  bounded `recovery_pending` grace window.
-- Verification fences writes before recording the immutable source identity.
+The socket is mode `0600` and assumes a trusted local operator. Registered role
+checks are not per-agent authentication. Phase 1 sources/checks are labelled
+fake/operator inputs; there is no real source capture, check executor, external
+write fence, worker launcher or live inventory adapter. The daemon automatically
+reconciles expired leases; fake external inventory is exercised by the testkit,
+not discovered or executed by a production adapter.
 
-## Selected stack
+The Python spike remains separate behavior evidence. It is not the production
+runtime and there is no migration of real user task state to perform.
 
-- Rust, Tokio, SQLx with SQLite, Serde, Tracing, and Clap for Phase 1
-- Axum and Notify in later service/hook phases
-- React and TypeScript for the later dashboard
-- Versioned JSON adapter/event/resume protocols
+## Next phase
 
-## Deferred design work
+After final Phase 1 review and CI acceptance, design the Phase 2 adapter contract
+and fake-agent harness before integrating local authenticated Codex/Claude CLIs.
+Resume-packet acknowledgement, instruction trust, dirty-state snapshots, worktree
+ownership, real check execution and capability enforcement must be proven before
+write-capable agents launch. No Phase 2 implementation is authorized by Phase 1
+closeout alone.
 
-- Adapter transport and lifecycle contract
-- Worktree ownership model
-- Wake scheduling and loop prevention
-- API and UI boundary
+## Deferred
 
-## Explicitly absent
-
-- Production Rust core
-- Real Codex or Claude Code process launch
-- Running production daemon
-- Worktree locks
-- Remote/Thor runtime
-- HTTP/WebSocket/SSE service
-- Web dashboard
+HTTP/dashboard and hooks, Thor/multi-host, performance targets, seven-day soak,
+full backup/restore rehearsal, release architecture matrix and end-to-end v1
+acceptance remain outside this phase. Database reopen tests do not establish the
+full disaster-recovery procedure.
