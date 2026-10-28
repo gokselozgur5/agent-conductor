@@ -60,7 +60,10 @@ async fn output_flood_and_closed_pipe_hang_are_bounded() {
         cancellation,
     )
     .await;
-    assert!(matches!(result, Err(ProcessError::OutputLimit)));
+    assert!(
+        matches!(result, Err(ProcessError::OutputLimit)),
+        "unexpected flood result: {result:?}"
+    );
     let mut closed = spec(directory.path(), "exec 1>&- 2>&-; /bin/sleep 10");
     closed.timeout = Duration::from_millis(100);
     let start = Instant::now();

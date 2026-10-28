@@ -40,8 +40,8 @@ pub enum ProcessError {
     Timeout,
     #[error("process cancelled or supervisor channel closed")]
     Cancelled,
-    #[error("process group could not be fenced")]
-    Fence,
+    #[error("process group could not be fenced: {0}")]
+    Fence(Errno),
 }
 
 /// Supervises a controlled process with bounded streams, timeout and cancellation.
@@ -82,9 +82,11 @@ pub async fn run_process(
     let pid = child
         .id()
         .and_then(|id| i32::try_from(id).ok())
-        .ok_or(ProcessError::Fence)?;
-    let stdout = child.stdout.take().ok_or(ProcessError::InvalidSpec)?;
-    let stderr = child.stderr.take().ok_or(ProcessError::InvalidSpec)?;
+        .ok_or(ProcessError::InvalidSpec)?;
+    // Retain the pipe handles until fencing finishes. Dropping a full stdout
+    // pipe first can race SIGPIPE exit with group signalling on macOS.
+    let mut stdout = child.stdout.take().ok_or(ProcessError::InvalidSpec)?;
+    let mut stderr = child.stderr.take().ok_or(ProcessError::InvalidSpec)?;
     // The guard also fences on future cancellation/unwind while the child handle
     // is still owned. No PID is persisted or used to kill a recovered process.
     let mut group = ProcessGroup {
@@ -94,8 +96,8 @@ pub async fn run_process(
     let outcome = {
         let collect = async {
             let (stdout, stderr) = tokio::try_join!(
-                bounded_read(stdout, spec.output_limit),
-                bounded_read(stderr, spec.output_limit),
+                bounded_read(&mut stdout, spec.output_limit),
+                bounded_read(&mut stderr, spec.output_limit),
             )?;
             Ok::<_, ProcessError>((stdout, stderr))
         };
@@ -149,7 +151,7 @@ impl ProcessGroup {
                 self.armed = false;
                 Ok(())
             }
-            Err(_) => Err(ProcessError::Fence),
+            Err(error) => Err(ProcessError::Fence(error)),
         }
     }
 }
@@ -162,7 +164,7 @@ impl Drop for ProcessGroup {
 }
 
 async fn bounded_read(
-    reader: impl tokio::io::AsyncRead + Unpin,
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
     limit: usize,
 ) -> Result<Vec<u8>, ProcessError> {
     let mut bytes = Vec::new();
