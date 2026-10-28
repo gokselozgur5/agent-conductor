@@ -44,6 +44,13 @@ async function refresh() {
     el('login').hidden = true;
     el('toolbar').hidden = false;
     el('dispatch').hidden = false;
+    const healthResponse = await fetch('/api/health', {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (currentToken !== token) return;
+    if (!healthResponse.ok) throw new Error('Service health unavailable.');
+    const health = await healthResponse.json();
+    if (currentToken !== token) return;
+    if (health.type !== 'health') throw new Error('Unexpected health response.');
+    el('connection').textContent = `${health.status === 'ready' ? 'Connected' : 'Degraded'} · Watcher: ${health.repository_watcher ?? 'unknown'} · ${new Date().toLocaleTimeString()}`;
     await refreshQueue(currentToken);
   } catch (error) {
     if (currentToken === token) { el('message').textContent = error.message; el('connection').textContent = 'Connection lost · displayed data may be stale'; }
@@ -149,6 +156,13 @@ el('submit-plan').addEventListener('click', async () => {
     if (currentToken !== token) return;
     el('message').textContent=response.ok ? 'Plan persisted. Queue execution requires an enabled dispatcher.' : 'Submission not confirmed. Inspect queue before retrying the same plan.';
     if(response.ok) el('plan').value='';
+    const healthResponse = await fetch('/api/health', {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (currentToken !== token) return;
+    if (!healthResponse.ok) throw new Error('Service health unavailable.');
+    const health = await healthResponse.json();
+    if (currentToken !== token) return;
+    if (health.type !== 'health') throw new Error('Unexpected health response.');
+    el('connection').textContent = `${health.status === 'ready' ? 'Connected' : 'Degraded'} · Watcher: ${health.repository_watcher ?? 'unknown'} · ${new Date().toLocaleTimeString()}`;
     await refreshQueue(currentToken);
   } catch (_) { if(currentToken===token) el('message').textContent='Submission outcome unknown. Inspect queue before retrying.'; }
   finally { el('submit-plan').disabled=false; }

@@ -23,7 +23,7 @@ use agent_conductor_store::{
 use conductor_protocol::{
     CommandAppliedResponse, ErrorBody, ErrorCode, EventDeliveryResponse, EventPublishedResponse,
     HealthResponse, HealthStatus, InvariantResponse, InvariantViolation, Request, Response,
-    SemanticEventResponse, TaskResponse,
+    SemanticEventResponse, TaskResponse, WatcherStatus,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -70,6 +70,7 @@ pub struct PersistentControlService<C = SystemClock> {
     started_at: Instant,
     clock: Arc<C>,
     mutations: Arc<Mutex<()>>,
+    watcher_status: Arc<RwLock<WatcherStatus>>,
 }
 
 impl<C: Clock> Clone for PersistentControlService<C> {
@@ -80,6 +81,7 @@ impl<C: Clock> Clone for PersistentControlService<C> {
             started_at: self.started_at,
             clock: Arc::clone(&self.clock),
             mutations: Arc::clone(&self.mutations),
+            watcher_status: Arc::clone(&self.watcher_status),
         }
     }
 }
@@ -96,6 +98,13 @@ impl PersistentControlService<SystemClock> {
 }
 
 impl<C: Clock> PersistentControlService<C> {
+    /// Updates process-local watcher health without changing durable task truth.
+    pub fn set_watcher_status(&self, status: WatcherStatus) {
+        if let Ok(mut current) = self.watcher_status.write() {
+            *current = status;
+        }
+    }
+
     /// Starts with an injected authoritative clock.
     /// # Errors
     /// Returns an error when durable startup or recovery cannot complete.
@@ -114,6 +123,7 @@ impl<C: Clock> PersistentControlService<C> {
             started_at: Instant::now(),
             clock: Arc::new(clock),
             mutations: Arc::new(Mutex::new(())),
+            watcher_status: Arc::new(RwLock::new(WatcherStatus::Disabled)),
         };
         for lease in startup.recovery_pending {
             let Some(row) = service.store.task(&lease.task_id).await? else {
@@ -592,8 +602,17 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
             }
             Request::Health => {
                 let v = invariants(&self.store).await?;
+                let repository_watcher = self
+                    .watcher_status
+                    .read()
+                    .map_or(WatcherStatus::Failed, |s| *s);
                 Ok(Response::Health(HealthResponse {
-                    status: if v.is_empty() {
+                    repository_watcher,
+                    status: if v.is_empty()
+                        && matches!(
+                            repository_watcher,
+                            WatcherStatus::Disabled | WatcherStatus::Running
+                        ) {
                         HealthStatus::Ready
                     } else {
                         HealthStatus::Degraded
@@ -961,6 +980,7 @@ impl ControlService for InMemoryControlService {
         let v = self.violations.read().expect("lock").clone();
         match request {
             Request::Health => Ok(Response::Health(HealthResponse {
+                repository_watcher: WatcherStatus::Disabled,
                 status: if v.is_empty() {
                     HealthStatus::Ready
                 } else {

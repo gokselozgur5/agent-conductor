@@ -91,6 +91,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if watches.is_some() {
+        service.set_watcher_status(conductor_protocol::WatcherStatus::Starting);
+    }
     let (board_stop, board_task) = start_board(args.http, service.clone()).await;
     let workflow_service = service.clone();
     let server = match LocalServer::bind(&args.socket, service) {

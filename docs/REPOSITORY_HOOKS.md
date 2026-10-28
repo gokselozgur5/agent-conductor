@@ -1,8 +1,7 @@
 # Repository observation
 
 The opt-in daemon watcher turns repository observations into the existing durable
-semantic-event/delivery system. It never directly launches a model. Automatic wake,
-owned-attempt attribution and automatic wake are still pending.
+semantic-event/delivery system. It never directly launches a model. Owned-attempt attribution and automatic wake are still pending.
 
 Register the project and a dedicated read-only observer agent through the CLI.
 Create subscriptions with `file.*` and optional project/path filters; use
@@ -38,7 +37,13 @@ bursts; continuous observed changes become eligible after 5 s. These intervals d
 not include or override bounded Git/read execution time. Scans interrupted by
 concurrent source changes retry without publishing a false deletion. An unsupported
 observation or publication failure stops the watcher with a generic diagnostic;
-the daemon remains available. Check watcher stderr as well as daemon health.
+the daemon remains available. Health reports `repository_watcher` as `disabled`,
+`starting`, `running`, `stopped` or `failed`. Requested observation is degraded
+until its first scan round completes, and stopped/failed observation keeps overall
+health degraded. CLI health and the authenticated board expose the same state.
+Task cancellation or panic also marks the watcher failed; a graceful shutdown
+marks it stopped. This is process-liveness reporting, not a scan freshness bound
+or proof that every transient filesystem change was observed.
 
 Each publication handles at most 256 net changes. Its semantic events, matching
 deliveries and new baseline commit in one transaction. Remaining paths retain the

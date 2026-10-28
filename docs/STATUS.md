@@ -200,3 +200,19 @@ contains only workspace plus exact approved-file read roots. Reviewer pin
 construction was source-inspected; its packet is not separately persisted.
 Evidence: private `instruction-workflow-v1/receipt.json` and `packet-audit.json`.
 Exact integration commit CI 40693075343 passed on both supported CI hosts.
+
+
+## Watcher operational health
+
+The service health response and operator board now report observation state.
+A requested watcher starts degraded until its first successful scan round, and
+failure, task abort or unexpected drop cannot leave it reporting healthy.
+Graceful shutdown reports stopped. Disabled observation remains explicit.
+The daemon remains available for diagnosis and task control after watcher failure.
+
+The shared-service failure/abort/shutdown regression passed. The isolated real
+daemon and Chrome probe displayed `Degraded · Watcher: failed`, retained task
+rendering and live refresh, refused unauthenticated access and preserved injection,
+credential-storage and disconnect boundaries. Evidence: private
+`watcher-health-v1/receipt.json`. This reports watcher process state, not bounded
+scan freshness. Owned-attempt attribution and bounded wake remain outstanding.

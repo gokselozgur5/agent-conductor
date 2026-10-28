@@ -288,9 +288,23 @@ pub struct CommandAppliedResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
+    #[serde(default)]
+    pub repository_watcher: WatcherStatus,
     pub status: HealthStatus,
     pub boot_generation: u64,
     pub uptime_millis: u64,
+}
+
+/// Process-local observation health; disabled means observation was not requested.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatcherStatus {
+    #[default]
+    Disabled,
+    Starting,
+    Running,
+    Stopped,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +467,7 @@ mod tests {
         };
         let responses = vec![
             Response::Health(HealthResponse {
+                repository_watcher: WatcherStatus::Disabled,
                 status: HealthStatus::Ready,
                 boot_generation: 1,
                 uptime_millis: 2,
