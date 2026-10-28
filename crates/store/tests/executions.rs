@@ -288,3 +288,50 @@ async fn concurrent_preparation_grants_exactly_one_spawn_and_reopen_grants_none(
     );
     assert_eq!(recovered, first_record);
 }
+
+#[tokio::test]
+async fn exit_and_elapsed_time_are_not_reassignment_fences() {
+    let (_directory, store) = seed().await;
+    assert!(!store.has_unfenced_execution("task").await.expect("empty"));
+    store
+        .prepare_execution(&input(), audit("prepare"))
+        .await
+        .expect("prepare");
+    assert!(
+        store
+            .has_unfenced_execution("task")
+            .await
+            .expect("prepared")
+    );
+    store
+        .update_execution("token", 0, "ack", &acknowledgement(), audit("ack"))
+        .await
+        .expect("ack");
+    store
+        .update_execution(
+            "token",
+            1,
+            "exit",
+            &ExecutionUpdate::Exited {
+                wrapper_identity: "wrapper-nonce".into(),
+                exit_code: Some(0),
+            },
+            audit("exit"),
+        )
+        .await
+        .expect("exit");
+    assert!(store.has_unfenced_execution("task").await.expect("exited"));
+    store
+        .update_execution(
+            "token",
+            2,
+            "fence",
+            &ExecutionUpdate::Fenced {
+                reason: "controlled fixture fence confirmed".into(),
+            },
+            audit("fence"),
+        )
+        .await
+        .expect("fence");
+    assert!(!store.has_unfenced_execution("task").await.expect("fenced"));
+}

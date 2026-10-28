@@ -53,11 +53,17 @@ to wrapper release under the lifecycle mutation lock. Launch and renewal check
 the authoritative monotonic lease; replay and mismatched connection hashes are
 refused. This internal port accepts controlled fake adapters only. Service tests
 use a controlled protocol peer; real wrapper watchdog tests remain in runtime.
-Next: bind wrapper expiry to the exact service lease deadline, persist terminal
-observations and reconcile cancellation/restart before exposing an operator
-launcher. A relative heartbeat timeout alone is not proof of fencing before
-reassignment. Then complete isolated source capture and vendor adapters. Real
-agents have not been launched yet.
+Release and renewal now carry an absolute suspend-aware host deadline derived
+conservatively from the current service lease. Expired grants cannot launch or
+revive a worker; heartbeat activity alone cannot extend that deadline. Expiry
+reconciliation blocks tasks with unfenced execution records instead of requeuing
+them, and new claims refuse those records even after an operator resumes a task.
+An ordinary process exit is not a write fence.
+Next: persist terminal observations and reconcile cancellation/restart with
+actual fencing evidence before exposing an operator launcher. OS scheduling is
+not a hard real-time guarantee; reassignment must still await confirmed fencing.
+Then complete isolated source capture and vendor adapters. Real agents have not
+been launched yet.
 The full product workflow remains the target; later phase and soak requirements
 are not waived by the same-day usability objective.
 

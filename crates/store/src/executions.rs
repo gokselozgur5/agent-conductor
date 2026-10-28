@@ -81,6 +81,20 @@ pub enum ExecutionUpdate {
 }
 
 impl Store {
+    /// Whether any recorded execution lacks explicit fencing evidence.
+    /// Exit status, blocked status and elapsed leases are not fencing evidence.
+    /// # Errors
+    /// Returns database errors; callers must refuse reassignment on failure.
+    pub async fn has_unfenced_execution(&self, task_id: &str) -> Result<bool, StoreError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM executions WHERE task_id = ? AND state != 'fenced'",
+        )
+        .bind(task_id)
+        .fetch_one(&self.inner.readers)
+        .await?;
+        Ok(count != 0)
+    }
+
     /// Reads a recorded wrapper intent/observation without consulting live processes.
     /// # Errors
     /// Returns a database or invalid-record error.

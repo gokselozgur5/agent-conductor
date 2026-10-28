@@ -230,6 +230,7 @@ impl<C: Clock> PersistentControlService<C> {
             if clock.monotonic_ms < requeue_at {
                 continue;
             }
+            let unfenced = self.store.has_unfenced_execution(&task.id.0).await?;
             let command = Command {
                 actor: Actor {
                     id: ActorId("conductor-reconciler".into()),
@@ -245,12 +246,24 @@ impl<C: Clock> PersistentControlService<C> {
                     self.boot_generation, task.id.0, attempt.lease.epoch
                 )),
                 reason: "lease deadline and recovery grace elapsed".into(),
-                kind: CommandKind::RequeueExpired,
+                kind: if unfenced {
+                    CommandKind::Block {
+                        blocker: agent_conductor_domain::Blocker {
+                            kind: "runtime_fence_unconfirmed".into(),
+                            detail: "expired execution has no confirmed write fence".into(),
+                            resume_when: "reconcile and fence every prior execution".into(),
+                        },
+                    }
+                } else {
+                    CommandKind::RequeueExpired
+                },
             };
             self.apply_row(row, command)
                 .await
                 .map_err(|error| StoreError::Integrity(error.message))?;
-            requeued += 1;
+            if !unfenced {
+                requeued += 1;
+            }
         }
         Ok(requeued)
     }
@@ -380,6 +393,28 @@ impl<C: Clock> PersistentControlService<C> {
 
     // Only internal operations with an immutable input identity may supply this
     // hash. External commands hash their complete versioned payload above.
+    async fn validate_execution_fence(
+        &self,
+        task_id: &str,
+        command: &Command,
+    ) -> Result<(), ErrorBody> {
+        if matches!(
+            command.kind,
+            CommandKind::Claim { .. } | CommandKind::RequeueExpired
+        ) && self
+            .store
+            .has_unfenced_execution(task_id)
+            .await
+            .map_err(store_error)?
+        {
+            return Err(ErrorBody::new(
+                ErrorCode::Validation,
+                "prior execution fencing is unconfirmed",
+            ));
+        }
+        Ok(())
+    }
+
     async fn apply_row_with_hash(
         &self,
         row: PersistedTask,
@@ -404,6 +439,7 @@ impl<C: Clock> PersistentControlService<C> {
             return Ok(value);
         }
         self.validate_claim_worker(&command).await?;
+        self.validate_execution_fence(&row.id, &command).await?;
         let old: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
         let clock = self.clock.read(self.boot_generation);
         let applied = apply(&old, &command, clock).map_err(rejection_error)?;
@@ -2183,5 +2219,20 @@ mod effect_tests {
         );
         connection.cancel().await.expect("close fixture");
         connection.wait().await.expect("peer exited");
+        clock.set(15);
+        assert_eq!(service.reconcile_expired().await.expect("reconcile"), 0);
+        let row = store.task("task").await.expect("task").expect("row");
+        let blocked: Task = serde_json::from_str(&row.aggregate_json).expect("aggregate");
+        assert_eq!(blocked.state, TaskState::Blocked);
+        assert_eq!(
+            blocked.blocker.expect("blocker").kind,
+            "runtime_fence_unconfirmed"
+        );
+        assert!(
+            store
+                .has_unfenced_execution("task")
+                .await
+                .expect("fence status")
+        );
     }
 }
