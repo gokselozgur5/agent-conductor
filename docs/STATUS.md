@@ -78,7 +78,7 @@ See [LEASE_OBSERVATION.md](LEASE_OBSERVATION.md) for snapshot/authority limits.
 Adapter-reported terminal usage is now retained per invocation and visible through
 the inventory; missing reports remain unknown. See [REPORTED_USAGE.md](REPORTED_USAGE.md).
 The working local workflow is not full v1 acceptance. Remaining work includes
-deeper execution evidence, usage-loss recovery, abnormal ownership recovery,
+deeper execution evidence, abnormal ownership recovery,
 host protocol/Thor/Linux isolation,
 load/restore/redaction validation and seven-day soak. Issue #20 retains an
 unresolved historical supervision deadline; do not infer a cause from green tests.
