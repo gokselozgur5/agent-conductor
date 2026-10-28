@@ -59,6 +59,35 @@ async fn exited(child: &mut Child) -> std::process::ExitStatus {
         .expect("wait")
 }
 
+// Readiness is not a missed-heartbeat test. Maintain the lease until the
+// descendant has demonstrably progressed, then deliberately exercise stop.
+async fn wait_for_progress(
+    writer: &mut ChildStdin,
+    hash: &str,
+    path: &std::path::Path,
+    prior: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            send(
+                writer,
+                &RunnerControl::Renew {
+                    packet_sha256: hash.into(),
+                    continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock")
+                        + 5000,
+                },
+            )
+            .await;
+            if std::fs::read(path).unwrap_or_default().len() > prior {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("worker progress while lease is renewed");
+}
+
 #[tokio::test]
 async fn no_worker_side_effect_before_matching_recorded_release() {
     let directory = tempfile::tempdir().expect("directory");
@@ -136,7 +165,7 @@ async fn parent_loss_and_missed_renewal_stop_the_worker_group() {
         let directory = tempfile::tempdir().expect("directory");
         let input = launch(
             directory.path(),
-            "( /bin/sleep 1; printf escaped > escaped ) & printf ready > running; wait",
+            "/bin/sleep 0.3; ( while [ ! -e probe ]; do /bin/sleep 0.02; done; printf escaped > escaped ) & printf ready > running; wait",
             150,
         );
         let hash = input.packet.sha256().expect("hash");
@@ -150,26 +179,28 @@ async fn parent_loss_and_missed_renewal_stop_the_worker_group() {
             &RunnerControl::Release {
                 continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock")
                     + 5000,
-                packet_sha256: hash,
+                packet_sha256: hash.clone(),
             },
         )
         .await;
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !directory.path().join("running").exists() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("worker started");
+        wait_for_progress(&mut writer, &hash, &directory.path().join("running"), 0).await;
         if parent_loss {
             drop(writer);
         }
-        assert!(matches!(
-            event(&mut reader).await,
-            RunnerEvent::Stopped { .. }
-        ));
+        let RunnerEvent::Stopped { reason, .. } = event(&mut reader).await else {
+            panic!("expected stop");
+        };
+        assert_eq!(
+            reason,
+            if parent_loss {
+                "parent_lost_or_invalid_control"
+            } else {
+                "lease_or_runtime_expired"
+            }
+        );
         assert!(exited(&mut child).await.success());
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        std::fs::write(directory.path().join("probe"), "probe").unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!directory.path().join("escaped").exists());
     }
 }
@@ -438,7 +469,7 @@ async fn stopped_observation_allows_prior_writes_but_no_later_writes() {
     let directory = tempfile::tempdir().expect("directory");
     let input = launch(
         directory.path(),
-        "( while :; do printf tick >> writes; /bin/sleep 0.02; done ) >/dev/null 2>&1 & /bin/sleep 5",
+        "/bin/sleep 0.3; ( while :; do printf tick >> writes; /bin/sleep 0.02; done ) >/dev/null 2>&1 & /bin/sleep 5",
         2000,
     );
     let (mut child, mut writer, mut reader) = wrapper(&input).await;
@@ -455,27 +486,15 @@ async fn stopped_observation_allows_prior_writes_but_no_later_writes() {
     )
     .await;
     let path = directory.path().join("writes");
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if std::fs::read(&path).unwrap_or_default().len() >= 8 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("descendant must have already written");
+    let hash = input.packet.sha256().expect("hash");
+    wait_for_progress(&mut writer, &hash, &path, 0).await;
     let before = std::fs::read(&path).unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        std::fs::read(&path).unwrap().len() > before.len(),
-        "live positive control"
-    );
+    wait_for_progress(&mut writer, &hash, &path, before.len()).await;
     send(&mut writer, &RunnerControl::Cancel).await;
-    assert!(matches!(
-        event(&mut reader).await,
-        RunnerEvent::Stopped { .. }
-    ));
+    let RunnerEvent::Stopped { reason, .. } = event(&mut reader).await else {
+        panic!("expected stop");
+    };
+    assert_eq!(reason, "cancelled");
     let stopped = std::fs::read(&path).unwrap();
     assert!(exited(&mut child).await.success());
     tokio::time::sleep(Duration::from_millis(150)).await;
