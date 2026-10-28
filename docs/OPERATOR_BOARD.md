@@ -88,3 +88,8 @@ pause/resume/cancel transitions and terminal-state refusal. An isolated Chrome
 control probe clicked the ready → pause → resume → cancel sequence and read back
 the cancelled state from the real daemon; evidence is private under
 `reviews/agent-conductor-runtime-20261028/operator-controls-v1`.
+
+The Continue retained work button was exercised in isolated Chrome against a
+private copy of a real rejected, fenced task. It persisted a version-bound queued
+continuation with dispatch disabled; the test did not launch another model.
+Evidence: `reviews/agent-conductor-runtime-20261028/operator-continuation-v1`.

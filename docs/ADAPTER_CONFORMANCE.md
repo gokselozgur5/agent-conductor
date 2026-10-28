@@ -98,3 +98,24 @@ verification state. Capture failures preserve partial artifacts; no acceptance
 verdict is recorded. Source finalization uses two lifecycle transactions (begin,
 bind); a crash between them can leave an unbound verification state requiring
 reconciliation. End-to-end native acceptance and automatic recovery remain open.
+
+## Observed restricted-writer stop
+
+The wrapper now retains bounded stdout during cancellation, timeout or output-limit
+supervision. A `Stopped` observation includes this prefix only after successful
+group signalling and leader reaping. The controller additionally waits for the
+matching wrapper to exit. This still is not a generic descendant-isolation proof.
+
+For the already admitted pinned Claude file-only writer, the controller may record
+a write fence when that settled observation contains a valid complete event prefix
+with exactly one permitted tool initialization and no command-capable tool use.
+Missing/truncated/malformed envelopes, fake/Codex/command-capable contracts and
+unsettled wrappers remain refused. Audit records bind packet, binary, conformance
+and output digests without persisting model output or credentials. This uses the
+same trusted CLI capability boundary as normal restricted-writer finalization.
+
+A stopped writer is never a successful candidate or a completed task. The original
+task retains its paused/unfinished state; an explicit continuation creates a fresh
+attempt and reruns all checks and independent review. No stop evidence survives an
+unobserved daemon crash yet: absence of a PID or elapsed watchdog time remains
+insufficient for recovery admission.

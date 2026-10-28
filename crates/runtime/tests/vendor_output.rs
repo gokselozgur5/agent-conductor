@@ -126,3 +126,32 @@ fn file_tool_observation_requires_init_and_rejects_command_capabilities() {
     );
     assert!(interpret_vendor_output(&packet, &output(&[init.clone(), init, terminal])).is_err());
 }
+
+#[test]
+fn stopped_writer_requires_observed_file_only_envelope_and_complete_prefix() {
+    use conductor_runtime::accepts_file_writer_stop;
+    use serde_json::json;
+    let mut input = packet(AdapterKind::Claude);
+    input.contract.authority.allow_workspace_commands = false;
+    let init =
+        json!({"type":"system","subtype":"init","tools":["Read","Write","Edit","Glob","Grep"]});
+    let valid = output(std::slice::from_ref(&init)).stdout;
+    assert!(accepts_file_writer_stop(&input, &valid));
+    assert!(!accepts_file_writer_stop(&input, b""));
+    assert!(!accepts_file_writer_stop(&input, &valid[..valid.len() - 1]));
+    assert!(!accepts_file_writer_stop(
+        &input,
+        &output(&[init.clone(), init.clone()]).stdout
+    ));
+    let command =
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}});
+    assert!(!accepts_file_writer_stop(
+        &input,
+        &output(&[init, command]).stdout
+    ));
+    input.contract.authority.allow_workspace_commands = true;
+    assert!(!accepts_file_writer_stop(&input, &valid));
+    input.contract.authority.allow_workspace_commands = false;
+    input.contract.adapter.kind = AdapterKind::Fake;
+    assert!(!accepts_file_writer_stop(&input, &valid));
+}

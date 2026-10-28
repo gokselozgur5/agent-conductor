@@ -57,7 +57,9 @@ checks and independent review. Old attempt files and evidence remain untouched.
 Required checks and objective must match the stored plan; no task or source reset
 is used. A stale request is refused instead of silently adopting newer state.
 
-This supports interrupted verification after a normally exited, fenced writer.
+This supports interrupted verification after a normally exited, fenced writer
+and an observed stop of the accepted restricted file-only writer. The latter
+requires both settled wrapper observation and a valid restricted tool envelope.
 A mid-writer crash with no confirmed fence still blocks continuation. No elapsed
 time or missing PID is accepted as fence proof, and no blanket automatic retry
 or generic command-capable writer recovery is claimed.
