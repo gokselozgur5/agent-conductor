@@ -663,17 +663,26 @@ mod tests {
             unread.push(client);
         }
 
-        tokio::time::sleep(Duration::from_millis(80)).await;
         let health = RequestEnvelope::new(Request::Health);
-        let response = exchange(
-            &path,
-            &serde_json::to_vec(&health).expect("health serializes"),
-        )
-        .await;
-        assert!(matches!(
-            response.result,
-            ResponseResult::Ok(Response::Health(_))
-        ));
+        let health_body = serde_json::to_vec(&health).expect("health serializes");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match exchange(&path, &health_body).await.result {
+                    ResponseResult::Ok(Response::Health(_)) => break,
+                    ResponseResult::Error(error)
+                        if error.code == ErrorCode::Unavailable
+                            && error.message == "connection limit reached" =>
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                    response => {
+                        panic!("unexpected health response while permits recover: {response:?}")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed-out response writers release their permits");
 
         drop(unread);
         shutdown_tx.send(()).expect("shutdown sends");
