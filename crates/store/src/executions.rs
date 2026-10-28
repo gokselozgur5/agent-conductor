@@ -101,6 +101,21 @@ impl Store {
         input: &ExecutionPreparation,
         audit: EffectAudit<'_>,
     ) -> Result<ExecutionRecord, StoreError> {
+        self.prepare_execution_once(input, audit)
+            .await
+            .map(|(record, _)| record)
+    }
+
+    /// Records a launch intent and distinguishes a fresh insertion from replay.
+    /// Only the caller receiving `true` may create the wrapper. A replay after a
+    /// crash is recovery work, never permission to spawn a second process.
+    /// # Errors
+    /// Rejects invalid input, stale ownership and changed idempotency input.
+    pub async fn prepare_execution_once(
+        &self,
+        input: &ExecutionPreparation,
+        audit: EffectAudit<'_>,
+    ) -> Result<(ExecutionRecord, bool), StoreError> {
         validate_preparation(input)?;
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
@@ -114,7 +129,7 @@ impl Store {
                 return Err(StoreError::IdempotencyCollision);
             }
             tx.commit().await?;
-            return Ok(record);
+            return Ok((record, false));
         }
         require_live(&mut tx, input, audit.now_ms).await?;
         sqlx::query("INSERT INTO executions (effect_token, task_id, attempt_id, lease_epoch, runner_id, packet_json, packet_sha256, state, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)")
@@ -123,14 +138,17 @@ impl Store {
             .bind(audit.now_ms).bind(audit.now_ms).execute(&mut *tx).await?;
         append_audit(&mut tx, input, "execution.prepared", &audit, "{}").await?;
         tx.commit().await?;
-        Ok(ExecutionRecord {
-            preparation: input.clone(),
-            revision: 0,
-            state: ExecutionState::Prepared,
-            wrapper_identity: None,
-            checkpoint_json: None,
-            exit_code: None,
-        })
+        Ok((
+            ExecutionRecord {
+                preparation: input.clone(),
+                revision: 0,
+                state: ExecutionState::Prepared,
+                wrapper_identity: None,
+                checkpoint_json: None,
+                exit_code: None,
+            },
+            true,
+        ))
     }
 
     /// Atomically applies an expected-revision observation, audit and replay receipt.

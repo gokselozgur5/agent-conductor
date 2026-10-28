@@ -260,3 +260,31 @@ async fn checkpoint_survives_fencing_and_terminal_attempt_cannot_restart() {
     );
     assert_eq!(audit_count(&store).await, 4);
 }
+
+#[tokio::test]
+async fn concurrent_preparation_grants_exactly_one_spawn_and_reopen_grants_none() {
+    let (directory, store) = seed().await;
+    let preparation = input();
+    let (first, second) = tokio::join!(
+        store.prepare_execution_once(&preparation, audit("first")),
+        store.prepare_execution_once(&preparation, audit("second")),
+    );
+    let (first_record, first_created) = first.expect("first prepare");
+    let (second_record, second_created) = second.expect("second prepare");
+    assert_eq!(first_record, second_record);
+    assert_ne!(first_created, second_created);
+    assert_eq!(audit_count(&store).await, 1);
+    drop(store);
+    let store = Store::open(directory.path().join("control.sqlite3"))
+        .await
+        .expect("reopen");
+    let (recovered, created) = store
+        .prepare_execution_once(&preparation, audit("restart"))
+        .await
+        .expect("reconcile intent");
+    assert!(
+        !created,
+        "unobserved launch intent cannot authorize another spawn"
+    );
+    assert_eq!(recovered, first_record);
+}
