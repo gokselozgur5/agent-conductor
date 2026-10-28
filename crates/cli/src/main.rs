@@ -27,6 +27,14 @@ enum Command {
     InspectProject {
         project: PathBuf,
     },
+    /// Discover advisory candidates within an explicit workspace boundary.
+    InspectWorkspace {
+        project: PathBuf,
+        #[arg(long)]
+        workspace_root: PathBuf,
+        #[arg(long = "document")]
+        documents: Vec<String>,
+    },
     Health,
     CheckInvariants,
     /// Persist an approved native plan for an explicitly enabled dispatcher.
@@ -130,6 +138,26 @@ async fn main() {
         let status = check_command::run(args).await;
         std::process::exit(status);
     }
+    if let Command::InspectWorkspace {
+        project,
+        workspace_root,
+        documents,
+    } = &cli.command
+    {
+        let Ok(inventory) =
+            conductor_runtime::discover_scoped_advisory(project, workspace_root, documents)
+        else {
+            eprintln!(
+                "scoped discovery refused; inspect boundary, names, source types and content bounds"
+            );
+            std::process::exit(2);
+        };
+        let Ok(json) = serde_json::to_string_pretty(&inventory) else {
+            std::process::exit(5);
+        };
+        println!("{json}");
+        return;
+    }
     if let Command::InspectProject { project } = &cli.command {
         if !project.is_absolute() {
             eprintln!("project path must be absolute");
@@ -179,7 +207,9 @@ async fn main() {
 #[allow(clippy::too_many_lines)] // Keep the declarative CLI-to-protocol mapping together.
 fn command_request(command: Command) -> Request {
     match command {
-        Command::RunCheck(_) | Command::InspectProject { .. } => {
+        Command::RunCheck(_)
+        | Command::InspectProject { .. }
+        | Command::InspectWorkspace { .. } => {
             eprintln!("local inspection/check execution is not a daemon request");
             std::process::exit(2);
         }
