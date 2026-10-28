@@ -67,3 +67,8 @@ pub use advisory::*;
 mod checkpoint;
 #[cfg(unix)]
 pub use checkpoint::*;
+
+#[cfg(unix)]
+mod scoped_advisory;
+#[cfg(unix)]
+pub use scoped_advisory::*;

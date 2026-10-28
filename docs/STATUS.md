@@ -58,9 +58,12 @@ All twelve remaining manual SQLite transaction owners now use rollback-on-drop.
 Deterministic before/after controls reproduce and correct partial writer state;
 execution-owner and lost-COMMIT-response controls cover the important boundaries.
 See [STORE_TRANSACTIONS.md](STORE_TRANSACTIONS.md) for the audit and evidence.
+Opt-in outer-workspace discovery now freezes bounded untrusted advisory sources
+into native plans without adding agent filesystem capabilities. See
+[SCOPED_ADVISORY.md](SCOPED_ADVISORY.md) for selection and trust boundaries.
 The working local workflow is not full v1 acceptance. Remaining work includes
-broader project/agent/event/checkpoint visibility, outer advisory
-discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,
+broader project/agent/event/checkpoint visibility, abnormal ownership recovery,
+host protocol/Thor/Linux isolation,
 load/restore/redaction validation and seven-day soak. Issue #20 retains an
 unresolved historical supervision deadline; do not infer a cause from green tests.
 

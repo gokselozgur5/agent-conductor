@@ -190,3 +190,11 @@ behavior; an open question blocks completion, not initial execution.
 
 For explicit successor selection after a verified stop, see
 [WORKFLOW_REASSIGNMENT.md](WORKFLOW_REASSIGNMENT.md).
+
+## Outer-workspace advisory sources
+
+Use `tools/conductor inspect --workspace-root /absolute/workspace` to review
+bounded source candidates. The same option on `plan` freezes untrusted data pins;
+repeated `--document relative/path` selects repository-specific names. These are
+separate from authoritative `--instruction` pins and add no native read roots.
+See [SCOPED_ADVISORY.md](SCOPED_ADVISORY.md) for bounds and change handling.

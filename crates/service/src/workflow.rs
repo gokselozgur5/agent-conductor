@@ -36,6 +36,9 @@ pub struct NativeWorkflowPlan {
     /// Explicit operator-approved instruction files, ordered outer scope first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub instructions: Vec<conductor_runtime::InstructionPin>,
+    /// Explicitly selected untrusted source bytes; no additional capabilities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisory_sources: Vec<conductor_runtime::InstructionPin>,
     /// Explicit existing subscription for a single event-triggered dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_subscription: Option<String>,
@@ -154,6 +157,7 @@ impl<C: Clock> PersistentControlService<C> {
             None
         };
         let workspace = artifacts.join("work/tree");
+        let advisory_context = advisory_context(plan)?;
         let Assignment {
             worker_id,
             worker_pin,
@@ -162,7 +166,8 @@ impl<C: Clock> PersistentControlService<C> {
             token,
             epoch,
         } = self.assign_workflow(plan, &workspace, continuing).await?;
-        let untrusted_context = self.workflow_context(plan, &baseline).await?;
+        let mut untrusted_context = self.workflow_context(plan, &baseline).await?;
+        untrusted_context.extend(advisory_context);
         let packet = ResumePacket {
             contract: AttemptContract {
                 version: 1,
@@ -700,7 +705,12 @@ fn identity(pin: &VendorPin) -> AdapterIdentity {
         conformance_sha256: pin.conformance_sha256.clone(),
     }
 }
+fn advisory_context(plan: &NativeWorkflowPlan) -> Result<Option<String>, StoreError> {
+    conductor_runtime::read_advisory_context(&plan.advisory_sources)
+        .map_err(|_| invalid("advisory sources changed or unavailable"))
+}
 pub(super) fn validate_plan(plan: &NativeWorkflowPlan) -> Result<(), StoreError> {
+    advisory_context(plan)?;
     conductor_runtime::read_approved_instruction_sources(&plan.instructions)
         .map_err(|_| invalid("approved instruction source changed or unavailable"))?;
     let unique = plan
@@ -824,6 +834,7 @@ mod tests {
             toolchain_roots: vec![],
             model_timeout_ms: 1000,
             instructions: vec![],
+            advisory_sources: vec![],
         }
     }
     #[test]
@@ -1029,6 +1040,38 @@ mod tests {
         assert_eq!(restored.instructions, plan.instructions);
         std::fs::write(source, "changed").unwrap();
         assert!(validate_plan(&plan).is_err());
+    }
+    #[test]
+    fn scoped_sources_are_untrusted_frozen_and_optional_in_plans() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let mut plan = plan(root.join("project"), root.join("artifacts"));
+        assert!(
+            serde_json::to_value(&plan)
+                .unwrap()
+                .get("advisory_sources")
+                .is_none()
+        );
+        let file = root.join("README.md");
+        std::fs::write(&file, "untrusted outer context").unwrap();
+        plan.advisory_sources
+            .push(conductor_runtime::InstructionPin {
+                path: file.clone(),
+                sha256: crate::hash("untrusted outer context"),
+            });
+        validate_plan(&plan).unwrap();
+        let restored: NativeWorkflowPlan =
+            serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
+        assert_eq!(restored.advisory_sources, plan.advisory_sources);
+        assert!(restored.instructions.is_empty());
+        let value: serde_json::Value =
+            serde_json::from_str(&advisory_context(&restored).unwrap().unwrap()).unwrap();
+        assert_eq!(value["sources"][0]["text"], "untrusted outer context");
+        assert!(value["trust"].as_str().unwrap().contains("Untrusted"));
+        std::fs::write(&file, "changed").unwrap();
+        assert!(validate_plan(&restored).is_err());
+        std::fs::remove_file(file).unwrap();
+        assert!(validate_plan(&restored).is_err());
     }
     #[tokio::test]
     async fn workflow_context_discovers_references_without_approving_instructions() {
