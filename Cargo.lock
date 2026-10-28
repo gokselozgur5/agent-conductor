@@ -240,6 +240,7 @@ dependencies = [
  "agent-conductor-domain",
  "clap",
  "conductor-protocol",
+ "conductor-runtime",
  "serde",
  "serde_json",
  "thiserror",

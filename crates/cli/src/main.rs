@@ -1,3 +1,4 @@
+mod check_command;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -20,6 +21,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run an approved check in a disposable source copy (does not complete a task).
+    RunCheck(check_command::CheckArgs),
     Health,
     CheckInvariants,
     RegisterProject {
@@ -88,6 +91,10 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    if let Command::RunCheck(args) = &cli.command {
+        let status = check_command::run(args).await;
+        std::process::exit(status);
+    }
     let request = RequestEnvelope::new(command_request(cli.command));
 
     let response = match send(&cli.socket, &request).await {
@@ -117,6 +124,10 @@ async fn main() {
 
 fn command_request(command: Command) -> Request {
     match command {
+        Command::RunCheck(_) => {
+            eprintln!("run-check is a local executor, not a daemon request");
+            std::process::exit(2);
+        }
         Command::Health => Request::Health,
         Command::CheckInvariants => Request::CheckInvariants,
         Command::RegisterProject {

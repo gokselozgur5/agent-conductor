@@ -111,3 +111,11 @@ candidate and durable `exited` record; malformed output becomes `blocked`.
 Successful exit never implies a write fence or task completion. Packet substitution
 is rejected. The CLI/daemon workflow, check execution and independent verification
 still need connecting before the product is usable end to end.
+
+### Check executor
+
+`conductorctl run-check` now executes exact approved argv in a fresh source-bound
+copy under macOS isolation. Actual sandbox tests cover original-source write
+refusal, fresh copies, source mismatch, failed commands, timeout and cancellation.
+The real CLI completed a synthetic source check. This local command does not yet
+persist checks into daemon tasks. See [CHECK_EXECUTION.md](CHECK_EXECUTION.md).
