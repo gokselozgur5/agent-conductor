@@ -66,6 +66,17 @@ class BackupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             backup.verify(self.target)
 
+    @unittest.skipIf(os.getuid() == 0, 'root bypasses directory read permissions')
+    def test_unreadable_directory_is_not_silently_omitted(self):
+        protected = self.state / 'artifacts'
+        protected.chmod(0)
+        try:
+            with self.assertRaises(PermissionError):
+                backup.backup(self.state, self.target)
+            self.assertFalse(self.target.exists())
+        finally:
+            protected.chmod(0o700)
+
     def test_live_lock_refused_without_output(self):
         with (self.state / 'runtime.lock').open('rb') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

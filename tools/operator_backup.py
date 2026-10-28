@@ -26,10 +26,14 @@ def digest(path):
     return value.hexdigest()
 
 
+def scan_error(error):
+    raise error
+
+
 def inventory(root, exclude=()):
     result = {}
     total = 0
-    for directory, folders, files in os.walk(root, followlinks=False):
+    for directory, folders, files in os.walk(root, followlinks=False, onerror=scan_error):
         base = Path(directory)
         if base == root:
             folders[:] = [name for name in folders if name not in exclude]
