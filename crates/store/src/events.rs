@@ -8,6 +8,11 @@ use crate::Store;
 
 pub const EVENT_SCHEMA_VERSION: u16 = 1;
 
+// Aliases s (subscription) and e (event) are shared across publication, leasing
+// and wake admission. Only a trailing .* is a topic-family operator; prefixes
+// are literal and case-sensitive, independent of SQLite LIKE settings.
+pub(crate) const SUBSCRIPTION_MATCH_SQL: &str = "s.active = 1 AND (s.topic_filter = e.topic OR (substr(s.topic_filter, -2) = '.*' AND instr(e.topic, substr(s.topic_filter, 1, length(s.topic_filter) - 1)) = 1)) AND (s.project_id IS NULL OR s.project_id = e.project_id) AND (s.path_prefix IS NULL OR instr(e.path_scope, s.path_prefix) = 1) AND (s.echo_source = 1 OR s.agent_id <> e.source_agent_id)";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventLimits {
     pub max_generation: u32,
@@ -261,9 +266,9 @@ impl Store {
         let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             expire_stale_in_transaction(&mut writer, now_ms).await?;
-            let row = sqlx::query(
-                "SELECT d.id, d.attempts, e.id, e.schema_version, e.idempotency_key, e.source_agent_id, e.source_session_id, e.correlation_id, e.causation_id, e.generation, e.topic, e.project_id, e.task_id, e.attempt_id, e.lease_epoch, e.path_scope, e.payload_json, e.created_at_ms, e.max_retries FROM event_deliveries d JOIN semantic_events e ON e.id = d.event_id WHERE d.target_agent_id = ? AND ((d.status = 'pending' AND d.available_at_ms <= ?) OR (d.status = 'leased' AND d.lease_expires_at_ms <= ?)) AND e.expires_at_ms > ? AND d.attempts < e.max_retries ORDER BY e.created_at_ms, d.id LIMIT 1",
-            )
+            let row = sqlx::query(&format!(
+                "SELECT d.id, d.attempts, e.id, e.schema_version, e.idempotency_key, e.source_agent_id, e.source_session_id, e.correlation_id, e.causation_id, e.generation, e.topic, e.project_id, e.task_id, e.attempt_id, e.lease_epoch, e.path_scope, e.payload_json, e.created_at_ms, e.max_retries FROM event_deliveries d JOIN semantic_events e ON e.id = d.event_id JOIN event_subscriptions s ON s.id=d.subscription_id AND s.agent_id=d.target_agent_id WHERE {SUBSCRIPTION_MATCH_SQL} AND d.target_agent_id = ? AND ((d.status = 'pending' AND d.available_at_ms <= ?) OR (d.status = 'leased' AND d.lease_expires_at_ms <= ?)) AND e.expires_at_ms > ? AND d.attempts < e.max_retries ORDER BY e.created_at_ms, d.id LIMIT 1",
+            ))
             .bind(agent_id)
             .bind(now_ms)
             .bind(now_ms)
@@ -468,10 +473,9 @@ async fn publish_in_transaction(
         .map(i64::try_from)
         .transpose()
         .map_err(|_| EventStoreError::NumericRange)?;
-    let subscriptions = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, agent_id FROM event_subscriptions WHERE active = 1 AND (topic_filter = ? OR (substr(topic_filter, -2) = '.*' AND ? LIKE substr(topic_filter, 1, length(topic_filter) - 1) || '%')) AND (project_id IS NULL OR project_id = ?) AND (path_prefix IS NULL OR ? LIKE path_prefix || '%') AND (echo_source = 1 OR agent_id <> ?) ORDER BY id",
-    )
-    .bind(&event.topic)
+    let subscriptions = sqlx::query_as::<_, (String, String)>(&format!(
+        "SELECT s.id, s.agent_id FROM event_subscriptions s CROSS JOIN (SELECT ? AS topic, ? AS project_id, ? AS path_scope, ? AS source_agent_id) e WHERE {SUBSCRIPTION_MATCH_SQL} ORDER BY s.id",
+    ))
     .bind(&event.topic)
     .bind(&event.project_id)
     .bind(&event.path_scope)
