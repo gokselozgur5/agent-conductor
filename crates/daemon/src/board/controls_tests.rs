@@ -238,3 +238,86 @@ async fn history_is_scoped_paginated_private_and_read_only() {
     stop.send(()).unwrap();
     server.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn task_pages_do_not_omit_or_duplicate_rows_when_new_tasks_arrive() {
+    use sqlx::Connection;
+    let directory = tempfile::tempdir().unwrap();
+    let service = fixture(directory.path()).await;
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        directory.path().join("state.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    let baseline: String =
+        sqlx::query_scalar("SELECT aggregate_json FROM tasks WHERE id='controlled'")
+            .fetch_one(&mut db)
+            .await
+            .unwrap();
+    for n in 0..205 {
+        let id = format!("task-{n:03}");
+        let mut aggregate: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        aggregate["id"] = serde_json::json!(id);
+        sqlx::query("INSERT INTO tasks(id,project_id,objective,state,authority_json,aggregate_json,created_at_ms,updated_at_ms) VALUES(?,'project','page fixture','backlog','{}',?,0,0)")
+            .bind(id).bind(aggregate.to_string()).execute(&mut db).await.unwrap();
+    }
+    let mut after = None;
+    let mut ids = Vec::new();
+    for expected in [100, 100, 6] {
+        let ControlResponse::TaskPage { tasks, next_after } = service
+            .handle(ControlRequest::ListTaskPage {
+                project_id: Some("project".into()),
+                after,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("page missing");
+        };
+        assert_eq!(tasks.len(), expected);
+        ids.extend(tasks.into_iter().map(|task| task.aggregate.id.0));
+        after = next_after;
+        if ids.len() == 100 {
+            service
+                .handle(ControlRequest::CreateTask {
+                    actor_id: "operator".into(),
+                    idempotency_key: "insert-earlier".into(),
+                    id: "a-new-earlier-id".into(),
+                    project_id: "project".into(),
+                    objective: "new task".into(),
+                    priority: 999,
+                    authority: serde_json::json!({}),
+                    required_checks: vec![],
+                })
+                .await
+                .unwrap();
+        }
+    }
+    assert!(after.is_none());
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(ids.len(), 206);
+    let ControlResponse::TaskPage { tasks, next_after } = service
+        .handle(ControlRequest::ListTaskPage {
+            project_id: Some("missing".into()),
+            after: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("page missing");
+    };
+    assert!(tasks.is_empty() && next_after.is_none());
+    let ControlResponse::TaskPage { tasks, .. } = service
+        .handle(ControlRequest::ListTaskPage {
+            project_id: None,
+            after: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("page missing");
+    };
+    assert_eq!(tasks[0].aggregate.id.0, "a-new-earlier-id");
+    assert_state(&service, "backlog", 0).await;
+}

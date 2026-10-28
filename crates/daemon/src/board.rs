@@ -163,8 +163,24 @@ async fn boundary<S: ControlService>(
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     response
 }
-async fn tasks<S: ControlService>(State(state): State<BoardState<S>>) -> Response {
-    query(&state, ControlRequest::ListTasks { project_id: None }).await
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskQuery {
+    project_id: Option<String>,
+    after: Option<String>,
+}
+async fn tasks<S: ControlService>(
+    State(state): State<BoardState<S>>,
+    Query(params): Query<TaskQuery>,
+) -> Response {
+    query(
+        &state,
+        ControlRequest::ListTaskPage {
+            project_id: params.project_id,
+            after: params.after,
+        },
+    )
+    .await
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
