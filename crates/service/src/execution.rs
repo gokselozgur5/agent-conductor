@@ -5,7 +5,7 @@ use agent_conductor_store::{
     EffectAudit, ExecutionPreparation, ExecutionRecord, ExecutionState, ExecutionUpdate, StoreError,
 };
 use conductor_runtime::{
-    AdapterKind, ResumePacket, RunnerConnection, RunnerConnectionError, RunnerLaunch,
+    AdapterKind, ResumePacket, RunnerConnection, RunnerConnectionError, RunnerEvent, RunnerLaunch,
 };
 use std::path::Path;
 use uuid::Uuid;
@@ -138,6 +138,131 @@ impl<C: Clock> PersistentControlService<C> {
             .renew(deadline)
             .await
             .map_err(|_| runtime_error("wrapper renewal failed"))
+    }
+
+    /// Requests stop and records the observed result without completing the task.
+    /// The five-second observation bound is not proof of death on timeout. Even a
+    /// controlled group stop remains blocked until isolation/fence verification
+    /// establishes that no writer escaped the group.
+    /// # Errors
+    /// Refuses a mismatched owner or database failure. Transport loss is persisted
+    /// as blocked; the connection then closes so the independent watchdog runs.
+    pub async fn stop_controlled_execution(
+        &self,
+        token: &str,
+        wrapper_identity: &str,
+        mut connection: RunnerConnection,
+    ) -> Result<(ExecutionRecord, Option<RunnerEvent>), StoreError> {
+        {
+            let _guard = self.mutations.lock().await;
+            self.validate_execution_connection(token, wrapper_identity, &connection)
+                .await?;
+        }
+        let observation = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            connection.cancel().await?;
+            let event = connection.event().await?;
+            connection.wait().await?;
+            Ok::<_, RunnerConnectionError>(event)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok);
+        let _guard = self.mutations.lock().await;
+        let record = self
+            .validate_execution_connection(token, wrapper_identity, &connection)
+            .await?;
+        let update = match observation.as_ref() {
+            Some(RunnerEvent::Finished { exit_code, .. }) => ExecutionUpdate::Exited {
+                wrapper_identity: wrapper_identity.into(), exit_code: *exit_code,
+            },
+            Some(RunnerEvent::Stopped { .. }) => ExecutionUpdate::Blocked {
+                reason: "controlled group stopped; complete write fence is not yet verified".into(),
+            },
+            _ => ExecutionUpdate::Blocked {
+                reason: "wrapper terminal observation unavailable; reconcile without PID-only signalling".into(),
+            },
+        };
+        let audit_id = Uuid::now_v7().to_string();
+        let record = self
+            .store
+            .update_execution(
+                token,
+                record.revision,
+                &format!("stop:{wrapper_identity}"),
+                &update,
+                EffectAudit {
+                    id: &audit_id,
+                    actor_id: "conductor-runtime",
+                    correlation_id: token,
+                    now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+                },
+            )
+            .await?;
+        Ok((record, observation))
+    }
+
+    async fn validate_execution_connection(
+        &self,
+        token: &str,
+        wrapper_identity: &str,
+        connection: &RunnerConnection,
+    ) -> Result<ExecutionRecord, StoreError> {
+        let record = self
+            .store
+            .execution(token)
+            .await?
+            .ok_or_else(|| runtime_error("missing execution"))?;
+        if record.state != ExecutionState::Started
+            || record.wrapper_identity.as_deref() != Some(wrapper_identity)
+            || record.preparation.packet_sha256 != connection.packet_sha256()
+        {
+            return Err(runtime_error("execution connection identity mismatch"));
+        }
+        Ok(record)
+    }
+
+    pub(super) async fn recover_runtime_observations(&self) -> Result<(), StoreError> {
+        for record in self.store.unresolved_executions().await? {
+            let token = &record.preparation.effect_token;
+            let audit_id = Uuid::now_v7().to_string();
+            self.store
+                .update_execution(
+                    token,
+                    record.revision,
+                    &format!("restart:{}", self.boot_generation),
+                    &ExecutionUpdate::Blocked {
+                        reason: "controller restarted; live wrapper ownership must be reconciled"
+                            .into(),
+                    },
+                    EffectAudit {
+                        id: &audit_id,
+                        actor_id: "conductor-runtime",
+                        correlation_id: token,
+                        now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+                    },
+                )
+                .await?;
+        }
+        // Also cover a crash after the record was blocked but before its task was
+        // blocked. Scan task ownership, not just freshly changed execution rows.
+        for row in self.store.tasks(None).await? {
+            let task: Task = serde_json::from_str(&row.aggregate_json)
+                .map_err(|_| runtime_error("invalid task aggregate"))?;
+            if matches!(
+                task.state,
+                TaskState::Ready | TaskState::Claimed | TaskState::Running | TaskState::Verifying
+            ) && self.store.has_unfenced_execution(&task.id.0).await?
+            {
+                self.block_effect_contradiction(
+                    &task.id.0,
+                    &format!("runtime-restart-fence:{}", task.version),
+                    "controller restart left an execution without confirmed write fencing",
+                )
+                .await
+                .map_err(|error| runtime_error(&error.message))?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn validate_runtime_owner(

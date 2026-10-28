@@ -59,11 +59,18 @@ revive a worker; heartbeat activity alone cannot extend that deadline. Expiry
 reconciliation blocks tasks with unfenced execution records instead of requeuing
 them, and new claims refuse those records even after an operator resumes a task.
 An ordinary process exit is not a write fence.
-Next: persist terminal observations and reconcile cancellation/restart with
-actual fencing evidence before exposing an operator launcher. OS scheduling is
-not a hard real-time guarantee; reassignment must still await confirmed fencing.
-Then complete isolated source capture and vendor adapters. Real agents have not
-been launched yet.
+Controlled stop now persists normal exit separately from an uncertain/group-only
+stop and returns bounded diagnostic output without completing the task. Restart
+marks unresolved runtime observations blocked and preserves their packet and
+checkpoint; repeated restart does not spawn a replacement. A blocked execution
+may later accept explicit verified fencing evidence, but cannot restart itself.
+The real-wrapper exit/cancel regression checks that surviving descendants never
+produce a successful stop observation across five controlled race timings.
+Next: establish and verify the actual workspace/write-isolation boundary, then
+reconcile fence evidence and expose the operator launcher. OS scheduling is not
+a hard real-time guarantee; reassignment still awaits confirmed fencing. Isolated
+source capture, vendor adapters and the operator workflow remain incomplete.
+Real agents have not been launched yet.
 The full product workflow remains the target; later phase and soak requirements
 are not waived by the same-day usability objective.
 

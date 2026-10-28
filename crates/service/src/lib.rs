@@ -113,6 +113,8 @@ impl<C: Clock> PersistentControlService<C> {
                     .map_err(|e| StoreError::Integrity(e.message))?;
             }
         }
+        #[cfg(unix)]
+        service.recover_runtime_observations().await?;
         Ok(service)
     }
 
@@ -2188,7 +2190,7 @@ mod effect_tests {
         let wrapper = directory.path().join("wrapper.sh");
         // A controlled protocol peer: actual process-group watchdog behavior is
         // independently exercised by conductor-runtime's real wrapper tests.
-        std::fs::write(&wrapper, format!("#!/bin/sh\nread -r launch\nprintf '%s\\n' '{ready}'\nread -r release\nread -r next\n")).expect("fixture");
+        std::fs::write(&wrapper, format!("#!/bin/sh\nread -r launch\nprintf '%s\\n' '{ready}'\nread -r release\nread -r next\nprintf '%s\\n' '{{\"type\":\"stopped\",\"reason\":\"controlled fixture\"}}'\n")).expect("fixture");
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
             .expect("executable");
         let (record, mut connection) = service
@@ -2217,8 +2219,20 @@ mod effect_tests {
                 .await
                 .is_err()
         );
-        connection.cancel().await.expect("close fixture");
-        connection.wait().await.expect("peer exited");
+        let (stopped, event) = service
+            .stop_controlled_execution(
+                &token,
+                record.wrapper_identity.as_deref().expect("identity"),
+                connection,
+            )
+            .await
+            .expect("record stop");
+        assert_eq!(stopped.state, ExecutionState::Blocked);
+        assert!(matches!(event, Some(RunnerEvent::Stopped { .. })));
+        assert_eq!(
+            store.execution(&token).await.expect("persisted"),
+            Some(stopped)
+        );
         clock.set(15);
         assert_eq!(service.reconcile_expired().await.expect("reconcile"), 0);
         let row = store.task("task").await.expect("task").expect("row");
@@ -2233,6 +2247,80 @@ mod effect_tests {
                 .has_unfenced_execution("task")
                 .await
                 .expect("fence status")
+        );
+    }
+    #[tokio::test]
+    async fn restart_blocks_unobserved_runtime_intent_without_spawning_or_losing_packet() {
+        use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionState};
+        let (directory, store) = lifecycle_store().await;
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .expect("service");
+        let (_, token) = claim_task(&service).await;
+        store
+            .claim_effect(
+                &token,
+                "runner",
+                10000,
+                EffectAudit {
+                    id: "claim-runtime",
+                    actor_id: "runtime",
+                    correlation_id: &token,
+                    now_ms: 100,
+                },
+            )
+            .await
+            .expect("effect claim");
+        let input = runtime_launch(directory.path());
+        let preparation = ExecutionPreparation {
+            effect_token: token.clone(),
+            task_id: "task".into(),
+            attempt_id: "attempt".into(),
+            lease_epoch: 1,
+            runner_id: "runner".into(),
+            packet_json: serde_json::to_string(&input.packet).expect("packet"),
+            packet_sha256: input.packet.sha256().expect("hash"),
+        };
+        store
+            .prepare_execution(
+                &preparation,
+                EffectAudit {
+                    id: "prepare-runtime",
+                    actor_id: "runtime",
+                    correlation_id: &token,
+                    now_ms: 100,
+                },
+            )
+            .await
+            .expect("intent");
+        drop(service);
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 101, FixedClock::new(0))
+                .await
+                .expect("restart");
+        let record = store
+            .execution(&token)
+            .await
+            .expect("read")
+            .expect("record");
+        assert_eq!(record.state, ExecutionState::Blocked);
+        assert_eq!(record.preparation, preparation);
+        let row = store.task("task").await.expect("task").expect("row");
+        let task: Task = serde_json::from_str(&row.aggregate_json).expect("aggregate");
+        assert_eq!(task.state, TaskState::Blocked);
+        assert!(store.has_unfenced_execution("task").await.expect("fence"));
+        drop(service);
+        PersistentControlService::start_with_clock(store.clone(), 102, FixedClock::new(0))
+            .await
+            .expect("second restart");
+        assert_eq!(
+            store
+                .execution(&token)
+                .await
+                .expect("read")
+                .expect("record"),
+            record
         );
     }
 }
