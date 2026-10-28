@@ -48,6 +48,10 @@ preserved from current state only after fingerprint checks. The restored runtime
 generation is raised to the maximum of the snapshot and current generations;
 normal daemon startup then advances it. Task/attempt epochs and lifecycle rows
 are not rewritten, and no live lease is revived.
+For migration 17 state, normal startup additionally reserves above the independent
+[authority high-water mark](RECOVERY_AUTHORITY.md). Restore and publication repair
+hold that authority's lock as well as the runtime lock. Its changing generation
+record is retained outside state, never rolled back with a snapshot.
 
 The existing runtime lock inode is linked into the staged directory and remains
 held during the directory switch. Current state is marked as an archive before

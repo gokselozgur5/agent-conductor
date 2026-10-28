@@ -22,11 +22,12 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
+nix = { version = "0.30", features = ["fs", "user"] }
 
 [dev-dependencies]
 sqlx.workspace = true
 tempfile = "3.23"
-uuid.workspace = true
 
 [lints]
 workspace = true

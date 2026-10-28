@@ -321,6 +321,20 @@ impl Store {
         &self.inner.readers
     }
 
+    /// Reads the current binding and generation for external boot reservation.
+    /// # Errors
+    /// Refuses a missing singleton or an invalid persisted generation.
+    pub async fn runtime_authority(&self) -> Result<(Option<String>, u64), StoreError> {
+        let (binding, generation): (Option<String>, i64) = sqlx::query_as(
+            "SELECT a.authority_id,r.boot_generation FROM recovery_authority a JOIN runtime_metadata r ON a.singleton=r.singleton WHERE a.singleton=1",
+        ).fetch_one(&self.inner.readers).await?;
+        Ok((
+            binding,
+            u64::try_from(generation)
+                .map_err(|_| StoreError::Integrity("negative boot generation".into()))?,
+        ))
+    }
+
     pub async fn create_project(&self, project: NewProject<'_>) -> Result<(), StoreError> {
         let mut connection = self.inner.writer.lock().await;
         let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
@@ -513,14 +527,61 @@ impl Store {
     /// Refuses startup when SQLite reports corruption, dangling foreign keys,
     /// the runtime singleton is missing, or the generation cannot advance.
     pub async fn start_runtime(&self, started_at_ms: i64) -> Result<RuntimeStartup, StoreError> {
+        self.start_runtime_generation(started_at_ms, None).await
+    }
+
+    /// Begins a boot using an already durable external generation reservation.
+    /// The caller must retain exclusive ownership of that external authority.
+    /// # Errors
+    /// Refuses stale reservations, changed authority bindings and invalid state.
+    pub async fn start_reserved_runtime(
+        &self,
+        started_at_ms: i64,
+        authority_id: &str,
+        reserved_generation: u64,
+    ) -> Result<RuntimeStartup, StoreError> {
+        if authority_id.len() != 64 || !authority_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(StoreError::Integrity(
+                "invalid recovery authority identity".into(),
+            ));
+        }
+        let generation =
+            i64::try_from(reserved_generation).map_err(|_| StoreError::BootGenerationOverflow)?;
+        if generation <= 0 {
+            return Err(StoreError::BootGenerationOverflow);
+        }
+        self.start_runtime_generation(started_at_ms, Some((authority_id, generation)))
+            .await
+    }
+
+    async fn start_runtime_generation(
+        &self,
+        started_at_ms: i64,
+        reservation: Option<(&str, i64)>,
+    ) -> Result<RuntimeStartup, StoreError> {
         let mut connection = self.inner.writer.lock().await;
         let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             verify_integrity(&mut writer).await?;
+            let binding: Option<String> = sqlx::query_scalar(
+                "SELECT authority_id FROM recovery_authority WHERE singleton=1",
+            ).fetch_one(&mut *writer).await?;
+            if let Some((identity, _)) = reservation {
+                if binding.as_deref().is_some_and(|bound| bound != identity) {
+                    return Err(StoreError::Integrity("recovery authority identity changed".into()));
+                }
+                sqlx::query("UPDATE recovery_authority SET authority_id=? WHERE singleton=1")
+                    .bind(identity).execute(&mut *writer).await?;
+            } else if binding.is_some() {
+                return Err(StoreError::Integrity("bound runtime requires an external generation reservation".into()));
+            }
+            let reserved = reservation.map(|(_, generation)| generation);
             let generation = sqlx::query_scalar::<_, i64>(
-                "UPDATE runtime_metadata SET boot_generation = boot_generation + 1, last_started_at_ms = ? WHERE singleton = 1 AND boot_generation < 9223372036854775807 RETURNING boot_generation",
+                "UPDATE runtime_metadata SET boot_generation = COALESCE(?, boot_generation + 1), last_started_at_ms = ? WHERE singleton = 1 AND boot_generation >= 0 AND boot_generation < COALESCE(?, 9223372036854775807) RETURNING boot_generation",
             )
+            .bind(reserved)
             .bind(started_at_ms)
+            .bind(reserved)
             .fetch_optional(&mut *writer)
             .await?
             .ok_or(StoreError::BootGenerationOverflow)?;

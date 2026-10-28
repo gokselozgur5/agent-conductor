@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 from contextlib import closing
 import subprocess
+import recovery_authority
 
 
 def identity(path):
@@ -18,6 +19,10 @@ def collect(state, fingerprint, logical_root=None):
     logical_root = logical_root or state
     config = json.loads((state / 'operator.json').read_text())
     dependencies = {}
+    authority_id = recovery_authority.binding(state)
+    if authority_id is not None:
+        descriptor = recovery_authority.inspect(logical_root, authority_id)
+        dependencies[('authority', descriptor['path'])] = descriptor
 
     def executable(path, expected=None):
         path = Path(path)
@@ -73,7 +78,10 @@ def verify(dependencies, fingerprint):
         raise ValueError('invalid external dependency inventory')
     for item in dependencies:
         path = Path(item['path'])
-        if item['kind'] == 'directory':
+        if item['kind'] == 'authority':
+            if recovery_authority.inspect(Path(item['state_root']), item['authority_id']) != item:
+                raise ValueError('external recovery authority changed')
+        elif item['kind'] == 'directory':
             if identity(path) != item['identity']:
                 raise ValueError('external directory identity changed')
         elif item['kind'] == 'file':

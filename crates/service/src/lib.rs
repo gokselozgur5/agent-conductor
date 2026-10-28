@@ -111,6 +111,26 @@ impl PersistentControlService<SystemClock> {
             .map_err(|error| StoreError::Integrity(format!("host clock unavailable: {error}")))?;
         Self::start_with_clock(store, started_at_ms, clock).await
     }
+
+    /// Starts using a durably reserved external authority generation.
+    /// # Errors
+    /// Refuses invalid reservations or failed durable recovery checks.
+    pub async fn start_reserved(
+        store: Store,
+        started_at_ms: i64,
+        authority_id: &str,
+        generation: u64,
+    ) -> Result<Self, StoreError> {
+        let clock = SystemClock::try_new()
+            .map_err(|error| StoreError::Integrity(format!("host clock unavailable: {error}")))?;
+        Self::start_with_reservation(
+            store,
+            started_at_ms,
+            clock,
+            Some((authority_id, generation)),
+        )
+        .await
+    }
 }
 
 impl<C: Clock> PersistentControlService<C> {
@@ -129,7 +149,23 @@ impl<C: Clock> PersistentControlService<C> {
         started_at_ms: i64,
         clock: C,
     ) -> Result<Self, StoreError> {
-        let startup = store.start_runtime(started_at_ms).await?;
+        Self::start_with_reservation(store, started_at_ms, clock, None).await
+    }
+
+    async fn start_with_reservation(
+        store: Store,
+        started_at_ms: i64,
+        clock: C,
+        reservation: Option<(&str, u64)>,
+    ) -> Result<Self, StoreError> {
+        let startup = match reservation {
+            Some((identity, generation)) => {
+                store
+                    .start_reserved_runtime(started_at_ms, identity, generation)
+                    .await?
+            }
+            None => store.start_runtime(started_at_ms).await?,
+        };
         store
             .recover_workflow_dispatch(startup.boot_generation, started_at_ms)
             .await?;

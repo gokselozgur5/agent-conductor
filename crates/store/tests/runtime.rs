@@ -66,8 +66,12 @@ async fn restart_fences_live_leases_into_a_bounded_recovery_window() {
         .execute(&mut seed).await.expect("lease seeds");
     drop(seed);
 
-    let startup = store.start_runtime(20_000).await.expect("restart begins");
-    assert_eq!(startup.boot_generation, 1);
+    let identity = "a".repeat(64);
+    let startup = store
+        .start_reserved_runtime(20_000, &identity, 21)
+        .await
+        .expect("reserved restart begins");
+    assert_eq!(startup.boot_generation, 21);
     assert_eq!(startup.recovery_pending.len(), 1);
     assert_eq!(startup.recovery_pending[0].task_id, "task-1");
     assert_eq!(startup.recovery_pending[0].attempt_id, "attempt-1");
@@ -81,15 +85,15 @@ async fn restart_fences_live_leases_into_a_bounded_recovery_window() {
     .await
     .expect("recovered lease reads");
     assert_eq!(lease.get::<String, _>("status"), "recovery_pending");
-    assert_eq!(lease.get::<i64, _>("boot_generation"), 1);
+    assert_eq!(lease.get::<i64, _>("boot_generation"), 21);
     assert_eq!(lease.get::<i64, _>("remaining_ms"), 3000);
     assert_eq!(lease.get::<i64, _>("display_expires_at_ms"), 23_000);
 
     let second = store
-        .start_runtime(30_000)
+        .start_reserved_runtime(30_000, &identity, 34)
         .await
         .expect("second restart refences pending recovery");
-    assert_eq!(second.boot_generation, 2);
+    assert_eq!(second.boot_generation, 34);
     assert_eq!(second.recovery_pending.len(), 1);
     assert_eq!(second.recovery_pending[0].recovery_window_ms, 3000);
     let lease = sqlx::query(
@@ -99,7 +103,7 @@ async fn restart_fences_live_leases_into_a_bounded_recovery_window() {
     .await
     .expect("twice-recovered lease reads");
     assert_eq!(lease.get::<String, _>("status"), "recovery_pending");
-    assert_eq!(lease.get::<i64, _>("boot_generation"), 2);
+    assert_eq!(lease.get::<i64, _>("boot_generation"), 34);
     assert_eq!(lease.get::<i64, _>("remaining_ms"), 3000);
     assert_eq!(lease.get::<i64, _>("display_expires_at_ms"), 33_000);
 }

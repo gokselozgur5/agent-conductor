@@ -44,6 +44,8 @@ class BackupTests(unittest.TestCase):
               CREATE TABLE executions(state TEXT,packet_json TEXT);
               CREATE TABLE leases(status TEXT);
               CREATE TABLE effect_intents(status TEXT);
+              CREATE TABLE recovery_authority(singleton INTEGER, authority_id TEXT);
+              INSERT INTO recovery_authority VALUES(1,NULL);
               CREATE TABLE runtime_metadata(boot_generation INTEGER);
               INSERT INTO runtime_metadata VALUES(5);
               CREATE TABLE workflow_dispatch(status TEXT,plan_json TEXT,task_id TEXT);
@@ -377,6 +379,36 @@ operator_restore.restore(state, source, retained)
                     if boundary == 'after_publish':
                         call('repair-restore', '--retained', str(retained), success=False)
                     stop(process); process = None
+                import recovery_authority
+                authority_root = recovery_authority.root_for(state)
+                authority_record = authority_root / 'authority.json'
+                high_water = json.loads(authority_record.read_text())['generation_high_water']
+                with sqlite3.connect(state / 'state.sqlite3') as db:
+                    db.execute('update runtime_metadata set boot_generation=1')
+                process = start()
+                self.assertGreater(json.loads(call('status'))['health']['boot_generation'], high_water)
+                stop(process); process = None
+                generation_before_refusal = operator_restore.generation(state / 'state.sqlite3')
+                saved_record = authority_root / 'record-retained.json'
+                authority_record.rename(saved_record)
+                call('run', success=False)
+                saved_record.rename(authority_record)
+                with (authority_root / 'ownership.lock').open('rb') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    call('run', success=False)
+                    call('backup', str(root / 'refused-backup'), success=False)
+                self.assertEqual(operator_restore.generation(state / 'state.sqlite3'), generation_before_refusal)
+                archived = subprocess.run([
+                    str(Path(os.environ['CONDUCTOR_TEST_BIN_DIR']) / 'conductor-daemon'),
+                    '--database', str(retained / 'state.sqlite3'),
+                    '--socket', str(retained / 'control.sock'), '--lock', str(retained / 'runtime.lock'),
+                ], capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(archived.returncode, 0)
+                self.assertIn('authority binding', archived.stderr)
+                (state / 'state.sqlite3').rename(state / 'database-retained')
+                call('run', success=False)
+                self.assertFalse((state / 'state.sqlite3').exists())
+                (state / 'database-retained').rename(state / 'state.sqlite3')
             finally:
                 if process is not None and process.poll() is None:
                     stop(process)

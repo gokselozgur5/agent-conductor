@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import stat
 import operator_backup as snapshot
+import recovery_authority
 from operator_restore import sync_directory, write_record
 
 MARKER = 'ARCHIVED_STATE.json'
@@ -59,7 +60,7 @@ def repair(state, retained):
         raise ValueError('repair refuses linked state paths')
     lock_path = (state if published else original) / 'runtime.lock'
     fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, 'rb') as lock:
+    with os.fdopen(fd, 'rb') as lock, recovery_authority.hold(original, logical_root=state):
         info = os.fstat(lock.fileno())
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or [info.st_dev, info.st_ino] != record['lock_identity']):
