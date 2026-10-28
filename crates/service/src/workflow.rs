@@ -563,6 +563,24 @@ fn invalid(message: &str) -> StoreError {
 }
 
 fn prepare_artifacts(plan: &NativeWorkflowPlan) -> Result<PathBuf, StoreError> {
+    let project = plan
+        .project
+        .canonicalize()
+        .map_err(|_| invalid("project path unavailable"))?;
+    let parent = plan
+        .artifacts
+        .parent()
+        .ok_or_else(|| invalid("artifact parent missing"))?
+        .canonicalize()
+        .map_err(|_| invalid("artifact parent unavailable"))?;
+    let target = parent.join(
+        plan.artifacts
+            .file_name()
+            .ok_or_else(|| invalid("artifact name missing"))?,
+    );
+    if target.starts_with(&project) || project.starts_with(&target) {
+        return Err(invalid("artifacts must not overlap the source project"));
+    }
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&plan.artifacts)
@@ -617,6 +635,17 @@ mod tests {
         let second = service.register_workflow_project(&plan).await.unwrap();
         assert_eq!(first, second);
     }
+    #[test]
+    fn overlapping_artifacts_are_refused_before_touching_source() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let plan = plan(project.clone(), project.join("artifacts"));
+        assert!(prepare_artifacts(&plan).is_err());
+        assert!(!plan.artifacts.exists());
+        assert_eq!(std::fs::read_dir(project).unwrap().count(), 0);
+    }
+
     #[test]
     fn review_decisions_are_strict_and_plan_runtime_is_bounded() {
         let mut plan = plan("/project".into(), "/artifacts".into());
