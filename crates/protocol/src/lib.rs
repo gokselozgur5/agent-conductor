@@ -86,6 +86,20 @@ pub enum Request {
         task_id: String,
         command: Command,
     },
+    SubscribeEvents {
+        subscription: EventSubscriptionInput,
+    },
+    PublishEvent {
+        event: SemanticEventInput,
+    },
+    ClaimEvent {
+        agent_id: String,
+    },
+    AcknowledgeEvent {
+        delivery_id: String,
+        consumer_agent_id: String,
+        effect: ConsumerStateInput,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,11 +150,96 @@ pub enum ResponseResult {
 pub enum Response {
     Health(HealthResponse),
     Invariants(InvariantResponse),
-    ProjectRegistered { id: String },
-    AgentRegistered { id: String },
+    ProjectRegistered {
+        id: String,
+    },
+    AgentRegistered {
+        id: String,
+    },
     Task(TaskResponse),
     Tasks(Vec<TaskResponse>),
     CommandApplied(CommandAppliedResponse),
+    EventSubscribed {
+        subscription_id: String,
+    },
+    EventPublished(EventPublishedResponse),
+    EventDelivery {
+        delivery: Option<Box<EventDeliveryResponse>>,
+    },
+    EventAcknowledged {
+        delivery_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventSubscriptionInput {
+    pub schema_version: u16,
+    pub id: String,
+    pub agent_id: String,
+    pub topic_filter: String,
+    pub project_id: Option<String>,
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub echo_source: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticEventInput {
+    pub schema_version: u16,
+    pub id: String,
+    pub idempotency_key: Option<String>,
+    pub source_agent_id: String,
+    pub source_session_id: String,
+    pub correlation_id: String,
+    pub causation_id: Option<String>,
+    pub generation: u32,
+    pub topic: String,
+    pub project_id: Option<String>,
+    pub task_id: Option<String>,
+    pub path_scope: Option<String>,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsumerStateInput {
+    pub namespace: String,
+    pub key: String,
+    pub expected_version: Option<u64>,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventPublishedResponse {
+    pub event_id: String,
+    pub fanout: usize,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventDeliveryResponse {
+    pub schema_version: u16,
+    pub delivery_id: String,
+    pub event: SemanticEventResponse,
+    pub attempts: u32,
+    pub lease_expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticEventResponse {
+    pub schema_version: u16,
+    pub id: String,
+    pub idempotency_key: String,
+    pub source_agent_id: String,
+    pub source_session_id: String,
+    pub correlation_id: String,
+    pub causation_id: Option<String>,
+    pub generation: u32,
+    pub topic: String,
+    pub project_id: Option<String>,
+    pub task_id: Option<String>,
+    pub path_scope: Option<String>,
+    pub payload: Value,
+    pub created_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -272,7 +272,10 @@ mod tests {
         LeaseStatus,
     };
     use agent_conductor_store::Store;
-    use conductor_protocol::{HealthStatus, Request, Response, ResponseResult};
+    use conductor_protocol::{
+        ConsumerStateInput, EventSubscriptionInput, HealthStatus, Request, Response,
+        ResponseResult, SemanticEventInput,
+    };
     use conductor_service::{InMemoryControlService, PersistentControlService};
     use tokio::sync::oneshot;
     use uuid::Uuid;
@@ -500,6 +503,184 @@ mod tests {
                 .expect("daemon exits cleanly");
             assert!(!path.exists());
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn semantic_events_survive_restart_and_ack_atomically() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("conductor.sqlite3");
+        let path = directory.path().join("conductor.sock");
+        let register = |id: &str| Request::RegisterAgent {
+            actor_id: "operator".into(),
+            idempotency_key: format!("register-{id}"),
+            id: id.into(),
+            adapter_kind: "test".into(),
+            protocol_fingerprint: "v1".into(),
+            capability_hash: "sha256:test".into(),
+            access_mode: "read_write".into(),
+        };
+
+        let store = Store::open(&database).await.expect("store opens");
+        let service = PersistentControlService::start(store, 100)
+            .await
+            .expect("runtime starts");
+        let server = LocalServer::bind(&path, service).expect("socket binds");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+        for request in [
+            register("source"),
+            register("consumer"),
+            register("intruder"),
+        ] {
+            let envelope = RequestEnvelope::new(request);
+            assert!(matches!(
+                exchange(&path, &serde_json::to_vec(&envelope).expect("serialize"))
+                    .await
+                    .result,
+                ResponseResult::Ok(Response::AgentRegistered { .. })
+            ));
+        }
+        for (id, agent_id) in [("source-sub", "source"), ("consumer-sub", "consumer")] {
+            let envelope = RequestEnvelope::new(Request::SubscribeEvents {
+                subscription: EventSubscriptionInput {
+                    schema_version: 1,
+                    id: id.into(),
+                    agent_id: agent_id.into(),
+                    topic_filter: "task.*".into(),
+                    project_id: None,
+                    path_prefix: Some("/workspace".into()),
+                    echo_source: false,
+                },
+            });
+            assert!(matches!(
+                exchange(&path, &serde_json::to_vec(&envelope).expect("serialize"))
+                    .await
+                    .result,
+                ResponseResult::Ok(Response::EventSubscribed { .. })
+            ));
+        }
+        let publish = Request::PublishEvent {
+            event: SemanticEventInput {
+                schema_version: 1,
+                id: "event-1".into(),
+                idempotency_key: None,
+                source_agent_id: "source".into(),
+                source_session_id: "session-1".into(),
+                correlation_id: "correlation-1".into(),
+                causation_id: None,
+                generation: 0,
+                topic: "task.changed".into(),
+                project_id: None,
+                task_id: None,
+                path_scope: Some("/workspace/src".into()),
+                payload: serde_json::json!({"state": "ready"}),
+            },
+        };
+        let envelope = RequestEnvelope::new(publish.clone());
+        let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Ok(Response::EventPublished(published)) = response.result else {
+            panic!("event was not published")
+        };
+        assert_eq!(published.fanout, 1, "source echo must be suppressed");
+        assert!(!published.duplicate);
+        let envelope = RequestEnvelope::new(publish);
+        let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Ok(Response::EventPublished(duplicate)) = response.result else {
+            panic!("duplicate publish failed")
+        };
+        assert!(duplicate.duplicate);
+        let envelope = RequestEnvelope::new(Request::ClaimEvent {
+            agent_id: "source".into(),
+        });
+        let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        assert!(matches!(
+            response.result,
+            ResponseResult::Ok(Response::EventDelivery { delivery: None })
+        ));
+
+        shutdown_tx.send(()).expect("shutdown sends");
+        task.await.expect("daemon joins").expect("daemon stops");
+
+        let store = Store::open(&database).await.expect("store reopens");
+        let service = PersistentControlService::start(store.clone(), 200)
+            .await
+            .expect("runtime restarts");
+        let server = LocalServer::bind(&path, service).expect("socket binds");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+        let envelope = RequestEnvelope::new(Request::ClaimEvent {
+            agent_id: "consumer".into(),
+        });
+        let response = exchange(&path, &serde_json::to_vec(&envelope).expect("serialize")).await;
+        let ResponseResult::Ok(Response::EventDelivery {
+            delivery: Some(delivery),
+        }) = response.result
+        else {
+            panic!("pending delivery did not survive restart")
+        };
+        let effect = ConsumerStateInput {
+            namespace: "progress".into(),
+            key: "consumer".into(),
+            expected_version: None,
+            value: serde_json::json!({"last_event": "event-1"}),
+        };
+        let invalid = RequestEnvelope::new(Request::AcknowledgeEvent {
+            delivery_id: delivery.delivery_id.clone(),
+            consumer_agent_id: "intruder".into(),
+            effect: effect.clone(),
+        });
+        let response = exchange(&path, &serde_json::to_vec(&invalid).expect("serialize")).await;
+        let ResponseResult::Error(error) = response.result else {
+            panic!("invalid consumer ack succeeded")
+        };
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert!(
+            store
+                .consumer_state("progress", "consumer")
+                .await
+                .expect("state reads")
+                .is_none()
+        );
+
+        let ack = RequestEnvelope::new(Request::AcknowledgeEvent {
+            delivery_id: delivery.delivery_id.clone(),
+            consumer_agent_id: "consumer".into(),
+            effect: effect.clone(),
+        });
+        assert!(matches!(
+            exchange(&path, &serde_json::to_vec(&ack).expect("serialize"))
+                .await
+                .result,
+            ResponseResult::Ok(Response::EventAcknowledged { .. })
+        ));
+        assert_eq!(
+            store
+                .consumer_state("progress", "consumer")
+                .await
+                .expect("state reads"),
+            Some((0, effect.value.to_string()))
+        );
+        let stale = RequestEnvelope::new(Request::AcknowledgeEvent {
+            delivery_id: delivery.delivery_id,
+            consumer_agent_id: "consumer".into(),
+            effect: ConsumerStateInput {
+                expected_version: Some(0),
+                ..effect
+            },
+        });
+        let response = exchange(&path, &serde_json::to_vec(&stale).expect("serialize")).await;
+        let ResponseResult::Error(error) = response.result else {
+            panic!("stale ack succeeded")
+        };
+        assert_eq!(error.code, ErrorCode::Conflict);
+
+        shutdown_tx.send(()).expect("shutdown sends");
+        task.await.expect("daemon joins").expect("daemon stops");
     }
 
     #[tokio::test]

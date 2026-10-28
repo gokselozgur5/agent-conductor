@@ -10,12 +10,15 @@ use agent_conductor_domain::{
 };
 use agent_conductor_store::{
     AgentRegistration, AttemptLeaseMutation, AuditAppend, CommitBatch, CommitResult,
-    EffectIntentAppend, PersistedTask, ProjectRegistration, RuntimeInvariantViolation, Store,
-    StoreError, TaskMutation, TaskRegistration, TaskTransitionAppend,
+    ConsumerStateEffect, EffectIntentAppend, EventDelivery, EventLimits, EventSourceIdentity,
+    EventStoreError, EventSubscription, PersistedTask, ProjectRegistration, PublishResult,
+    RuntimeInvariantViolation, SemanticEvent, Store, StoreError, TaskMutation, TaskRegistration,
+    TaskTransitionAppend,
 };
 use conductor_protocol::{
-    CommandAppliedResponse, ErrorBody, ErrorCode, HealthResponse, HealthStatus, InvariantResponse,
-    InvariantViolation, Request, Response, TaskResponse,
+    CommandAppliedResponse, ErrorBody, ErrorCode, EventDeliveryResponse, EventPublishedResponse,
+    HealthResponse, HealthStatus, InvariantResponse, InvariantViolation, Request, Response,
+    SemanticEventResponse, TaskResponse,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -461,6 +464,125 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     self.apply_row(row, command).await?,
                 ))
             }
+            Request::SubscribeEvents { subscription } => {
+                validate_text(&[
+                    &subscription.id,
+                    &subscription.agent_id,
+                    &subscription.topic_filter,
+                ])?;
+                let id = subscription.id.clone();
+                let now = self.clock.read(self.boot_generation).wall_unix_ms;
+                self.store
+                    .upsert_event_subscription(&EventSubscription {
+                        schema_version: subscription.schema_version,
+                        id: subscription.id,
+                        agent_id: subscription.agent_id,
+                        topic_filter: subscription.topic_filter,
+                        project_id: subscription.project_id,
+                        path_prefix: subscription.path_prefix,
+                        echo_source: subscription.echo_source,
+                        created_at_ms: now,
+                    })
+                    .await
+                    .map_err(event_store_error)?;
+                Ok(Response::EventSubscribed {
+                    subscription_id: id,
+                })
+            }
+            Request::PublishEvent { event } => {
+                validate_text(&[
+                    &event.id,
+                    &event.source_agent_id,
+                    &event.source_session_id,
+                    &event.correlation_id,
+                    &event.topic,
+                ])?;
+                let payload_json = serde_json::to_string(&event.payload).map_err(json_error)?;
+                let idempotency_key = event.idempotency_key.unwrap_or_else(|| {
+                    EventSourceIdentity {
+                        source_agent_id: &event.source_agent_id,
+                        source_session_id: &event.source_session_id,
+                        normalized_payload: &payload_json,
+                    }
+                    .idempotency_key()
+                });
+                let result = self
+                    .store
+                    .publish_event(
+                        &SemanticEvent {
+                            schema_version: event.schema_version,
+                            id: event.id,
+                            idempotency_key,
+                            source_agent_id: event.source_agent_id,
+                            source_session_id: event.source_session_id,
+                            correlation_id: event.correlation_id,
+                            causation_id: event.causation_id,
+                            generation: event.generation,
+                            topic: event.topic,
+                            project_id: event.project_id,
+                            task_id: event.task_id,
+                            path_scope: event.path_scope,
+                            payload_json,
+                            created_at_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+                        },
+                        &EventLimits::default(),
+                    )
+                    .await
+                    .map_err(event_store_error)?;
+                let response = match result {
+                    PublishResult::Published { event_id, fanout } => EventPublishedResponse {
+                        event_id,
+                        fanout,
+                        duplicate: false,
+                    },
+                    PublishResult::Duplicate { event_id } => EventPublishedResponse {
+                        event_id,
+                        fanout: 0,
+                        duplicate: true,
+                    },
+                };
+                Ok(Response::EventPublished(response))
+            }
+            Request::ClaimEvent { agent_id } => {
+                validate_text(&[&agent_id])?;
+                let now = self.clock.read(self.boot_generation).wall_unix_ms;
+                let delivery = self
+                    .store
+                    .claim_event_delivery(&agent_id, now, &EventLimits::default())
+                    .await
+                    .map_err(event_store_error)?
+                    .map(event_delivery_response)
+                    .transpose()?
+                    .map(Box::new);
+                Ok(Response::EventDelivery { delivery })
+            }
+            Request::AcknowledgeEvent {
+                delivery_id,
+                consumer_agent_id,
+                effect,
+            } => {
+                validate_text(&[
+                    &delivery_id,
+                    &consumer_agent_id,
+                    &effect.namespace,
+                    &effect.key,
+                ])?;
+                self.store
+                    .acknowledge_event_with_state(
+                        &delivery_id,
+                        &consumer_agent_id,
+                        &ConsumerStateEffect {
+                            namespace: effect.namespace,
+                            key: effect.key,
+                            expected_version: effect.expected_version,
+                            value_json: serde_json::to_string(&effect.value).map_err(json_error)?,
+                        },
+                        self.clock.read(self.boot_generation).wall_unix_ms,
+                    )
+                    .await
+                    .map_err(event_store_error)?;
+                Ok(Response::EventAcknowledged { delivery_id })
+            }
         }
     }
 }
@@ -632,6 +754,50 @@ fn store_error(e: StoreError) -> ErrorBody {
         _ => ErrorCode::Internal,
     };
     ErrorBody::new(code, format!("persistent state error: {e}"))
+}
+#[allow(clippy::needless_pass_by_value)]
+fn event_store_error(error: EventStoreError) -> ErrorBody {
+    let code = match error {
+        EventStoreError::IdempotencyCollision
+        | EventStoreError::DeliveryNotLeased
+        | EventStoreError::ConsumerStateConflict => ErrorCode::Conflict,
+        EventStoreError::UnsupportedSchema(_)
+        | EventStoreError::InvalidPayload
+        | EventStoreError::PayloadTooLarge
+        | EventStoreError::GenerationLimit
+        | EventStoreError::InvalidCausalGeneration
+        | EventStoreError::AgeLimit
+        | EventStoreError::FanoutLimit
+        | EventStoreError::RetryLimit
+        | EventStoreError::NumericRange => ErrorCode::Validation,
+        EventStoreError::Database(_) => ErrorCode::Internal,
+    };
+    ErrorBody::new(code, format!("event state error: {error}"))
+}
+
+fn event_delivery_response(delivery: EventDelivery) -> Result<EventDeliveryResponse, ErrorBody> {
+    Ok(EventDeliveryResponse {
+        schema_version: delivery.schema_version,
+        delivery_id: delivery.delivery_id,
+        attempts: delivery.attempts,
+        lease_expires_at_ms: delivery.lease_expires_at_ms,
+        event: SemanticEventResponse {
+            schema_version: delivery.event.schema_version,
+            id: delivery.event.id,
+            idempotency_key: delivery.event.idempotency_key,
+            source_agent_id: delivery.event.source_agent_id,
+            source_session_id: delivery.event.source_session_id,
+            correlation_id: delivery.event.correlation_id,
+            causation_id: delivery.event.causation_id,
+            generation: delivery.event.generation,
+            topic: delivery.event.topic,
+            project_id: delivery.event.project_id,
+            task_id: delivery.event.task_id,
+            path_scope: delivery.event.path_scope,
+            payload: serde_json::from_str(&delivery.event.payload_json).map_err(json_error)?,
+            created_at_ms: delivery.event.created_at_ms,
+        },
+    })
 }
 #[allow(clippy::needless_pass_by_value)]
 fn json_error(e: serde_json::Error) -> ErrorBody {

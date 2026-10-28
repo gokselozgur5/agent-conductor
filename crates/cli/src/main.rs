@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use conductor_cli::{exit_code, send};
-use conductor_protocol::{Request, RequestEnvelope, Response, ResponseResult};
+use conductor_protocol::{
+    ConsumerStateInput, EventSubscriptionInput, Request, RequestEnvelope, Response, ResponseResult,
+    SemanticEventInput,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "conductorctl", version, about = "Agent Conductor local client")]
@@ -61,12 +64,50 @@ enum Command {
         task_id: String,
         command_json: String,
     },
+    SubscribeEvents {
+        subscription_json: String,
+    },
+    PublishEvent {
+        event_json: String,
+    },
+    ClaimEvent {
+        agent_id: String,
+    },
+    AckEvent {
+        delivery_id: String,
+        consumer_agent_id: String,
+        effect_json: String,
+    },
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let payload = match cli.command {
+    let request = RequestEnvelope::new(command_request(cli.command));
+
+    let response = match send(&cli.socket, &request).await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(4);
+        }
+    };
+
+    if cli.json {
+        match serde_json::to_string_pretty(&response) {
+            Ok(json) => println!("{json}"),
+            Err(error) => {
+                eprintln!("failed to encode response: {error}");
+                std::process::exit(5);
+            }
+        }
+    } else {
+        print_human(response.result);
+    }
+}
+
+fn command_request(command: Command) -> Request {
+    match command {
         Command::Health => Request::Health,
         Command::CheckInvariants => Request::CheckInvariants,
         Command::RegisterProject {
@@ -129,27 +170,25 @@ async fn main() {
             task_id,
             command: parse_json(&command_json, "command"),
         },
-    };
-    let request = RequestEnvelope::new(payload);
-
-    let response = match send(&cli.socket, &request).await {
-        Ok(response) => response,
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(4);
-        }
-    };
-
-    if cli.json {
-        match serde_json::to_string_pretty(&response) {
-            Ok(json) => println!("{json}"),
-            Err(error) => {
-                eprintln!("failed to encode response: {error}");
-                std::process::exit(5);
-            }
-        }
-    } else {
-        print_human(response.result);
+        Command::SubscribeEvents { subscription_json } => Request::SubscribeEvents {
+            subscription: parse_json::<EventSubscriptionInput>(
+                &subscription_json,
+                "event subscription",
+            ),
+        },
+        Command::PublishEvent { event_json } => Request::PublishEvent {
+            event: parse_json::<SemanticEventInput>(&event_json, "semantic event"),
+        },
+        Command::ClaimEvent { agent_id } => Request::ClaimEvent { agent_id },
+        Command::AckEvent {
+            delivery_id,
+            consumer_agent_id,
+            effect_json,
+        } => Request::AcknowledgeEvent {
+            delivery_id,
+            consumer_agent_id,
+            effect: parse_json::<ConsumerStateInput>(&effect_json, "consumer state effect"),
+        },
     }
 }
 
