@@ -191,4 +191,12 @@ access. Active tasks are blocked on changed pins; pause/cancel and retained file
 are preserved, with block persistence across restart. Continuation revalidates
 original pins. All 174 workspace tests pass, including JSON prompt-expansion
 refusal and durable invalidation. This does not complete automatic discovery,
-attribution or wake; native integration acceptance is still being exercised.
+attribution or wake. The synthetic native instruction workflow completed in
+301.89 seconds: queued submission survived restart, duplicate submission was
+idempotent, Claude produced the required file, checks passed and independent
+Codex review accepted. Original project and instruction content stayed unchanged;
+no policy copy appeared in work/source outputs. The persisted writer packet
+contains only workspace plus exact approved-file read roots. Reviewer pin
+construction was source-inspected; its packet is not separately persisted.
+Evidence: private `instruction-workflow-v1/receipt.json` and `packet-audit.json`.
+Exact integration commit CI 40693075343 passed on both supported CI hosts.
