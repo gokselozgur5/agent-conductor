@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+import recovery_dependencies
 
 MAX_FILES = 100000
 MAX_BYTES = 10 * 1024 ** 3
@@ -87,6 +88,10 @@ def database(path, state):
             raise ValueError('unsupported or incomplete database migration')
         if db.execute("select count(*) from executions where state != 'fenced'").fetchone()[0]:
             raise ValueError('execution without a verified write fence; reconcile before backup')
+        if db.execute("select count(*) from leases where status in ('active','recovery_pending')").fetchone()[0]:
+            raise ValueError('live or recovering lease; reconcile before backup')
+        if db.execute("select count(*) from effect_intents where status not in ('done','abandoned')").fetchone()[0]:
+            raise ValueError('unresolved effect intent; reconcile before backup')
         if db.execute("select count(*) from tasks where state in ('claimed','running','verifying')").fetchone()[0]:
             raise ValueError('active task; pause and reconcile before backup')
         if db.execute("select count(*) from workflow_dispatch where status = 'running'").fetchone()[0]:
@@ -126,8 +131,20 @@ def copy_inventory(source, target, entries):
             (target / name).chmod(record['mode'])
 
 
+def flush_directories(root):
+    directories = [Path(path) for path, _, _ in os.walk(root, followlinks=False, onerror=scan_error)]
+    for directory in reversed(directories):
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
 def backup(state, destination):
     private_root(state)
+    if (state / 'ARCHIVED_STATE.json').exists():
+        raise ValueError('retained archive is not a live operator state')
     destination = destination.expanduser().absolute()
     parent = destination.parent.resolve(strict=True)
     if destination.parent != parent or destination.is_relative_to(state):
@@ -150,6 +167,7 @@ def backup(state, destination):
             database_bytes = db.execute('pragma page_count').fetchone()[0] * db.execute('pragma page_size').fetchone()[0]
         if database_bytes + sum(item.get('size', 0) for item in entries.values()) > MAX_BYTES:
             raise ValueError('combined state exceeds backup bound')
+        dependencies = recovery_dependencies.collect(state, digest)
         destination.mkdir(mode=0o700)
         payload = destination / 'state'
         payload.mkdir(mode=0o700)
@@ -174,9 +192,12 @@ def backup(state, destination):
             raise ValueError('source changed during backup')
         if inventory(payload, {'state.sqlite3'}) != entries:
             raise ValueError('copied evidence differs from source')
-        manifest = {'version': 1, 'state_root': str(state), 'migrations': migrations,
+        if recovery_dependencies.collect(state, digest) != dependencies:
+            raise ValueError('external prerequisites changed during backup')
+        manifest = {'version': 2, 'dependencies': dependencies, 'state_root': str(state), 'migrations': migrations,
                     'entries': inventory(payload), 'exclusions': sorted(SKIP),
-                    'limits': 'Cold same-host state snapshot only. External projects, adapter binaries and instruction files are not included. No restore command or relocation guarantee.'}
+                    'limits': 'Cold same-host snapshot. External dependencies are recorded, not included. Restore requires existing stopped, quiescent original state; no relocation or missing-state recovery.'}
+        flush_directories(payload)
         # Publication marker is written last. Partial directories remain inspectable.
         marker = os.open(destination / 'manifest.pending', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(marker, 'w') as stream:
@@ -194,7 +215,7 @@ def backup(state, destination):
         return {'backup': str(destination), 'entries': len(manifest['entries']), 'schema': 16, 'limits': manifest['limits']}
 
 
-def verify(destination):
+def verify(destination, external=False):
     destination = destination.expanduser().absolute()
     private_root(destination)
     path = destination / 'manifest.json'
@@ -208,7 +229,7 @@ def verify(destination):
             raise ValueError('manifest exceeds its bound')
     manifest = json.loads(data)
     state = Path(manifest['state_root'])
-    if manifest['version'] != 1 or not state.is_absolute() or '..' in state.parts:
+    if manifest['version'] not in (1, 2) or not state.is_absolute() or '..' in state.parts:
         raise ValueError('unsupported manifest or original root')
     payload = destination / 'state'
     private_root(payload)
@@ -216,5 +237,11 @@ def verify(destination):
         raise ValueError('backup evidence hash, mode or inventory mismatch')
     if database(payload / 'state.sqlite3', state) != manifest['migrations']:
         raise ValueError('backup migration mismatch')
-    return {'backup': str(destination), 'state_root': str(state), 'verified': True,
+    if external:
+        if manifest['version'] != 2:
+            raise ValueError('legacy snapshot has no external prerequisite inventory')
+        recovery_dependencies.verify(manifest['dependencies'], digest)
+        if recovery_dependencies.collect(payload, digest, logical_root=state) != manifest['dependencies']:
+            raise ValueError('external prerequisite manifest is incomplete or inconsistent')
+    return {'external_verified': external, 'backup': str(destination), 'state_root': str(state), 'verified': True,
             'entries': len(manifest['entries']), 'limits': manifest['limits']}

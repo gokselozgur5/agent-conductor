@@ -40,7 +40,12 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace --all-features
 
+      - name: Build operator integration binaries
+        run: cargo build --workspace
+
       - name: Check operator backup refusals
+        env:
+          CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
         run: python3 -m unittest discover -s tests -p test_operator_backup.py -v
 
       - name: Reject committed credential material
