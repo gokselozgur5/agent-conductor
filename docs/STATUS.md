@@ -77,8 +77,14 @@ this is a baseline work copy, not the final immutable verification source.
 Published runtime baseline `fe0aa69` passed both macOS and Linux CI in run
 [40663638336](https://github.com/gokselozgur5/agent-conductor/actions/runs/40663638336).
 Snapshot changes require their own exact-SHA CI after publication.
-Next: verify the actual workspace/write-isolation boundary, then reconcile fence
-evidence and expose the operator launcher. OS scheduling is not
+A macOS deny-by-default command boundary now passes positive workspace-write
+and negative external read/write, symlink, inherited-child and live TCP/Unix
+socket probes. See [SANDBOX.md](SANDBOX.md) for the initial loader failure,
+narrow correction, platform limits and exact remaining gates. Linux command
+isolation and inference-only transport are refused rather than bypassed.
+Next: pin actual vendor binaries, establish confined inference transport and run
+vendor denied-action conformance; then reconcile fence evidence and expose the
+operator launcher. OS scheduling is not
 a hard real-time guarantee; reassignment still awaits confirmed fencing. Isolated
 source capture, vendor adapters and the operator workflow remain incomplete.
 Real agents have not been launched yet.
