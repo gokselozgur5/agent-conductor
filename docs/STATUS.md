@@ -37,14 +37,14 @@ not discovered or executed by a production adapter.
 The Python spike remains separate behavior evidence. It is not the production
 runtime and there is no migration of real user task state to perform.
 
-## Next phase
+## Active work
 
-The next work is to design the Phase 2 adapter contract
-and fake-agent harness before integrating local authenticated Codex/Claude CLIs.
-Resume-packet acknowledgement, instruction trust, dirty-state snapshots, worktree
-ownership, real check execution and capability enforcement must be proven before
-write-capable agents launch. No Phase 2 implementation is authorized by Phase 1
-closeout alone.
+The operator authorized continuing to a usable complete Conductor on 2026-10-28.
+Phase 2 requirements/design are recorded in [PHASE2_DESIGN.md](PHASE2_DESIGN.md).
+Current slice: validated runtime contracts and resume acknowledgement, followed
+by the fake-process recovery harness. Real agents have not been launched yet.
+The full product workflow remains the target; later phase and soak requirements
+are not waived by the same-day usability objective.
 
 ## Deferred
 

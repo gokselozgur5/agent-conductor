@@ -25,7 +25,7 @@ Status: complete, retained as behavioral evidence rather than production archite
 ## Phase 1 — Production control core
 
 Status: accepted for the documented core scope. Independent review passed;
-`bebddb9` passed macOS/Linux CI run `40646746932`. Phase 2 has not started.
+`bebddb9` passed macOS/Linux CI run `40646746932`. Phase 2 is now active.
 Evidence and explicit scope limits: [Phase 1 acceptance](PHASE1_ACCEPTANCE.md).
 
 - Rust workspace and versioned migrations
@@ -38,6 +38,8 @@ Evidence and explicit scope limits: [Phase 1 acceptance](PHASE1_ACCEPTANCE.md).
 Exit gate: domain invariants and required failure tests for core transitions pass on macOS and Linux.
 
 ## Phase 2 — Adapter runtime
+
+Status: active. Requirements/design: [PHASE2_DESIGN.md](PHASE2_DESIGN.md).
 
 - Versioned adapter protocol
 - Fake-agent harness
