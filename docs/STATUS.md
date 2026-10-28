@@ -72,8 +72,11 @@ for subscription updates and the in-flight acknowledgement boundary.
 The board and CLI now expose bounded project, agent, event, subscription and
 delivery metadata pages. See [OPERATOR_INVENTORY.md](OPERATOR_INVENTORY.md) for
 snapshot semantics, omitted payloads/tokens and pagination boundaries.
+Fresh task reads now include daemon-clock lease observations; the board shows
+worker expiry separately from owner margin and displays check/verdict provenance.
+See [LEASE_OBSERVATION.md](LEASE_OBSERVATION.md) for snapshot/authority limits.
 The working local workflow is not full v1 acceptance. Remaining work includes
-task/process lease, evidence and reported usage visibility, abnormal ownership recovery,
+deeper execution evidence and reported usage visibility, abnormal ownership recovery,
 host protocol/Thor/Linux isolation,
 load/restore/redaction validation and seven-day soak. Issue #20 retains an
 unresolved historical supervision deadline; do not infer a cause from green tests.

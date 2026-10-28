@@ -444,6 +444,7 @@ mod tests {
             if matches!(request, Request::ListTasks { .. }) {
                 return Ok(Response::Tasks {
                     tasks: vec![TaskResponse {
+                        lease_observation: None,
                         project_id: "project".into(),
                         objective: "listed".into(),
                         priority: 0,
@@ -456,6 +457,7 @@ mod tests {
                 });
             }
             Ok(Response::Task(TaskResponse {
+                lease_observation: None,
                 project_id: "project".into(),
                 objective: "x".repeat(900_000),
                 priority: 0,

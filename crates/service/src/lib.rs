@@ -37,6 +37,7 @@ mod clock;
 #[cfg(unix)]
 mod instruction_policy;
 mod inventory;
+mod lease_observation;
 #[cfg(unix)]
 mod repository_watch;
 #[cfg(unix)]
@@ -176,13 +177,17 @@ impl<C: Clock> PersistentControlService<C> {
         Ok(service)
     }
 
-    fn task_response(row: PersistedTask) -> Result<TaskResponse, ErrorBody> {
+    fn task_response(&self, row: PersistedTask) -> Result<TaskResponse, ErrorBody> {
+        let task: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
+        let lease_observation =
+            lease_observation::observe(&task, self.clock.read(self.boot_generation));
         Ok(TaskResponse {
+            lease_observation,
             project_id: row.project_id,
             objective: row.objective,
             priority: row.priority,
             authority: serde_json::from_str(&row.authority_json).map_err(json_error)?,
-            aggregate: Box::new(serde_json::from_str(&row.aggregate_json).map_err(json_error)?),
+            aggregate: Box::new(task),
         })
     }
 
@@ -532,6 +537,7 @@ impl<C: Clock> PersistentControlService<C> {
         let effects = effect_appends(&applied.task, &command, &applied.effects, clock)?;
         let response = CommandAppliedResponse {
             task: TaskResponse {
+                lease_observation: None,
                 project_id: row.project_id,
                 objective: row.objective,
                 priority: row.priority,
@@ -740,7 +746,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     authority_json: authority.to_string(),
                     aggregate_json: serde_json::to_string(&aggregate).map_err(json_error)?,
                 };
-                let out = Response::Task(Self::task_response(row)?);
+                let out = Response::Task(self.task_response(row)?);
                 self.persist_creation(
                     actor_id,
                     idempotency_key,
@@ -768,7 +774,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     .await
                     .map_err(store_error)?
                     .ok_or_else(not_found)?;
-                Ok(Response::Task(Self::task_response(row)?))
+                Ok(Response::Task(self.task_response(row)?))
             }
             Request::Inventory { resource, after } => self.inventory(resource, after).await,
             Request::ListTaskPage { project_id, after } => {
@@ -792,7 +798,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                 };
                 let tasks = rows
                     .into_iter()
-                    .map(Self::task_response)
+                    .map(|row| self.task_response(row))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Response::TaskPage { tasks, next_after })
             }
@@ -847,7 +853,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     .map_err(store_error)?;
                 let mut out = Vec::with_capacity(rows.len());
                 for row in rows {
-                    out.push(Self::task_response(row)?);
+                    out.push(self.task_response(row)?);
                 }
                 Ok(Response::Tasks { tasks: out })
             }
