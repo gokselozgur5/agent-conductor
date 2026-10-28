@@ -2,8 +2,13 @@ import importlib.util
 from pathlib import Path
 import sqlite3
 import unittest
+import sys
+import subprocess
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools'))
+import process_birth
 spec = importlib.util.spec_from_file_location('runner_inventory', ROOT / 'tools/inspect_runner_processes.py')
 inventory = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(inventory)
@@ -44,6 +49,51 @@ class ProcessInventory(unittest.TestCase):
         db.execute('insert into executions select * from executions')
         self.assertEqual(query()[0]['classification'], 'ambiguous_records')
         db.close()
+
+
+class BirthObservation(unittest.TestCase):
+    def test_linux_parser_handles_parentheses_and_refuses_bad_fields(self):
+        tail = [b'S'] + [b'0'] * 18 + [b'12345']
+        raw = b'42 (worker ) name) ' + b' '.join(tail)
+        self.assertEqual(process_birth.linux_start(raw, 42), 'linux-start-ticks:12345')
+        for bad in [b'', raw.replace(b'42 (', b'41 ('), raw.replace(b'12345', b'-1'),
+                    raw.replace(b'12345', b'18446744073709551616'), b'42 (x) S']:
+            self.assertIsNone(process_birth.linux_start(bad, 42))
+
+    def test_native_child_start_is_stable_then_unavailable_after_reap(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import sys;sys.stdin.read()'], stdin=subprocess.PIPE)
+        try:
+            start = process_birth.observe(child.pid)
+            self.assertIsNotNone(start)
+            self.assertEqual(process_birth.observe(child.pid), start)
+        finally:
+            child.stdin.close()
+            child.wait(timeout=5)
+        self.assertIsNone(process_birth.observe(child.pid))
+        for bad in [0, -1, True, 2**32]:
+            self.assertIsNone(process_birth.observe(bad))
+
+    def test_birth_change_during_argv_read_is_discarded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'db'
+            with sqlite3.connect(path) as db:
+                db.execute('create table recovery_authority(singleton,authority_id)')
+                db.execute('create table runtime_metadata(singleton,boot_generation)')
+                db.execute('insert into recovery_authority values(1,?)', (SCOPE,))
+                db.execute('insert into runtime_metadata values(1,1)')
+                db.execute('create table executions(task_id,attempt_id,lease_epoch,state,wrapper_identity,packet_sha256)')
+            for starts, expected, changed in [(['old', 'new'], 0, 1),
+                                              (['old', 'old', 'new'], 0, 1),
+                                              (['old', 'old', 'old'], 1, 0),
+                                              ([None], 0, 0)]:
+                with mock.patch.object(inventory, 'ps', side_effect=[(0, '42 conductor-runner'), (0, TAG)]), mock.patch.object(inventory, 'process_birth', side_effect=starts):
+                    result = inventory.inspect(path)
+                self.assertEqual(len(result['observations']), expected)
+                self.assertEqual(result['changed_process_observations'], changed)
+                self.assertFalse(result['fencing_proven'])
+                if expected:
+                    self.assertEqual(result['observations'][0]['process_start_observation'], 'old')
 
 
 if __name__ == '__main__':

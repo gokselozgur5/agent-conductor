@@ -50,6 +50,24 @@ inspect ownership before diagnosing a contradiction. The tool never signals a
 listed PID, alters a task or repairs a record. It explicitly reports neither
 liveness nor fencing as proven.
 
+Version 2 additionally samples a kernel start marker before and after reading each
+candidate's arguments, and once more after the database correlation. Linux uses
+field 22 of `/proc/<pid>/stat`, parsing the parenthesized name separately; macOS
+uses `proc_pidinfo(PROC_PIDTBSDINFO)` start seconds/microseconds with exact ABI
+size and returned-PID checks. Missing or inconsistent markers discard the
+observation. Changed observations have a separate host-level count; unavailable
+markers count as unavailable observations. Only scoped matches expose the marker.
+
+`process_start_observation` is an opaque, boot-local diagnostic string and
+`start_observation_unchanged` means equality at those three reads. This narrows
+observed PID-reuse races but does not pin a process: clock resolution, a later
+exit/reuse, executable changes within the same process, forged tags and a host
+restart still prevent treating it as a durable ownership handle. No persisted
+execution record is bound to this marker and no recovery gate changes. Old
+consumers must recognize the new report version. Tests include a real native
+child before/after reap, names containing parentheses on Linux, malformed start
+fields, and controlled changes around argument and database reads.
+
 A complete native orphan checker still needs trusted process-birth identity,
 coverage of escaped/reparented workers, snapshot/race handling and conservative
 reconciliation. These observations do not replace those gates or full native
