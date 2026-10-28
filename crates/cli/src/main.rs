@@ -70,6 +70,13 @@ enum Command {
     GetTask {
         task_id: String,
     },
+    /// Read at most 100 tasks in task-ID order; use `next_after` to advance.
+    ListTaskPage {
+        #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        after: Option<String>,
+    },
     TaskHistory {
         task_id: String,
         #[arg(long)]
@@ -226,6 +233,7 @@ fn command_request(command: Command) -> Request {
             required_checks: parse_json(&required_checks_json, "required checks"),
         },
         Command::GetTask { task_id } => Request::GetTask { task_id },
+        Command::ListTaskPage { project_id, after } => Request::ListTaskPage { project_id, after },
         Command::TaskHistory { task_id, before } => Request::TaskHistory { task_id, before },
         Command::ListTasks { project_id } => Request::ListTasks { project_id },
         Command::Apply {

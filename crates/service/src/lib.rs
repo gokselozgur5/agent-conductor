@@ -737,6 +737,31 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     .ok_or_else(not_found)?;
                 Ok(Response::Task(Self::task_response(row)?))
             }
+            Request::ListTaskPage { project_id, after } => {
+                if after.as_ref().is_some_and(String::is_empty) {
+                    return Err(ErrorBody::new(
+                        ErrorCode::Validation,
+                        "invalid task page cursor",
+                    ));
+                }
+                let mut rows = self
+                    .store
+                    .task_page(project_id.as_deref(), after.as_deref())
+                    .await
+                    .map_err(store_error)?;
+                let has_more = rows.len() > 100;
+                rows.truncate(100);
+                let next_after = if has_more {
+                    rows.last().map(|row| row.id.clone())
+                } else {
+                    None
+                };
+                let tasks = rows
+                    .into_iter()
+                    .map(Self::task_response)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Response::TaskPage { tasks, next_after })
+            }
             Request::TaskHistory { task_id, before } => {
                 let before = before
                     .map(|value| {

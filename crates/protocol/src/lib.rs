@@ -88,6 +88,10 @@ pub enum Request {
     ListTasks {
         project_id: Option<String>,
     },
+    ListTaskPage {
+        project_id: Option<String>,
+        after: Option<String>,
+    },
     TaskHistory {
         task_id: String,
         before: Option<String>,
@@ -188,6 +192,10 @@ pub enum Response {
     TaskHistory {
         entries: Vec<TaskHistoryEntry>,
         next_before: Option<String>,
+    },
+    TaskPage {
+        tasks: Vec<TaskResponse>,
+        next_after: Option<String>,
     },
     CommandApplied(CommandAppliedResponse),
     EventSubscribed {

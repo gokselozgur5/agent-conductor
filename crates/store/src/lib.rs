@@ -423,6 +423,26 @@ impl Store {
         Ok(rows.into_iter().map(task_from_row).collect())
     }
 
+    /// Reads a bounded task page in immutable task-ID order, plus one sentinel.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn task_page(
+        &self,
+        project_id: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<Vec<PersistedTask>, StoreError> {
+        let rows = if let Some(project_id) = project_id {
+            sqlx::query_as::<_, (String, String, String, i64, String, String)>(
+                "SELECT id, project_id, objective, priority, authority_json, aggregate_json FROM tasks WHERE project_id=? AND id>? AND aggregate_json IS NOT NULL ORDER BY id LIMIT 101")
+                .bind(project_id).bind(after.unwrap_or("")).fetch_all(&self.inner.readers).await?
+        } else {
+            sqlx::query_as::<_, (String, String, String, i64, String, String)>(
+                "SELECT id, project_id, objective, priority, authority_json, aggregate_json FROM tasks WHERE id>? AND aggregate_json IS NOT NULL ORDER BY id LIMIT 101")
+                .bind(after.unwrap_or("")).fetch_all(&self.inner.readers).await?
+        };
+        Ok(rows.into_iter().map(task_from_row).collect())
+    }
+
     pub async fn command_outcome(
         &self,
         actor_id: &str,

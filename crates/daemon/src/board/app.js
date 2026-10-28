@@ -4,6 +4,8 @@ let timer;
 let active = false;
 let mutating = false;
 let taskVersions = new Map();
+let taskAfter = null;
+let taskNext = null;
 const el = id => document.getElementById(id);
 const text = (tag, value, className) => {
   const node = document.createElement(tag);
@@ -18,6 +20,9 @@ function disconnect() {
   el('token').value = '';
   el('tasks').replaceChildren();
   taskVersions.clear();
+  taskAfter = null;
+  taskNext = null;
+  el('tasks-next').hidden = true;
   el('toolbar').hidden = true;
   el('dispatch').hidden = true;
   el('queue').replaceChildren();
@@ -30,17 +35,19 @@ async function refresh() {
   active = true;
   const currentToken = token;
   try {
-    const response = await fetch('/api/tasks', {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    const response = await fetch('/api/tasks' + (taskAfter === null ? '' : '?' + new URLSearchParams({after: taskAfter})), {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
     if (currentToken !== token) return;
     if (response.status === 401) { disconnect(); el('message').textContent = 'Authentication failed. Check the operator token.'; return; }
     if (!response.ok) throw new Error(`Service unavailable (${response.status}).`);
     const data = await response.json();
     if (currentToken !== token) return;
-    if (data.type !== 'tasks' || !Array.isArray(data.tasks)) throw new Error('Unexpected service response.');
+    if (data.type !== 'task_page' || !Array.isArray(data.tasks)) throw new Error('Unexpected service response.');
+    taskNext = data.next_after;
+    el('tasks-next').hidden = !taskNext;
     taskVersions = new Map(data.tasks.map(item=>[item.aggregate.id,item.aggregate]));
     el('tasks').replaceChildren(...data.tasks.map(renderTask));
-    el('summary').textContent = `${data.tasks.length} task${data.tasks.length === 1 ? '' : 's'}`;
-    el('message').textContent = data.tasks.length ? '' : 'No tasks yet. Submit a native workflow from the operator CLI.';
+    el('summary').textContent = `${data.tasks.length} tasks on this page${taskNext ? ' · more available' : ''}`;
+    el('message').textContent = data.tasks.length ? '' : (taskAfter ? 'No tasks on this page. Return to the first page.' : 'No tasks yet. Submit a native workflow from the operator CLI.');
     el('connection').textContent = `Connected · ${new Date().toLocaleTimeString()}`;
     el('login').hidden = true;
     el('toolbar').hidden = false;
@@ -238,3 +245,6 @@ async function loadHistory(taskId, before = null) {
 el('history-refresh').addEventListener('click', () => { if (historyTask) loadHistory(historyTask); });
 el('history-older').addEventListener('click', () => { if (historyTask && historyBefore) loadHistory(historyTask, historyBefore); });
 el('history-close').addEventListener('click', closeHistory);
+
+el('tasks-first').addEventListener('click', () => { if (!active && !mutating) { taskAfter = null; refresh(); } });
+el('tasks-next').addEventListener('click', () => { if (!active && !mutating && taskNext) { taskAfter = taskNext; refresh(); } });

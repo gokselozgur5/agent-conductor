@@ -16,8 +16,12 @@ packets with separate trust boundaries. See [LOCAL_OPERATOR.md](LOCAL_OPERATOR.m
 [REPOSITORY_HOOKS.md](REPOSITORY_HOOKS.md) and
 [NATIVE_WORKFLOW.md](NATIVE_WORKFLOW.md).
 
-The task-history branch adds paginated audit metadata in the board and CLI. See
+Task history exposes paginated audit metadata in the board and CLI. See
 [TASK_HISTORY.md](TASK_HISTORY.md) for its read-only contract and validation.
+Task lists use bounded pages after the required synthetic scale exposed an
+all-list response failure; see [TASK_PAGINATION.md](TASK_PAGINATION.md).
+Controlled cancellation now confirms group absence before reporting a stop; see
+[PROCESS_STOP.md](PROCESS_STOP.md) for the observed race and refusal boundary.
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, task dependencies, outer advisory
 discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,
