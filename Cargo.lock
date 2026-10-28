@@ -301,6 +301,7 @@ dependencies = [
  "conductor-protocol",
  "conductor-runtime",
  "nix",
+ "serde",
  "serde_json",
  "sha2",
  "sqlx",

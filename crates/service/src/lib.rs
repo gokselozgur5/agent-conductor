@@ -33,6 +33,10 @@ use uuid::Uuid;
 mod check_execution;
 mod clock;
 #[cfg(unix)]
+mod workflow;
+#[cfg(unix)]
+pub use workflow::{NativeWorkflowPlan, WorkflowOutcome};
+#[cfg(unix)]
 mod source_finalization;
 #[cfg(unix)]
 pub use check_execution::CheckWorkspace;
@@ -50,13 +54,24 @@ pub trait Clock: Send + Sync + 'static {
     fn read(&self, boot_generation: u64) -> ClockReading;
 }
 
-#[derive(Clone)]
 pub struct PersistentControlService<C = SystemClock> {
     store: Store,
     boot_generation: u64,
     started_at: Instant,
     clock: Arc<C>,
     mutations: Arc<Mutex<()>>,
+}
+
+impl<C: Clock> Clone for PersistentControlService<C> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            boot_generation: self.boot_generation,
+            started_at: self.started_at,
+            clock: Arc::clone(&self.clock),
+            mutations: Arc::clone(&self.mutations),
+        }
+    }
 }
 
 impl PersistentControlService<SystemClock> {

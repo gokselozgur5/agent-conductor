@@ -263,6 +263,18 @@ pub struct RuntimeInvariantViolation {
 }
 
 impl Store {
+    /// Looks up the registered project by observed filesystem or Git identity.
+    /// # Errors
+    /// Returns database errors without changing project registration.
+    pub async fn project_for_identity(
+        &self,
+        filesystem: &str,
+        git_common: Option<&str>,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(sqlx::query_scalar("SELECT id FROM projects WHERE filesystem_identity = ? OR git_common_dir_identity = ? LIMIT 1")
+            .bind(filesystem).bind(git_common).fetch_optional(&self.inner.readers).await?)
+    }
+
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let path_text = path.to_str().ok_or(StoreError::InvalidPath)?;
