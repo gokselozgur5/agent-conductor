@@ -70,6 +70,11 @@ enum Command {
     GetTask {
         task_id: String,
     },
+    TaskHistory {
+        task_id: String,
+        #[arg(long)]
+        before: Option<String>,
+    },
     ListTasks {
         #[arg(long)]
         project_id: Option<String>,
@@ -221,6 +226,7 @@ fn command_request(command: Command) -> Request {
             required_checks: parse_json(&required_checks_json, "required checks"),
         },
         Command::GetTask { task_id } => Request::GetTask { task_id },
+        Command::TaskHistory { task_id, before } => Request::TaskHistory { task_id, before },
         Command::ListTasks { project_id } => Request::ListTasks { project_id },
         Command::Apply {
             task_id,

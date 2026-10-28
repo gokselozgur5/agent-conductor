@@ -13,6 +13,7 @@ const text = (tag, value, className) => {
 };
 function disconnect() {
   token = '';
+  closeHistory();
   clearInterval(timer);
   el('token').value = '';
   el('tasks').replaceChildren();
@@ -64,6 +65,8 @@ function renderTask(item) {
   card.append(heading, text('p', item.objective));
   const details = text('dl', '', 'details');
   const field = (label, value) => { details.append(text('dt', label), text('dd', value ?? '—')); };
+  field('Project', item.project_id);
+  field('Priority', item.priority);
   field('Worker', task.attempt?.worker);
   field('Attempt', task.attempt?.id);
   field('Verifier', task.verification?.verdict?.verifier);
@@ -92,6 +95,9 @@ function renderTask(item) {
     button.addEventListener('click', () => control(task, action));
     controls.append(button);
   }
+  const history = text('button', 'View history');
+  history.addEventListener('click', () => loadHistory(task.id));
+  controls.append(history);
   card.append(controls);
   return card;
 }
@@ -182,3 +188,53 @@ async function continueWorkflow(task,button) {
   } catch(_) {if(currentToken===token)el('message').textContent='Continuation outcome unknown. Refresh before retrying.';}
   finally {button.disabled=false;}
 }
+
+
+let historyGeneration = 0;
+let historyTask = null;
+let historyBefore = null;
+function closeHistory() {
+  historyGeneration++;
+  historyTask = null;
+  historyBefore = null;
+  el('history').hidden = true;
+  el('history-entries').replaceChildren();
+  el('history-message').textContent = '';
+  el('history-title').textContent = 'Task history';
+}
+async function loadHistory(taskId, before = null) {
+  if (!token) return;
+  const generation = ++historyGeneration;
+  const currentToken = token;
+  historyTask = taskId;
+  historyBefore = null;
+  el('history').hidden = false;
+  el('history-title').textContent = `History · ${taskId}`;
+  el('history-entries').replaceChildren();
+  el('history-older').hidden = true;
+  el('history-message').textContent = 'Loading history…';
+  const params = new URLSearchParams({task_id: taskId});
+  if (before !== null) params.set('before', before);
+  try {
+    const response = await fetch(`/api/history?${params}`, {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (generation !== historyGeneration || currentToken !== token) return;
+    if (response.status === 401) { disconnect(); el('message').textContent = 'Authentication failed.'; return; }
+    if (!response.ok) throw new Error('History unavailable. Retry with Newest entries.');
+    const data = await response.json();
+    if (generation !== historyGeneration || currentToken !== token) return;
+    if (data.type !== 'task_history' || !Array.isArray(data.entries)) throw new Error('Invalid history response.');
+    el('history-entries').replaceChildren(...data.entries.map(entry => {
+      const row = text('li', '');
+      row.append(text('strong', entry.kind), text('p', `${new Date(entry.occurred_at_ms).toLocaleString()} · Actor: ${entry.actor_id}`), text('p', `Sequence: ${entry.sequence} · Correlation: ${entry.correlation_id}`, 'hint'));
+      return row;
+    }));
+    historyBefore = data.next_before;
+    el('history-older').hidden = !historyBefore;
+    el('history-message').textContent = data.entries.length ? `${data.entries.length} entries${historyBefore ? ' · older entries available' : ' · end of history'}` : 'No audit entries.';
+  } catch (error) {
+    if (generation === historyGeneration && currentToken === token) el('history-message').textContent = error.message;
+  }
+}
+el('history-refresh').addEventListener('click', () => { if (historyTask) loadHistory(historyTask); });
+el('history-older').addEventListener('click', () => { if (historyTask && historyBefore) loadHistory(historyTask, historyBefore); });
+el('history-close').addEventListener('click', closeHistory);

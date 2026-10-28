@@ -16,6 +16,8 @@ use tokio::sync::Mutex;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+mod history;
+pub use history::AuditMetadata;
 mod workflows;
 pub use workflows::WorkflowDispatch;
 

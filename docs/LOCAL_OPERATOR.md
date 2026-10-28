@@ -138,3 +138,18 @@ and unchanged authority. The real CLI probe found six actual documents in this
 repository with unchanged HEAD/index/worktree status and no ignored-state paths.
 Evidence: private `advisory-intake-v1/receipt.json`. Native packet integration is
 source-inspected/service-tested; no new model call was made for this change.
+
+## Inspect task history
+
+Select **View history** on a task card to read audit metadata. **Older entries**
+pages backward; **Newest entries** explicitly refreshes. Disconnect clears the
+selected history. The same read is available locally:
+
+```sh
+./tools/conductor ctl --json task-history TASK_ID
+./tools/conductor ctl --json task-history TASK_ID --before SEQUENCE
+```
+
+Use the returned `next_before` cursor unchanged. Each page contains at most 100
+entries; command/checkpoint payloads are omitted. This view does not acknowledge
+semantic events or change the task. See [TASK_HISTORY.md](TASK_HISTORY.md).

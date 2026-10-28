@@ -737,6 +737,45 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     .ok_or_else(not_found)?;
                 Ok(Response::Task(Self::task_response(row)?))
             }
+            Request::TaskHistory { task_id, before } => {
+                let before = before
+                    .map(|value| {
+                        value.parse::<i64>().ok().filter(|v| *v > 0).ok_or_else(|| {
+                            ErrorBody::new(ErrorCode::Validation, "invalid history cursor")
+                        })
+                    })
+                    .transpose()?;
+                self.store
+                    .task(&task_id)
+                    .await
+                    .map_err(store_error)?
+                    .ok_or_else(not_found)?;
+                let mut rows = self
+                    .store
+                    .task_history(&task_id, before)
+                    .await
+                    .map_err(store_error)?;
+                let has_more = rows.len() > 100;
+                rows.truncate(100);
+                let next_before = if has_more {
+                    rows.last().map(|row| row.sequence.to_string())
+                } else {
+                    None
+                };
+                Ok(Response::TaskHistory {
+                    entries: rows
+                        .into_iter()
+                        .map(|row| conductor_protocol::TaskHistoryEntry {
+                            sequence: row.sequence.to_string(),
+                            kind: row.kind,
+                            actor_id: row.actor_id,
+                            correlation_id: row.correlation_id,
+                            occurred_at_ms: row.occurred_at_ms,
+                        })
+                        .collect(),
+                    next_before,
+                })
+            }
             Request::ListTasks { project_id } => {
                 let rows = self
                     .store

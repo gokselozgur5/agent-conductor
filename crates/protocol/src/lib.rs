@@ -88,6 +88,10 @@ pub enum Request {
     ListTasks {
         project_id: Option<String>,
     },
+    TaskHistory {
+        task_id: String,
+        before: Option<String>,
+    },
     ApplyCommand {
         task_id: String,
         command: Command,
@@ -181,6 +185,10 @@ pub enum Response {
     Tasks {
         tasks: Vec<TaskResponse>,
     },
+    TaskHistory {
+        entries: Vec<TaskHistoryEntry>,
+        next_before: Option<String>,
+    },
     CommandApplied(CommandAppliedResponse),
     EventSubscribed {
         subscription_id: String,
@@ -268,6 +276,16 @@ pub struct SemanticEventResponse {
     pub path_scope: Option<String>,
     pub payload: Value,
     pub created_at_ms: i64,
+}
+
+/// Metadata only; raw audit commands and payloads never cross this projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHistoryEntry {
+    pub sequence: String,
+    pub kind: String,
+    pub actor_id: String,
+    pub correlation_id: String,
+    pub occurred_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
