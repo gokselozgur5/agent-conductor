@@ -40,6 +40,9 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace --all-features
 
+      - name: Check operator backup refusals
+        run: python3 -m unittest discover -s tests -p test_operator_backup.py -v
+
       - name: Reject committed credential material
         shell: bash
         run: |
