@@ -103,6 +103,12 @@ pub struct AgentRegistration {
     pub created_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedAgent {
+    pub id: String,
+    pub capability_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRegistration {
     pub id: String,
@@ -316,6 +322,24 @@ impl Store {
             .fetch_one(&self.inner.readers)
             .await?;
         Ok(count == 1)
+    }
+
+    /// Loads the immutable identity material frozen into a task attempt.
+    ///
+    /// # Errors
+    /// Returns a database error when the agent record cannot be read.
+    pub async fn agent(&self, agent_id: &str) -> Result<Option<PersistedAgent>, StoreError> {
+        sqlx::query_as::<_, (String, String)>("SELECT id, capability_hash FROM agents WHERE id = ?")
+            .bind(agent_id)
+            .fetch_optional(&self.inner.readers)
+            .await
+            .map(|row| {
+                row.map(|(id, capability_hash)| PersistedAgent {
+                    id,
+                    capability_hash,
+                })
+            })
+            .map_err(StoreError::from)
     }
 
     pub async fn create_task(&self, task: NewTask<'_>) -> Result<(), StoreError> {

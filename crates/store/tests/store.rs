@@ -621,6 +621,58 @@ async fn concurrent_expected_version_writers_have_one_winner() {
     );
 }
 
+#[tokio::test]
+async fn git_common_directory_identifies_one_project() {
+    let (_directory, store) = store().await;
+    store
+        .create_project(NewProject {
+            id: "project-1",
+            canonical_path: "/workspace/project",
+            filesystem_identity: "dev:1:ino:2",
+            git_common_dir_identity: Some("git:shared"),
+            created_at_ms: 100,
+        })
+        .await
+        .expect("create first project");
+
+    let error = store
+        .create_project(NewProject {
+            id: "project-2",
+            canonical_path: "/workspace/project-worktree",
+            filesystem_identity: "dev:1:ino:3",
+            git_common_dir_identity: Some("git:shared"),
+            created_at_ms: 101,
+        })
+        .await
+        .expect_err("same repository cannot be registered twice");
+    assert!(matches!(error, StoreError::Database(_)));
+    assert_eq!(count(store.readers(), "projects").await, 1);
+}
+
+#[tokio::test]
+async fn registered_agent_exposes_frozen_capability_identity() {
+    let (_directory, store) = store().await;
+    store
+        .persist(&agent_batch("agent-key", "agent-hash", "agent-1"))
+        .await
+        .expect("register agent");
+
+    let agent = store
+        .agent("agent-1")
+        .await
+        .expect("load agent")
+        .expect("registered agent");
+    assert_eq!(agent.id, "agent-1");
+    assert_eq!(agent.capability_hash, "sha256:abc");
+    assert!(
+        store
+            .agent("missing")
+            .await
+            .expect("missing lookup")
+            .is_none()
+    );
+}
+
 async fn count(pool: &sqlx::SqlitePool, table: &str) -> i64 {
     let query = format!("SELECT COUNT(*) FROM {table}");
     sqlx::query_scalar(&query)
