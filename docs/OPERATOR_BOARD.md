@@ -1,9 +1,9 @@
 # Local operator board
 
 The optional board displays authoritative task state, worker/verifier identities,
-required checks and source-bound acceptance evidence. It is a read-only view of
-the existing service, not a second lifecycle engine. It does not start model
-calls or mutate tasks.
+required checks and source-bound acceptance evidence. Operators can mark tasks
+ready, pause, resume to ready and cancel through the existing service/domain.
+The board does not yet submit plans or automatically start model calls.
 
 Set `CONDUCTOR_OPERATOR_TOKEN` in the launching environment without putting its
 value in command arguments or shell history. For an interactive shell:
@@ -40,8 +40,26 @@ Repository/task strings are rendered using text nodes, not HTML injection.
 
 `--http` can accompany `--run-plan`. In that mode the board stops when the batch
 invocation exits. Run the ordinary daemon without `--run-plan` for persistent
-inspection of existing tasks. Existing CLI mutation commands remain available
-through the Unix socket; this board currently adds no task mutation controls.
+inspection and control of existing tasks. Existing CLI commands remain available
+through the Unix socket.
+
+## Task controls
+
+Buttons send a narrow command with the displayed task version and an idempotency
+key. The server supplies the operator identity; browser input cannot impersonate
+a worker/system or publish checks, verdicts or completion. Stale state is refused
+and refreshed. Cancellation asks for confirmation and retains artifacts. Pause
+and cancel revoke ownership; execution stop follows the runtime observing that
+revocation, rather than the HTTP response proving a completed process fence.
+Ready/resume only change lifecycle readiness until native scheduling is added.
+
+POST `/api/control` requires the same bearer/Host/Origin boundary as reads, exact
+`application/json`, a body of at most 4096 bytes and a three-second read deadline.
+Only `task_id`, `expected_version`, `idempotency_key` and `action` are accepted;
+actions are `ready`, `pause`, `resume`, `cancel`. The authenticated local operator
+is trusted, matching the local socket trust model. A timeout can leave the outcome
+unknown: refresh state before retrying; never assume a failed HTTP reply rolled
+back a transaction.
 
 ## Validation and scope
 
@@ -58,5 +76,12 @@ the daemon stopped. Private screenshot/receipt evidence lives under
 in the workspace.
 
 This does not claim remote multi-user authentication, exhaustive HTTP load
-hardening, task controls, pagination or mobile-browser acceptance. Those remain
-separate scope from this local read-only operator view.
+hardening, plan submission/automatic scheduling, pagination or mobile-browser
+acceptance.
+
+A real SQLite/HTTP regression verifies authorization, foreign-origin refusal,
+unknown actions/fields, oversized bodies, version conflicts, idempotent replay,
+pause/resume/cancel transitions and terminal-state refusal. An isolated Chrome
+control probe clicked the ready → pause → resume → cancel sequence and read back
+the cancelled state from the real daemon; evidence is private under
+`reviews/agent-conductor-runtime-20261028/operator-controls-v1`.

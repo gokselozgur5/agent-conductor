@@ -2,6 +2,7 @@
 let token = '';
 let timer;
 let active = false;
+let mutating = false;
 const el = id => document.getElementById(id);
 const text = (tag, value, className) => {
   const node = document.createElement(tag);
@@ -19,7 +20,7 @@ function disconnect() {
   el('connection').textContent = 'Disconnected';
 }
 async function refresh() {
-  if (active || !token) return;
+  if (active || mutating || !token) return;
   active = true;
   const currentToken = token;
   try {
@@ -62,9 +63,51 @@ function renderTask(item) {
   }
   card.append(checks);
   if (task.blocker) card.append(text('p', task.blocker.detail, 'blocker'));
+  const controls = text('div', '', 'controls');
+  const actions = [];
+  if (task.state === 'backlog') actions.push(['ready', 'Mark ready']);
+  if (['ready', 'claimed', 'running', 'verifying'].includes(task.state)) actions.push(['pause', 'Pause']);
+  if (['paused', 'blocked'].includes(task.state)) actions.push(['resume', 'Resume to ready']);
+  if (!['completed', 'cancelled'].includes(task.state)) actions.push(['cancel', 'Cancel task']);
+  for (const [action, label] of actions) {
+    const button = text('button', label);
+    button.addEventListener('click', () => control(task, action));
+    controls.append(button);
+  }
+  card.append(controls);
   return card;
 }
 el('connect').addEventListener('click', () => { token = el('token').value; el('token').value = ''; clearInterval(timer); refresh(); timer = setInterval(refresh, 3000); });
 el('refresh').addEventListener('click', refresh);
 el('disconnect').addEventListener('click', disconnect);
 el('token').addEventListener('keydown', event => { if (event.key === 'Enter') el('connect').click(); });
+
+async function control(task, action) {
+  if (mutating || !token) return;
+  if (action === 'cancel' && !window.confirm(`Cancel task ${task.id}? Retained artifacts will be preserved.`)) return;
+  mutating = true;
+  const currentToken = token;
+  document.querySelectorAll('#tasks button').forEach(button => { button.disabled = true; });
+  let message;
+  try {
+    const response = await fetch('/api/control', {
+      method: 'POST', headers: {Authorization: `Bearer ${currentToken}`, 'Content-Type': 'application/json'},
+      body: JSON.stringify({task_id: task.id, expected_version: task.version, idempotency_key: crypto.randomUUID(), action}),
+      signal: AbortSignal.timeout(5000)
+    });
+    if (currentToken !== token) return;
+    if (response.status === 401) { disconnect(); message = 'Authentication failed.'; }
+    else if (response.status === 409) message = 'Task changed or action is not allowed. Refreshed state; inspect it before retrying.';
+    else if (!response.ok) message = 'Action was not confirmed. Inspect refreshed state before retrying.';
+    else message = ['ready', 'resume'].includes(action) ? 'Task is ready. Automatic native scheduling is not enabled yet.' : 'Action applied. Active execution stops after ownership revocation is observed.';
+  } catch (_) {
+    message = 'Action outcome unknown. Inspect refreshed state before retrying.';
+  } finally {
+    mutating = false;
+    if (currentToken === token || !token) {
+      await refresh();
+      if (message) el('message').textContent = message;
+      document.querySelectorAll('#tasks button').forEach(button => { button.disabled = false; });
+    }
+  }
+}

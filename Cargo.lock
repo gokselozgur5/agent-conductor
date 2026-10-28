@@ -310,6 +310,7 @@ dependencies = [
  "conductor-protocol",
  "conductor-service",
  "fs2",
+ "serde",
  "serde_json",
  "sha2",
  "sqlx",

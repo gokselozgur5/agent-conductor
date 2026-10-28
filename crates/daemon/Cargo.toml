@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
 sha2.workspace = true
+serde.workspace = true
+agent-conductor-domain = { path = "../domain" }
 agent-conductor-store = { path = "../store" }
 clap.workspace = true
 conductor-protocol = { path = "../protocol" }
@@ -20,7 +22,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-agent-conductor-domain = { path = "../domain" }
 sqlx.workspace = true
 tempfile = "3.23"
 uuid.workspace = true
