@@ -83,8 +83,9 @@ invalidation, fenced retained observation and bounded causal wake refusal.
 The working local workflow is not full v1 acceptance. Remaining work includes
 deeper execution evidence and broader recovery,
 host protocol/Thor/Linux isolation,
-load/restore/redaction validation and seven-day soak. Issue #20 retains an
-unresolved historical supervision deadline; do not infer a cause from green tests.
+load/restore/redaction validation and seven-day soak. Issue #20 now has controlled
+socket-encoding and worker-readiness evidence; see
+[RESPONSE_ENCODING.md](RESPONSE_ENCODING.md) for the correction and its limits.
 
 The sections below preserve earlier acceptance milestones. Their counts and
 then-pending items are historical; current hook coverage is maintained in

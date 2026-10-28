@@ -1,4 +1,5 @@
 mod board;
+mod response_encoding;
 pub use board::OperatorBoard;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
@@ -299,7 +300,7 @@ where
         Err(_) => {
             return write_response(
                 &mut stream,
-                &ResponseEnvelope::failure(
+                ResponseEnvelope::failure(
                     None,
                     ErrorBody::new(ErrorCode::Unavailable, "request read timed out"),
                 ),
@@ -331,33 +332,16 @@ where
         }
     };
 
-    write_response(&mut stream, &response, write_timeout, max_response_bytes).await
+    write_response(&mut stream, response, write_timeout, max_response_bytes).await
 }
 
 async fn write_response(
     stream: &mut UnixStream,
-    response: &ResponseEnvelope,
+    response: ResponseEnvelope,
     write_timeout: Duration,
     max_response_bytes: usize,
 ) -> Result<(), io::Error> {
-    let mut output = serde_json::to_vec(response).map_err(io::Error::other)?;
-    if output.len().saturating_add(1) > max_response_bytes {
-        let bounded = ResponseEnvelope {
-            result: conductor_protocol::ResponseResult::Error(ErrorBody::new(
-                ErrorCode::Unavailable,
-                "response exceeds frame limit",
-            )),
-            ..response.clone()
-        };
-        output = serde_json::to_vec(&bounded).map_err(io::Error::other)?;
-    }
-    if output.len().saturating_add(1) > max_response_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "response frame limit cannot contain an error envelope",
-        ));
-    }
-    output.push(b'\n');
+    let output = response_encoding::encode(response, max_response_bytes).await?;
     tokio::time::timeout(write_timeout, async {
         stream.write_all(&output).await?;
         stream.shutdown().await
@@ -385,7 +369,7 @@ async fn reject_overloaded(
         None,
         ErrorBody::new(ErrorCode::Unavailable, "connection limit reached"),
     );
-    write_response(&mut stream, &response, write_timeout, MAX_RESPONSE_BYTES).await
+    write_response(&mut stream, response, write_timeout, MAX_RESPONSE_BYTES).await
 }
 
 #[cfg(test)]
@@ -729,6 +713,17 @@ mod tests {
             client.write_all(&body).await.expect("request writes");
             client.shutdown().await.expect("request half-closes");
             unread.push(client);
+        }
+
+        // Establish actual response-write progress before timing write recovery.
+        // Encoding admission/CPU time is a separate phase, tested independently.
+        for client in &mut unread {
+            let mut first = [0];
+            tokio::time::timeout(Duration::from_secs(3), client.read_exact(&mut first))
+                .await
+                .expect("response encoding and first-byte readiness")
+                .expect("response starts");
+            assert_eq!(first, [b'{']);
         }
 
         let health = RequestEnvelope::new(Request::Health);
