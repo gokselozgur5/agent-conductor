@@ -2347,12 +2347,22 @@ mod effect_tests {
             .expect("terminal");
             let wrapper = directory.path().join("peer.sh");
             // Tests service lifecycle semantics, not vendor identity or sandboxing.
-            fs::write(&wrapper, format!("#!/bin/sh\nread -r launch\nprintf '%s\\n' '{ready}'\nread -r release\nprintf '%s\\n' '{finished}'\n")).expect("peer");
+            let closed_input = directory.path().join("input-closed");
+            fs::write(&wrapper, format!("#!/bin/sh\nread -r launch\nprintf '%s\\n' '{ready}'\nread -r release\nexec 0<&-\n: > '{}'\nsleep 0.2\nprintf '%s\\n' '{finished}'\n", closed_input.display())).expect("peer");
             fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("mode");
             let (record, connection) = service
                 .launch_execution(&wrapper, &input, &token, "runner")
                 .await
                 .expect("release");
+            // Force a failed renewal while the matching terminal frame is still
+            // in transit. Previously this discarded a successful native result.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !closed_input.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("peer closed its input");
             let mut packet = input.packet.clone();
             if replace_packet {
                 packet.objective = "different task text".into();
