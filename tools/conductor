@@ -70,6 +70,8 @@ def main():
     plan.add_argument('--task', required=True)
     plan.add_argument('--objective-file', type=Path, required=True)
     plan.add_argument('--checks-file', type=Path, required=True)
+    plan.add_argument('--depends-on', action='append', default=[])
+    plan.add_argument('--input-task')
     plan.add_argument('--instruction', type=Path, action='append', default=[])
     submit = sub.add_parser('submit', help='authorize and queue one prepared native plan')
     submit.add_argument('plan', type=Path)
@@ -125,6 +127,12 @@ def main():
                 raise ValueError('accepted adapter binary changed; conformance must be revalidated')
             pin['executable'] = str(executable)
         value.update(task_id=args.task, project=config['project'], objective=args.objective_file.read_text(), artifacts=str(state / 'artifacts' / args.task), wrapper=str(Path(config['bin_dir']) / 'conductor-runner'), checks=json.loads(args.checks_file.read_text()), toolchain_roots=template.get('toolchain_roots', []), instructions=[])
+        if args.depends_on:
+            value['depends_on'] = args.depends_on
+        if args.input_task:
+            if args.input_task not in args.depends_on:
+                raise ValueError('--input-task requires a matching --depends-on')
+            value['input_task'] = args.input_task
         for source in args.instruction:
             source = source.resolve(strict=True)
             value['instructions'].append(dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest()))

@@ -14,8 +14,9 @@ pub struct WorkflowDispatch {
     pub resume_version: Option<i64>,
     pub auto_recovery_count: i64,
     pub waiting_for_event: bool,
+    pub waiting_for_dependencies: bool,
 }
-const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version, auto_recovery_count, EXISTS(SELECT 1 FROM workflow_wakes w WHERE w.task_id=workflow_dispatch.task_id AND w.delivery_id IS NULL) AS waiting_for_event FROM workflow_dispatch";
+const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version, auto_recovery_count, EXISTS(SELECT 1 FROM workflow_wakes w WHERE w.task_id=workflow_dispatch.task_id AND w.delivery_id IS NULL) AS waiting_for_event, EXISTS(SELECT 1 FROM workflow_dependencies d WHERE d.task_id=workflow_dispatch.task_id AND d.accepted_source IS NULL) AS waiting_for_dependencies FROM workflow_dispatch";
 impl Store {
     /// Persists one immutable operator-approved plan, replaying identical input.
     /// # Errors
@@ -40,6 +41,7 @@ impl Store {
             }
         let input: serde_json::Value = serde_json::from_str(plan)
             .map_err(|_| StoreError::Integrity("invalid workflow JSON".into()))?;
+        let dependencies = crate::workflow_dependencies::validate_admission(&mut writer, task_id, &input).await?;
         let wake = input
             .get("wake_subscription")
             .filter(|v| !v.is_null())
@@ -53,6 +55,10 @@ impl Store {
             if pending >= 256 { return Err(StoreError::Integrity("workflow queue capacity reached".into())); }
             sqlx::query("INSERT INTO workflow_dispatch(task_id,plan_json,status,created_at_ms,updated_at_ms) VALUES (?,?,'queued',?,?)")
                 .bind(task_id).bind(plan).bind(now).bind(now).execute(&mut *writer).await?;
+            for dependency in dependencies {
+                sqlx::query("INSERT INTO workflow_dependencies(task_id,predecessor_task_id) VALUES (?,?)")
+                    .bind(task_id).bind(dependency).execute(&mut *writer).await?;
+            }
             if let Some(subscription) = wake {
                 let eligible: Option<i64> = sqlx::query_scalar("SELECT 1 FROM event_subscriptions WHERE id=? AND agent_id=? AND active=1 AND echo_source=0")
                     .bind(subscription).bind(format!("{task_id}:worker")).fetch_optional(&mut *writer).await?;
@@ -95,6 +101,7 @@ impl Store {
             let rows = sqlx::query_as::<_, WorkflowDispatch>(&format!("{SELECT} WHERE status = 'queued' ORDER BY created_at_ms,task_id LIMIT 256")).fetch_all(&mut *writer).await?;
             let mut selected = None;
             for row in rows {
+                let Some(dependencies) = crate::workflow_dependencies::eligible_sources(&mut writer,&row.task_id).await? else { continue; };
                 let binding: Option<(String, Option<String>)> = sqlx::query_as("SELECT subscription_id,delivery_id FROM workflow_wakes WHERE task_id=?").bind(&row.task_id).fetch_optional(&mut *writer).await?;
                 if let Some((subscription, None)) = binding {
                         let delivery: Option<(String,String)> = sqlx::query_as("SELECT d.id,json_object('id',e.id,'correlation_id',e.correlation_id,'generation',e.generation,'topic',e.topic,'project_id',e.project_id,'task_id',e.task_id,'path_scope',e.path_scope,'payload',json(e.payload_json)) FROM event_deliveries d JOIN semantic_events e ON e.id=d.event_id JOIN event_subscriptions s ON s.id=d.subscription_id WHERE d.subscription_id=? AND s.active=1 AND s.echo_source=0 AND s.agent_id=d.target_agent_id AND d.target_agent_id=? AND e.source_agent_id<>d.target_agent_id AND d.status='pending' AND d.available_at_ms<=? AND e.expires_at_ms>? AND e.created_at_ms<=? AND d.attempts<e.max_retries AND e.generation<8 ORDER BY e.created_at_ms,d.id LIMIT 1")
@@ -104,12 +111,21 @@ impl Store {
                         sqlx::query("UPDATE event_deliveries SET status='acked',acked_at_ms=? WHERE id=?").bind(now).bind(&delivery).execute(&mut *writer).await?;
                         sqlx::query("UPDATE workflow_wakes SET delivery_id=?,trigger_json=? WHERE task_id=?").bind(delivery).bind(trigger).bind(&row.task_id).execute(&mut *writer).await?;
                 }
-                selected = Some(row); break;
+                selected = Some((row, dependencies)); break;
             }
             let row = selected;
-            if let Some(mut row) = row {
+            if let Some((mut row, dependencies)) = row {
+                for (predecessor,source) in &dependencies {
+                    sqlx::query("UPDATE workflow_dependencies SET accepted_source=? WHERE task_id=? AND predecessor_task_id=?")
+                        .bind(source).bind(&row.task_id).bind(predecessor).execute(&mut *writer).await?;
+                }
+                if !dependencies.is_empty() {
+                    let payload = serde_json::to_string(&dependencies).map_err(|_| StoreError::Integrity("dependency encoding failed".into()))?;
+                    sqlx::query("INSERT INTO audit_events(id,actor_id,kind,correlation_id,payload_json,occurred_at_ms) VALUES(?,'conductor-dispatch','workflow.dependencies_admitted',?,?,?)")
+                        .bind(uuid::Uuid::now_v7().to_string()).bind(&row.task_id).bind(payload).bind(now).execute(&mut *writer).await?;
+                }
                 sqlx::query("UPDATE workflow_dispatch SET status='running',boot_generation=?,updated_at_ms=? WHERE task_id=? AND status='queued'").bind(generation).bind(now).bind(&row.task_id).execute(&mut *writer).await?;
-                row.status = "running".into(); row.boot_generation = Some(generation); row.waiting_for_event = false;
+                row.status = "running".into(); row.boot_generation = Some(generation); row.waiting_for_event = false; row.waiting_for_dependencies = false;
                 Ok(Some(row))
             } else { Ok(None) }
         }.await;

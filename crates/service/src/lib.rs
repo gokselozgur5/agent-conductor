@@ -41,7 +41,11 @@ mod workflow;
 #[cfg(unix)]
 mod workflow_continuation;
 #[cfg(unix)]
+mod workflow_dependencies;
+#[cfg(unix)]
 mod workflow_dispatch;
+#[cfg(unix)]
+mod workflow_review;
 #[cfg(unix)]
 pub use repository_watch::{OwnedWatchState, RepositoryWatch, RepositoryWatchState};
 #[cfg(unix)]
@@ -592,15 +596,18 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
             }
             Request::SubmitWorkflow { plan_json } => self.submit_workflow(&plan_json).await,
             Request::ListWorkflows => {
-                let entries = self
-                    .store
-                    .workflows()
-                    .await
-                    .map_err(store_error)?
-                    .into_iter()
-                    .map(serde_json::to_value)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(json_error)?;
+                let mut entries = Vec::new();
+                for row in self.store.workflows().await.map_err(store_error)? {
+                    let dependencies = self
+                        .store
+                        .workflow_dependencies(&row.task_id)
+                        .await
+                        .map_err(store_error)?;
+                    let mut value = serde_json::to_value(row).map_err(json_error)?;
+                    value["dependencies"] =
+                        serde_json::to_value(dependencies).map_err(json_error)?;
+                    entries.push(value);
+                }
                 Ok(Response::Workflows { entries })
             }
             Request::Health => {

@@ -150,7 +150,10 @@ async function refreshQueue(currentToken) {
   if (currentToken !== token) return;
   if (data.type !== 'workflows' || !Array.isArray(data.entries)) throw new Error('Invalid queue response.');
   el('queue').replaceChildren(...data.entries.map(item => {
-    const row=text('li', `${item.task_id} · ${item.waiting_for_event ? 'waiting for subscribed event' : item.status}${item.outcome_json ? ' · ' + item.outcome_json : ''}`);
+    const row=text('li', `${item.task_id} · ${item.waiting_for_dependencies ? 'waiting for dependency admission' : (item.waiting_for_event ? 'waiting for subscribed event' : item.status)}${item.outcome_json ? ' · ' + item.outcome_json : ''}`);
+    for (const dependency of item.dependencies || []) {
+      row.append(text('p', `${dependency.predecessor_task_id} · ${dependency.accepted_source || 'not yet admitted'}`, 'hint'));
+    }
     const task=taskVersions.get(item.task_id);
     if (task && !['completed','cancelled'].includes(task.state) && ['finished','needs_recovery'].includes(item.status)) {
       const button=text('button','Continue retained work');

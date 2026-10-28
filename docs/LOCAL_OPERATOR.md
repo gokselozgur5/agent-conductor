@@ -68,6 +68,25 @@ explicit authorization to execute the selected model workflow and declared check
 The original checkout stays unchanged; accepted output lives in the plan's private
 artifact directory. Publication and merge remain separate operator actions.
 
+To build on a predecessor's independently accepted output, submit the predecessor
+first, then prepare a successor with explicit dependencies:
+
+```sh
+./tools/conductor plan --from-plan /private/accepted-plan.json \
+  --task second-task --objective-file /private/second-objective.txt \
+  --checks-file /private/second-checks.json \
+  --depends-on first-task --input-task first-task
+./tools/conductor submit state/operator/plans/second-task.json
+```
+
+Repeat `--depends-on` for additional prerequisites (up to 16). The input task must
+be one of them, in the same project. The dispatcher waits for independent accepted
+completion and copies the selected accepted tree into the successor's private work
+area. Without `--input-task`, dependencies only gate execution; the starting tree
+comes from the original project. There is no automatic merge of multiple outputs.
+The board and `list-workflows` show pending admission and frozen source identities.
+See [verified handoff](WORKFLOW_DEPENDENCIES.md) for refusal and recovery rules.
+
 To wait for another agent's semantic event, submit with a topic filter:
 
 ```sh

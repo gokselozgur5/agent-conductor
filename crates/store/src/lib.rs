@@ -18,6 +18,8 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 mod history;
 pub use history::AuditMetadata;
+mod workflow_dependencies;
+pub use workflow_dependencies::WorkflowDependency;
 mod workflows;
 pub use workflows::WorkflowDispatch;
 
