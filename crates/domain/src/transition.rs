@@ -132,6 +132,16 @@ pub fn apply(task: &Task, command: &Command, clock: ClockReading) -> Result<Outc
                 .attempt
                 .as_mut()
                 .ok_or(Rejection::InvalidLease("task has no active attempt"))?;
+            if attempt.lease.status != LeaseStatus::Active {
+                return Err(Rejection::InvalidLease(
+                    "only an active lease can enter recovery",
+                ));
+            }
+            if clock.boot_generation <= attempt.lease.boot_generation {
+                return Err(Rejection::InvalidLease(
+                    "recovery requires a newer boot generation",
+                ));
+            }
             let recovery_window = attempt
                 .lease
                 .remaining_at_last_heartbeat_ms
@@ -272,6 +282,7 @@ pub fn apply(task: &Task, command: &Command, clock: ClockReading) -> Result<Outc
         } => {
             require_role(command, &[ActorRole::System, ActorRole::Verifier])?;
             require_state(task, command, &[TaskState::Verifying])?;
+            reject_current_worker(task, command)?;
             require_bound_source(task, source)?;
             if !task
                 .required_checks
@@ -315,6 +326,7 @@ pub fn apply(task: &Task, command: &Command, clock: ClockReading) -> Result<Outc
         CommandKind::RejectVerification => {
             require_role(command, &[ActorRole::Verifier, ActorRole::System])?;
             require_state(task, command, &[TaskState::Verifying])?;
+            reject_current_worker(task, command)?;
             let attempt = task
                 .attempt
                 .as_ref()
@@ -336,16 +348,7 @@ pub fn apply(task: &Task, command: &Command, clock: ClockReading) -> Result<Outc
         }
         CommandKind::AddRequiredCheck { check } => {
             require_role(command, &[ActorRole::Operator, ActorRole::Verifier])?;
-            require_state(
-                task,
-                command,
-                &[
-                    TaskState::Backlog,
-                    TaskState::Ready,
-                    TaskState::Claimed,
-                    TaskState::Running,
-                ],
-            )?;
+            require_state(task, command, &[TaskState::Backlog, TaskState::Ready])?;
             if task
                 .attempt
                 .as_ref()
@@ -527,6 +530,21 @@ fn require_claim_authority(command: &Command, worker: &crate::ActorId) -> Result
             role,
             command: command_name(&command.kind),
         }),
+    }
+}
+
+fn reject_current_worker(task: &Task, command: &Command) -> Result<(), Rejection> {
+    if task
+        .attempt
+        .as_ref()
+        .is_some_and(|attempt| attempt.worker == command.actor.id)
+    {
+        Err(Rejection::Unauthorized {
+            role: command.actor.role,
+            command: command_name(&command.kind),
+        })
+    } else {
+        Ok(())
     }
 }
 

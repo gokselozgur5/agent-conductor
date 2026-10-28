@@ -310,6 +310,54 @@ fn restart_requires_recovery_heartbeat_before_mutation() {
 }
 
 #[test]
+fn recovery_requires_a_new_generation_and_cannot_be_rearmed() {
+    let task = running_task();
+    let enter_recovery = |task: &Task| {
+        command(
+            task,
+            actor("system", ActorRole::System),
+            CommandKind::EnterRecovery,
+        )
+    };
+
+    assert!(matches!(
+        apply(&task, &enter_recovery(&task), clock_on_boot(7, 30)),
+        Err(Rejection::InvalidLease(_))
+    ));
+    assert!(matches!(
+        apply(&task, &enter_recovery(&task), clock_on_boot(6, 30)),
+        Err(Rejection::InvalidLease(_))
+    ));
+
+    let recovering = apply(&task, &enter_recovery(&task), clock_on_boot(8, 30))
+        .unwrap()
+        .task;
+    let original_deadline = recovering
+        .attempt
+        .as_ref()
+        .unwrap()
+        .lease
+        .deadline_monotonic_ms;
+    assert!(matches!(
+        apply(
+            &recovering,
+            &enter_recovery(&recovering),
+            clock_on_boot(9, original_deadline - 1),
+        ),
+        Err(Rejection::InvalidLease(_))
+    ));
+    assert_eq!(
+        recovering
+            .attempt
+            .as_ref()
+            .unwrap()
+            .lease
+            .deadline_monotonic_ms,
+        original_deadline
+    );
+}
+
+#[test]
 fn pause_and_block_end_the_lease_and_resume_requires_a_new_epoch() {
     for kind in [
         CommandKind::Pause,
@@ -399,6 +447,40 @@ fn worker_cannot_verify_itself_even_if_presented_as_a_verifier() {
 }
 
 #[test]
+fn worker_cannot_record_checks_or_reject_verification_as_a_verifier() {
+    let task = verifying_task();
+    let source = SourceIdentity::from("git-tree:abc123");
+    let task = apply(
+        &task,
+        &command(
+            &task,
+            actor("system", ActorRole::System),
+            CommandKind::BindVerificationSource {
+                source: source.clone(),
+            },
+        ),
+        clock(40),
+    )
+    .unwrap()
+    .task;
+
+    for kind in [
+        CommandKind::RecordCheck {
+            check_id: CheckId::from("tests"),
+            passed: true,
+            source,
+        },
+        CommandKind::RejectVerification,
+    ] {
+        let disguised_worker = command(&task, actor("worker", ActorRole::Verifier), kind);
+        assert!(matches!(
+            apply(&task, &disguised_worker, clock(50)),
+            Err(Rejection::Unauthorized { .. })
+        ));
+    }
+}
+
+#[test]
 fn completion_rejects_missing_or_stale_evidence() {
     let task = verifying_task();
     let source = SourceIdentity::from("git-tree:abc123");
@@ -460,6 +542,48 @@ fn worker_cannot_change_acceptance_checks() {
         apply(&task, &add_check, clock(30)),
         Err(Rejection::Unauthorized { .. })
     ));
+}
+
+#[test]
+fn acceptance_checks_are_frozen_after_claim() {
+    for task in [
+        {
+            let ready = ready_task();
+            apply(
+                &ready,
+                &command(
+                    &ready,
+                    actor("worker", ActorRole::Worker),
+                    CommandKind::Claim {
+                        attempt_id: AttemptId::from("attempt-1"),
+                        worker: ActorId::from("worker"),
+                        lease_duration_ms: LEASE_MS,
+                        worker_margin_ms: MARGIN_MS,
+                        recovery_grace_ms: 250,
+                    },
+                ),
+                clock(10),
+            )
+            .unwrap()
+            .task
+        },
+        running_task(),
+    ] {
+        let add_check = command(
+            &task,
+            actor("verifier", ActorRole::Verifier),
+            CommandKind::AddRequiredCheck {
+                check: RequiredCheck {
+                    id: CheckId::from("lint"),
+                    description: "clippy passes".to_owned(),
+                },
+            },
+        );
+        assert!(matches!(
+            apply(&task, &add_check, clock(30)),
+            Err(Rejection::IllegalTransition { .. })
+        ));
+    }
 }
 
 #[test]
