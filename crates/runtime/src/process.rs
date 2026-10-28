@@ -10,7 +10,7 @@ use nix::{
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command, sync::watch};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProcessSpec {
     pub executable: PathBuf,
     pub arguments: Vec<String>,
@@ -19,6 +19,21 @@ pub struct ProcessSpec {
     pub environment: BTreeMap<String, String>,
     pub timeout: Duration,
     pub output_limit: usize,
+}
+
+impl std::fmt::Debug for ProcessSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessSpec")
+            .field("executable", &self.executable)
+            .field("argument_count", &self.arguments.len())
+            .field(
+                "environment_keys",
+                &self.environment.keys().collect::<Vec<_>>(),
+            )
+            .field("timeout", &self.timeout)
+            .field("output_limit", &self.output_limit)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]

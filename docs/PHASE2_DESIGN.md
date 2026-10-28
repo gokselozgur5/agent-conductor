@@ -11,6 +11,13 @@ UI, host support and hardening remain in the delivery plan, not silently removed
 The seven-day soak cannot be proved in a single day; usability and full v1
 hardening acceptance must be reported separately.
 
+## Responsibility constraints
+
+Follow [RESPONSIBILITIES.md](RESPONSIBILITIES.md): each worker owns its assigned
+engineering work; Conductor coordinates, checks measure and an independent
+verifier reviews. Preserve SOLID boundaries without adding an unused framework.
+Prioritize the integrated acceptance workflow over additional standalone helpers.
+
 ## Runtime boundary
 
 Add `conductor-runtime` outside the pure domain. It owns validated attempt

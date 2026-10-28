@@ -29,7 +29,17 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+#[cfg(unix)]
+mod check_execution;
 mod clock;
+#[cfg(unix)]
+mod workflow;
+#[cfg(unix)]
+pub use workflow::{NativeWorkflowPlan, WorkflowOutcome};
+#[cfg(unix)]
+mod source_finalization;
+#[cfg(unix)]
+pub use check_execution::CheckWorkspace;
 #[cfg(unix)]
 mod execution;
 pub use clock::SystemClock;
@@ -44,13 +54,24 @@ pub trait Clock: Send + Sync + 'static {
     fn read(&self, boot_generation: u64) -> ClockReading;
 }
 
-#[derive(Clone)]
 pub struct PersistentControlService<C = SystemClock> {
     store: Store,
     boot_generation: u64,
     started_at: Instant,
     clock: Arc<C>,
     mutations: Arc<Mutex<()>>,
+}
+
+impl<C: Clock> Clone for PersistentControlService<C> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            boot_generation: self.boot_generation,
+            started_at: self.started_at,
+            clock: Arc::clone(&self.clock),
+            mutations: Arc::clone(&self.mutations),
+        }
+    }
 }
 
 impl PersistentControlService<SystemClock> {
@@ -2249,6 +2270,344 @@ mod effect_tests {
                 .expect("fence status")
         );
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn native_terminal_observation_binds_output_and_blocks_invalid_results() {
+        use agent_conductor_store::{EffectAudit, ExecutionState};
+        use conductor_runtime::{AdapterKind, PacketAcknowledgement, RunnerEvent};
+        use std::os::unix::fs::PermissionsExt;
+        for (valid, replace_packet) in [(true, false), (false, false), (true, true)] {
+            let (directory, store) = lifecycle_store().await;
+            let service =
+                PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                    .await
+                    .expect("service");
+            let (_, token) = claim_task(&service).await;
+            store
+                .claim_effect(
+                    &token,
+                    "runner",
+                    10000,
+                    EffectAudit {
+                        id: "native-claim",
+                        actor_id: "runtime",
+                        correlation_id: &token,
+                        now_ms: 100,
+                    },
+                )
+                .await
+                .expect("claim");
+            let row = store.task("task").await.unwrap().unwrap();
+            let task = serde_json::from_str(&row.aggregate_json).unwrap();
+            service
+                .apply_row(
+                    row,
+                    lifecycle_command(
+                        &task,
+                        Actor {
+                            id: ActorId("worker".into()),
+                            role: ActorRole::Worker,
+                        },
+                        CommandKind::Start {
+                            attempt_id: AttemptId("attempt".into()),
+                            lease_epoch: 1,
+                        },
+                        "start-native",
+                    ),
+                )
+                .await
+                .unwrap();
+            let workspace = directory.path().join("work");
+            fs::create_dir(&workspace).unwrap();
+            fs::write(workspace.join("result.txt"), "candidate source").unwrap();
+            let mut input = runtime_launch(&workspace);
+            input.packet.contract.authority.allow_workspace_commands = false;
+            input.packet.contract.adapter.kind = AdapterKind::Claude;
+            let ready = serde_json::to_string(&RunnerEvent::Ready {
+                acknowledgement: PacketAcknowledgement {
+                    version: 1,
+                    attempt_id: "attempt".into(),
+                    lease_epoch: 1,
+                    packet_sha256: input.packet.sha256().expect("hash"),
+                    instruction_sha256: vec![],
+                },
+            })
+            .expect("ready");
+            let stdout = if valid {
+                b"{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[\"Read\",\"Write\",\"Edit\",\"Glob\",\"Grep\"]}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"candidate only\"}\n".to_vec()
+            } else {
+                b"truncated".to_vec()
+            };
+            let finished = serde_json::to_string(&RunnerEvent::Finished {
+                exit_code: Some(0),
+                stdout,
+                stderr: vec![],
+            })
+            .expect("terminal");
+            let wrapper = directory.path().join("peer.sh");
+            // Tests service lifecycle semantics, not vendor identity or sandboxing.
+            fs::write(&wrapper, format!("#!/bin/sh\nread -r launch\nprintf '%s\\n' '{ready}'\nread -r release\nprintf '%s\\n' '{finished}'\n")).expect("peer");
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("mode");
+            let (record, connection) = service
+                .launch_execution(&wrapper, &input, &token, "runner")
+                .await
+                .expect("release");
+            let mut packet = input.packet.clone();
+            if replace_packet {
+                packet.objective = "different task text".into();
+            }
+            let result = service
+                .await_native_execution(
+                    &token,
+                    record.wrapper_identity.as_deref().expect("identity"),
+                    &packet,
+                    connection,
+                )
+                .await;
+            let persisted = store
+                .execution(&token)
+                .await
+                .expect("read")
+                .expect("record");
+            if replace_packet {
+                assert!(result.is_err());
+                assert_eq!(persisted.state, ExecutionState::Started);
+            } else if valid {
+                let (observed, mut candidate) = result.expect("candidate");
+                assert_eq!(candidate.text, "candidate only");
+                assert_eq!(observed.state, ExecutionState::Exited);
+                assert_eq!(persisted, observed);
+                candidate.file_only_tools = false;
+                assert!(
+                    service
+                        .finalize_native_source(
+                            &token,
+                            &candidate,
+                            &directory.path().join("refused"),
+                            &[]
+                        )
+                        .await
+                        .is_err()
+                );
+                assert!(!directory.path().join("refused").exists());
+                assert!(store.has_unfenced_execution("task").await.unwrap());
+                candidate.file_only_tools = true;
+                let captured = service
+                    .finalize_native_source(
+                        &token,
+                        &candidate,
+                        &directory.path().join("final"),
+                        &[],
+                    )
+                    .await
+                    .expect("capture and bind");
+                assert_eq!(captured.entries.len(), 1);
+                let row = store.task("task").await.unwrap().unwrap();
+                let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+                assert_eq!(task.state, TaskState::Verifying);
+                assert_eq!(
+                    task.verification.unwrap().source.unwrap().0,
+                    format!("snapshot:{}", captured.sha256().unwrap())
+                );
+            } else {
+                assert!(result.is_err());
+                assert_eq!(persisted.state, ExecutionState::Blocked);
+            }
+            assert_eq!(
+                store.has_unfenced_execution("task").await.unwrap(),
+                !valid || replace_packet
+            );
+            let row = store.task("task").await.expect("task").expect("row");
+            let task: Task = serde_json::from_str(&row.aggregate_json).expect("aggregate");
+            assert_ne!(task.state, TaskState::Completed);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    // Keep the complete persisted lifecycle and cancellation race visible together.
+    #[allow(clippy::too_many_lines)]
+    async fn runtime_checks_publish_bound_evidence_but_reject_concurrent_cancellation() {
+        use agent_conductor_domain::{CheckId, RequiredCheck, SourceIdentity};
+        use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionUpdate};
+        use conductor_runtime::{CheckDefinition, CheckOutcome, snapshot_paths};
+        for cancel in [false, true] {
+            let (directory, store) = lifecycle_store().await;
+            let service =
+                PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                    .await
+                    .expect("service");
+            let operator = Actor {
+                id: ActorId("operator".into()),
+                role: ActorRole::Operator,
+            };
+            let worker = Actor {
+                id: ActorId("worker".into()),
+                role: ActorRole::Worker,
+            };
+            let row = store.task("task").await.unwrap().unwrap();
+            let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+            service
+                .apply_row(
+                    row,
+                    lifecycle_command(
+                        &task,
+                        operator.clone(),
+                        CommandKind::AddRequiredCheck {
+                            check: RequiredCheck {
+                                id: CheckId("test".into()),
+                                description: "fixture test".into(),
+                            },
+                        },
+                        "require-test",
+                    ),
+                )
+                .await
+                .unwrap();
+            let (_, token) = claim_task(&service).await;
+            let audit = |id| EffectAudit {
+                id,
+                actor_id: "runtime",
+                correlation_id: &token,
+                now_ms: 100,
+            };
+            store
+                .claim_effect(&token, "runner", 10000, audit("claim-runtime"))
+                .await
+                .unwrap();
+            let source = directory.path().join("source");
+            fs::create_dir(&source).unwrap();
+            fs::write(source.join("input"), "original").unwrap();
+            let inventory = vec!["input".into()];
+            let digest = snapshot_paths(&source, &directory.path().join("capture"), &inventory)
+                .unwrap()
+                .sha256()
+                .unwrap();
+            let mut input = runtime_launch(directory.path());
+            input.packet.contract.checks = vec![CheckDefinition {
+                id: "test".into(),
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "echo started > marker; sleep 0.3; test \"$(cat input)\" = original".into(),
+                ],
+                timeout_ms: 5000,
+            }];
+            let record = store
+                .prepare_execution(
+                    &ExecutionPreparation {
+                        effect_token: token.clone(),
+                        task_id: "task".into(),
+                        attempt_id: "attempt".into(),
+                        lease_epoch: 1,
+                        runner_id: "runner".into(),
+                        packet_json: serde_json::to_string(&input.packet).unwrap(),
+                        packet_sha256: input.packet.sha256().unwrap(),
+                    },
+                    audit("prepare-runtime"),
+                )
+                .await
+                .unwrap();
+            // Fixture has no actual writer; production requires its own fence evidence.
+            store
+                .update_execution(
+                    &token,
+                    record.revision,
+                    "fence-fixture",
+                    &ExecutionUpdate::Fenced {
+                        reason: "no writer launched by fixture".into(),
+                    },
+                    audit("fence-runtime"),
+                )
+                .await
+                .unwrap();
+            for (actor, kind, key) in [
+                (
+                    worker.clone(),
+                    CommandKind::Start {
+                        attempt_id: AttemptId("attempt".into()),
+                        lease_epoch: 1,
+                    },
+                    "start",
+                ),
+                (
+                    worker,
+                    CommandKind::BeginVerification {
+                        attempt_id: AttemptId("attempt".into()),
+                        lease_epoch: 1,
+                    },
+                    "verify",
+                ),
+                (
+                    Actor {
+                        id: ActorId("runtime".into()),
+                        role: ActorRole::System,
+                    },
+                    CommandKind::BindVerificationSource {
+                        source: SourceIdentity(format!("snapshot:{digest}")),
+                    },
+                    "bind",
+                ),
+            ] {
+                let row = store.task("task").await.unwrap().unwrap();
+                let task = serde_json::from_str(&row.aggregate_json).unwrap();
+                service
+                    .apply_row(row, lifecycle_command(&task, actor, kind, key))
+                    .await
+                    .unwrap();
+            }
+            let workspace = CheckWorkspace {
+                source,
+                inventory,
+                destination: directory.path().join("check"),
+                toolchain_roots: vec![],
+            };
+            let (_sender, receiver) = tokio::sync::watch::channel(false);
+            let execute = service.execute_required_check(&token, "test", &workspace, receiver);
+            let interrupt = async {
+                if cancel {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while !workspace.destination.join("tree/marker").exists() {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("check started");
+                    let _guard = service.mutations.lock().await;
+                    let row = store.task("task").await.unwrap().unwrap();
+                    let task = serde_json::from_str(&row.aggregate_json).unwrap();
+                    service
+                        .apply_row(
+                            row,
+                            lifecycle_command(&task, operator, CommandKind::Cancel, "cancel-check"),
+                        )
+                        .await
+                        .unwrap();
+                }
+            };
+            let (result, ()) = tokio::join!(execute, interrupt);
+            let row = store.task("task").await.unwrap().unwrap();
+            let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+            if cancel {
+                assert!(result.is_err());
+                assert_eq!(task.state, TaskState::Cancelled);
+                assert!(task.verification.unwrap().checks.is_empty());
+            } else {
+                assert_eq!(result.unwrap().outcome, CheckOutcome::Passed);
+                assert_eq!(task.state, TaskState::Verifying);
+                let verification = task.verification.unwrap();
+                assert_eq!(verification.checks.len(), 1);
+                assert!(verification.checks[0].passed);
+                assert_eq!(
+                    verification.checks[0].recorded_by.0,
+                    "conductor-check-executor"
+                );
+                assert!(verification.verdict.is_none());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn restart_blocks_unobserved_runtime_intent_without_spawning_or_losing_packet() {
         use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionState};

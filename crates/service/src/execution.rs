@@ -25,10 +25,44 @@ impl<C: Clock> PersistentControlService<C> {
         effect_token: &str,
         runner_id: &str,
     ) -> Result<(ExecutionRecord, RunnerConnection), StoreError> {
-        let _guard = self.mutations.lock().await;
         if launch.packet.contract.adapter.kind != AdapterKind::Fake {
-            return Err(runtime_error("vendor isolation is not accepted"));
+            return Err(runtime_error(
+                "native adapters require a pinned launch entry",
+            ));
         }
+        self.launch_execution(wrapper, launch, effect_token, runner_id)
+            .await
+    }
+
+    /// Launches a pinned native writer admitted by its runtime adapter. Its authentication
+    /// environment is forwarded only through the private wrapper pipe, never SQL.
+    /// Command-capable writers remain refused pending descendant fencing evidence.
+    /// The pin must be selected by trusted daemon configuration, not worker text.
+    /// # Errors
+    /// Refuses unsupported writer capabilities, stale identity or failed release.
+    pub async fn launch_native_execution(
+        &self,
+        wrapper: &Path,
+        pin: &conductor_runtime::VendorPin,
+        packet: &ResumePacket,
+        authentication: std::collections::BTreeMap<String, String>,
+        effect_token: &str,
+        runner_id: &str,
+    ) -> Result<(ExecutionRecord, RunnerConnection), StoreError> {
+        let launch = conductor_runtime::native_writer_launch(pin, packet, authentication)
+            .map_err(|_| runtime_error("native writer adapter refused the contract"))?;
+        self.launch_execution(wrapper, &launch, effect_token, runner_id)
+            .await
+    }
+
+    pub(super) async fn launch_execution(
+        &self,
+        wrapper: &Path,
+        launch: &RunnerLaunch,
+        effect_token: &str,
+        runner_id: &str,
+    ) -> Result<(ExecutionRecord, RunnerConnection), StoreError> {
+        let _guard = self.mutations.lock().await;
         self.validate_runtime_owner(&launch.packet).await?;
         let packet_json =
             serde_json::to_string(&launch.packet).map_err(|_| runtime_error("packet encoding"))?;
@@ -138,6 +172,95 @@ impl<C: Clock> PersistentControlService<C> {
             .renew(deadline)
             .await
             .map_err(|_| runtime_error("wrapper renewal failed"))
+    }
+
+    /// Drives a released native connection while renewing only current ownership.
+    /// Records candidate exit or a blocked failure; it never completes the task.
+    /// # Errors
+    /// Refuses stale/cancelled ownership, malformed output and failed processes.
+    /// Uncertain outcomes remain durable and block reassignment.
+    pub async fn await_native_execution(
+        &self,
+        token: &str,
+        wrapper_identity: &str,
+        packet: &ResumePacket,
+        mut connection: RunnerConnection,
+    ) -> Result<(ExecutionRecord, conductor_runtime::VendorCandidate), StoreError> {
+        if packet
+            .sha256()
+            .map_err(|_| runtime_error("invalid native packet"))?
+            != connection.packet_sha256()
+        {
+            return Err(runtime_error(
+                "native result packet differs from released packet",
+            ));
+        }
+        let mut timer = tokio::time::interval(std::time::Duration::from_millis(200));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let terminal = loop {
+            tokio::select! {
+                event = connection.event() => break event.ok(),
+                _ = timer.tick() => {
+                    if self.renew_controlled_execution(token,wrapper_identity,&mut connection).await.is_err() {
+                        let _ = self.stop_controlled_execution(token,wrapper_identity,connection).await;
+                        return Err(runtime_error("native execution lost current task ownership"));
+                    }
+                }
+            }
+        };
+        let settled = connection.wait().await.is_ok();
+        let _guard = self.mutations.lock().await;
+        let record = self
+            .validate_execution_connection(token, wrapper_identity, &connection)
+            .await?;
+        let current = self.validate_runtime_owner(packet).await.is_ok();
+        let candidate = match terminal {
+            Some(RunnerEvent::Finished {
+                exit_code,
+                stdout,
+                stderr,
+            }) if settled && current => conductor_runtime::interpret_vendor_output(
+                packet,
+                &conductor_runtime::ProcessOutput {
+                    exit_code,
+                    stdout,
+                    stderr,
+                },
+            )
+            .ok(),
+            _ => None,
+        };
+        let update = if candidate.is_some() {
+            ExecutionUpdate::Exited {
+                wrapper_identity: wrapper_identity.into(),
+                exit_code: Some(0),
+            }
+        } else {
+            ExecutionUpdate::Blocked {
+                reason: "native terminal output or ownership was not accepted".into(),
+            }
+        };
+        let audit_id = Uuid::now_v7().to_string();
+        let record = self
+            .store
+            .update_execution(
+                token,
+                record.revision,
+                &format!("native-result:{wrapper_identity}"),
+                &update,
+                EffectAudit {
+                    id: &audit_id,
+                    actor_id: "conductor-runtime",
+                    correlation_id: token,
+                    now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+                },
+            )
+            .await?;
+        Ok((
+            record,
+            candidate
+                .ok_or_else(|| runtime_error("native result blocked; inspect execution record"))?,
+        ))
     }
 
     /// Requests stop and records the observed result without completing the task.

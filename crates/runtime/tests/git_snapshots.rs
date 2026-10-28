@@ -1,0 +1,91 @@
+#![cfg(unix)]
+use conductor_runtime::{SnapshotError, snapshot_git};
+use std::{fs, path::Path, process::Command};
+
+fn git(root: &Path, args: &[&str]) -> Vec<u8> {
+    let output = Command::new("/usr/bin/git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(root)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+        .output()
+        .expect("git fixture");
+    assert!(output.status.success(), "git fixture command failed");
+    output.stdout
+}
+fn repository(root: &Path) {
+    fs::create_dir(root).expect("root");
+    git(root, &["init", "-q"]);
+    fs::write(root.join("tracked"), b"committed").expect("tracked");
+    fs::write(root.join("deleted"), b"committed deletion candidate").expect("deleted");
+    fs::write(root.join(".gitignore"), b"ignored\n").expect("ignore");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "fixture"]);
+}
+
+#[tokio::test]
+async fn git_snapshot_preserves_index_head_dirty_tracked_and_untracked_files() {
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source");
+    repository(&source);
+    fs::write(source.join("tracked"), b"staged").expect("stage change");
+    git(&source, &["add", "tracked"]);
+    fs::write(source.join("tracked"), b"unstaged dirty bytes").expect("dirty");
+    fs::remove_file(source.join("deleted")).expect("fixture deletion");
+    fs::write(source.join("untracked"), b"new work").expect("new");
+    fs::write(source.join("ignored"), b"excluded fixture").expect("ignored");
+    let index = fs::read(source.join(".git/index")).expect("index");
+    let head = git(&source, &["rev-parse", "HEAD"]);
+    let target = directory.path().join("snapshot");
+    let snapshot = snapshot_git(&source, &target).await.expect("snapshot");
+    assert_eq!(
+        snapshot.starting_head.as_bytes(),
+        head.strip_suffix(b"\n").expect("newline")
+    );
+    assert_eq!(fs::read(source.join(".git/index")).expect("index"), index);
+    assert_eq!(git(&source, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read(target.join("tree/tracked")).expect("copy"),
+        b"unstaged dirty bytes"
+    );
+    assert_eq!(
+        fs::read(target.join("tree/untracked")).expect("copy"),
+        b"new work"
+    );
+    assert!(!target.join("tree/ignored").exists());
+    assert!(!target.join("tree/.git").exists());
+    assert!(
+        snapshot
+            .manifest
+            .entries
+            .iter()
+            .any(|entry| entry.path == "deleted" && entry.sha256.is_none())
+    );
+    assert!(target.join("git-snapshot.json").exists());
+}
+
+#[tokio::test]
+async fn sparse_checkout_refuses_instead_of_recording_omitted_files_as_deletions() {
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source");
+    repository(&source);
+    git(&source, &["config", "core.sparseCheckout", "true"]);
+    let target = directory.path().join("snapshot");
+    assert!(matches!(
+        snapshot_git(&source, &target).await,
+        Err(SnapshotError::Unsupported)
+    ));
+    assert!(!target.exists());
+}
