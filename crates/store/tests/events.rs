@@ -447,3 +447,94 @@ async fn state_effect_and_ack_succeed_or_roll_back_together() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn hook_baseline_and_deliveries_commit_together_or_not_at_all() {
+    use agent_conductor_store::RepositoryObservation;
+    let (directory, store) = store_with_agents(&["source", "consumer"]).await;
+    let limits = EventLimits::default();
+    store
+        .upsert_event_subscription(&subscription("watch-sub", "consumer"))
+        .await
+        .unwrap();
+    let mut observation = RepositoryObservation {
+        id: "watch",
+        config_json: "{}",
+        expected_version: None,
+        snapshot_json: "{\"before\":true}",
+        now_ms: 100,
+    };
+    store
+        .publish_repository_observation(&observation, &[], &limits)
+        .await
+        .unwrap();
+    observation.expected_version = Some(0);
+    observation.snapshot_json = "{\"after\":true}";
+    let good = event("watch-1", "source", 0, None);
+    let bad = event("watch-2", "missing-source", 0, None);
+    assert!(
+        store
+            .publish_repository_observation(&observation, &[good.clone(), bad], &limits)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .repository_observation("watch")
+            .await
+            .unwrap()
+            .unwrap(),
+        ("{}".into(), 0, "{\"before\":true}".into())
+    );
+    assert!(
+        store
+            .claim_event_delivery("consumer", 100, &limits)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store
+        .publish_repository_observation(&observation, std::slice::from_ref(&good), &limits)
+        .await
+        .unwrap();
+    // A replay with a stale baseline cannot publish extra events or advance it.
+    assert!(matches!(
+        store
+            .publish_repository_observation(&observation, &[good], &limits)
+            .await,
+        Err(EventStoreError::ConsumerStateConflict)
+    ));
+    let reopened = Store::open(directory.path().join("events.sqlite"))
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .repository_observation("watch")
+            .await
+            .unwrap()
+            .unwrap(),
+        ("{}".into(), 1, "{\"after\":true}".into())
+    );
+    assert!(
+        reopened
+            .claim_event_delivery("consumer", 100, &limits)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        reopened
+            .claim_event_delivery("consumer", 100, &limits)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    observation.expected_version = Some(1);
+    observation.config_json = "{\"other_root\":true}";
+    assert!(matches!(
+        reopened
+            .publish_repository_observation(&observation, &[], &limits)
+            .await,
+        Err(EventStoreError::ConsumerStateConflict)
+    ));
+}

@@ -27,7 +27,7 @@ pub use effects::{EffectAudit, EffectRecord, EffectStatus};
 mod events;
 pub use events::{
     ConsumerStateEffect, EVENT_SCHEMA_VERSION, EventDelivery, EventLimits, EventSourceIdentity,
-    EventStoreError, EventSubscription, PublishResult, SemanticEvent,
+    EventStoreError, EventSubscription, PublishResult, RepositoryObservation, SemanticEvent,
 };
 
 #[derive(Debug, Error)]

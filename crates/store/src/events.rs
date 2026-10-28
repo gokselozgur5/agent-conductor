@@ -139,6 +139,15 @@ pub enum EventStoreError {
     NumericRange,
 }
 
+/// Bound request for atomic hook-event publication and baseline advancement.
+pub struct RepositoryObservation<'a> {
+    pub id: &'a str,
+    pub config_json: &'a str,
+    pub expected_version: Option<i64>,
+    pub snapshot_json: &'a str,
+    pub now_ms: i64,
+}
+
 impl Store {
     /// Adds or replaces a durable semantic subscription.
     pub async fn upsert_event_subscription(
@@ -173,6 +182,68 @@ impl Store {
         let mut writer = self.inner.writer.lock().await;
         writer.execute("BEGIN IMMEDIATE").await?;
         let result = publish_in_transaction(&mut writer, event, limits).await;
+        finish_event_transaction(&mut writer, result).await
+    }
+
+    /// Reads the last atomically published repository observation.
+    pub async fn repository_observation(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, i64, String)>, EventStoreError> {
+        Ok(sqlx::query_as(
+            "SELECT config_json,version,snapshot_json FROM repository_observations WHERE id=?",
+        )
+        .bind(id)
+        .fetch_optional(&self.inner.readers)
+        .await?)
+    }
+
+    /// Commits a bounded hook batch and its new baseline in the same transaction.
+    /// A failed event or stale baseline rolls back every delivery and observation.
+    /// Config identity is immutable; an empty initial batch establishes baseline.
+    pub async fn publish_repository_observation(
+        &self,
+        observation: &RepositoryObservation<'_>,
+        events: &[SemanticEvent],
+        limits: &EventLimits,
+    ) -> Result<(), EventStoreError> {
+        if observation.id.is_empty()
+            || observation.id.len() > 128
+            || observation.config_json.len() > 16_384
+            || observation.snapshot_json.len() > 8 * 1024 * 1024
+            || events.len() > 256
+            || observation.expected_version.is_none() && !events.is_empty()
+        {
+            return Err(EventStoreError::InvalidPayload);
+        }
+        for json in [observation.config_json, observation.snapshot_json] {
+            serde_json::from_str::<serde_json::Value>(json)
+                .map_err(|_| EventStoreError::InvalidPayload)?;
+        }
+        for event in events {
+            validate_event(event, limits)?;
+        }
+        let version = match observation.expected_version {
+            Some(v) if v >= 0 => v.checked_add(1).ok_or(EventStoreError::NumericRange)?,
+            None => 0,
+            _ => return Err(EventStoreError::NumericRange),
+        };
+        let mut writer = self.inner.writer.lock().await;
+        writer.execute("BEGIN IMMEDIATE").await?;
+        let result = async {
+            let stored: Option<(String,i64)> = sqlx::query_as("SELECT config_json,version FROM repository_observations WHERE id=?")
+                .bind(observation.id).fetch_optional(&mut *writer).await?;
+            match (stored, observation.expected_version) {
+                (None,None) => {},
+                (Some((config,current)),Some(expected)) if config == observation.config_json && current == expected => {},
+                _ => return Err(EventStoreError::ConsumerStateConflict),
+            }
+            for event in events { publish_in_transaction(&mut writer,event,limits).await?; }
+            sqlx::query("INSERT INTO repository_observations(id,config_json,version,snapshot_json,updated_at_ms) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET version=excluded.version,snapshot_json=excluded.snapshot_json,updated_at_ms=excluded.updated_at_ms")
+                .bind(observation.id).bind(observation.config_json).bind(version)
+                .bind(observation.snapshot_json).bind(observation.now_ms).execute(&mut *writer).await?;
+            Ok(())
+        }.await;
         finish_event_transaction(&mut writer, result).await
     }
 
