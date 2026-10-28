@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use conductor_cli::{exit_code, send};
+use conductor_cli::{response_exit_code, send};
 use conductor_protocol::{
     ConsumerStateInput, EventSubscriptionInput, Request, RequestEnvelope, Response, ResponseResult,
     SemanticEventInput,
@@ -91,6 +91,7 @@ async fn main() {
         }
     };
 
+    let status = response_exit_code(&response);
     if cli.json {
         match serde_json::to_string_pretty(&response) {
             Ok(json) => println!("{json}"),
@@ -101,6 +102,9 @@ async fn main() {
         }
     } else {
         print_human(response.result);
+    }
+    if status != 0 {
+        std::process::exit(status);
     }
 }
 
@@ -207,7 +211,6 @@ fn print_human(result: ResponseResult) {
         ResponseResult::Ok(response) => println!("{response:?}"),
         ResponseResult::Error(error) => {
             eprintln!("{:?}: {}", error.code, error.message);
-            std::process::exit(exit_code(error.code));
         }
     }
 }

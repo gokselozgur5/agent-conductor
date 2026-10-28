@@ -441,7 +441,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                 for row in rows {
                     out.push(Self::task_response(row)?);
                 }
-                Ok(Response::Tasks(out))
+                Ok(Response::Tasks { tasks: out })
             }
             Request::ApplyCommand { task_id, command } => {
                 let _guard = self.mutations.lock().await;

@@ -1,7 +1,7 @@
 use std::io;
 use std::path::Path;
 
-use conductor_protocol::{ErrorCode, RequestEnvelope, ResponseEnvelope};
+use conductor_protocol::{ErrorCode, RequestEnvelope, ResponseEnvelope, ResponseResult};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -68,6 +68,18 @@ pub const fn exit_code(code: ErrorCode) -> i32 {
     }
 }
 
+/// Returns the process exit status represented by a daemon response.
+///
+/// Successful payloads map to zero. Structured errors retain the same stable
+/// status in human and JSON output modes.
+#[must_use]
+pub const fn response_exit_code(response: &ResponseEnvelope) -> i32 {
+    match &response.result {
+        ResponseResult::Ok(_) => 0,
+        ResponseResult::Error(error) => exit_code(error.code),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +92,23 @@ mod tests {
         assert_eq!(exit_code(ErrorCode::Unavailable), 4);
         assert_eq!(exit_code(ErrorCode::InvariantViolation), 5);
         assert_eq!(exit_code(ErrorCode::Internal), 6);
+    }
+
+    #[test]
+    fn response_status_is_independent_of_output_mode() {
+        let request = RequestEnvelope::new(conductor_protocol::Request::Health);
+        for (code, expected) in [
+            (ErrorCode::Validation, 2),
+            (ErrorCode::Conflict, 3),
+            (ErrorCode::Unavailable, 4),
+            (ErrorCode::InvariantViolation, 5),
+            (ErrorCode::Internal, 6),
+        ] {
+            let response = ResponseEnvelope::failure(
+                Some(&request),
+                conductor_protocol::ErrorBody::new(code, "test error"),
+            );
+            assert_eq!(response_exit_code(&response), expected);
+        }
     }
 }

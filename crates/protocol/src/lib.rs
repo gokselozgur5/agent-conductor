@@ -156,7 +156,9 @@ pub enum Response {
         id: String,
     },
     Task(TaskResponse),
-    Tasks(Vec<TaskResponse>),
+    Tasks {
+        tasks: Vec<TaskResponse>,
+    },
     CommandApplied(CommandAppliedResponse),
     EventSubscribed {
         subscription_id: String,
@@ -394,5 +396,60 @@ mod tests {
         let error = serde_json::from_value::<Request>(value)
             .expect_err("caller-supplied identity must be rejected");
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    fn sample_task_response() -> TaskResponse {
+        TaskResponse {
+            project_id: "project-1".into(),
+            objective: "prove list framing".into(),
+            priority: 7,
+            authority: serde_json::json!({"mode": "test"}),
+            aggregate: Box::new(Task::new("task-1".into(), vec![])),
+        }
+    }
+
+    #[test]
+    fn every_response_variant_round_trips() {
+        let task = sample_task_response();
+        let responses = vec![
+            Response::Health(HealthResponse {
+                status: HealthStatus::Ready,
+                boot_generation: 1,
+                uptime_millis: 2,
+            }),
+            Response::Invariants(InvariantResponse {
+                healthy: true,
+                violations: vec![],
+            }),
+            Response::ProjectRegistered { id: "p".into() },
+            Response::AgentRegistered { id: "a".into() },
+            Response::Task(task.clone()),
+            Response::Tasks { tasks: vec![] },
+            Response::Tasks {
+                tasks: vec![task.clone()],
+            },
+            Response::CommandApplied(CommandAppliedResponse {
+                task,
+                replayed: false,
+                effect_tokens: vec!["effect-1".into()],
+            }),
+            Response::EventSubscribed {
+                subscription_id: "subscription-1".into(),
+            },
+            Response::EventPublished(EventPublishedResponse {
+                event_id: "event-1".into(),
+                fanout: 1,
+                duplicate: false,
+            }),
+            Response::EventDelivery { delivery: None },
+            Response::EventAcknowledged {
+                delivery_id: "delivery-1".into(),
+            },
+        ];
+        for response in responses {
+            let json = serde_json::to_string(&response).expect("response serializes");
+            let decoded: Response = serde_json::from_str(&json).expect("response parses");
+            assert_eq!(decoded, response);
+        }
     }
 }

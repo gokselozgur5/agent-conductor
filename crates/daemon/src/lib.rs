@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use conductor_protocol::{ErrorBody, ErrorCode, RequestEnvelope, ResponseEnvelope};
@@ -16,8 +17,10 @@ use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 pub const MAX_FRAME_BYTES: u64 = 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
@@ -95,6 +98,9 @@ pub struct LocalServer<S> {
     guard: SocketGuard,
     permits: Arc<Semaphore>,
     read_timeout: Duration,
+    write_timeout: Duration,
+    max_response_bytes: usize,
+    retained_tasks: Arc<AtomicUsize>,
 }
 
 impl<S> LocalServer<S>
@@ -108,19 +114,40 @@ where
     /// Returns an I/O error if the parent is absent, the socket is already in
     /// use, permissions cannot be restricted, or binding otherwise fails.
     pub fn bind(path: impl AsRef<Path>, service: S) -> Result<Self, DaemonError> {
-        Self::bind_with_config(
+        Self::bind_with_limits(
             path,
             service,
             MAX_CONCURRENT_CONNECTIONS,
             REQUEST_READ_TIMEOUT,
+            RESPONSE_WRITE_TIMEOUT,
+            MAX_RESPONSE_BYTES,
         )
     }
 
+    #[cfg(test)]
     fn bind_with_config(
         path: impl AsRef<Path>,
         service: S,
         max_connections: usize,
         read_timeout: Duration,
+    ) -> Result<Self, DaemonError> {
+        Self::bind_with_limits(
+            path,
+            service,
+            max_connections,
+            read_timeout,
+            read_timeout,
+            MAX_RESPONSE_BYTES,
+        )
+    }
+
+    fn bind_with_limits(
+        path: impl AsRef<Path>,
+        service: S,
+        max_connections: usize,
+        read_timeout: Duration,
+        write_timeout: Duration,
+        max_response_bytes: usize,
     ) -> Result<Self, DaemonError> {
         use std::os::unix::fs::PermissionsExt;
 
@@ -134,7 +161,15 @@ where
             guard: SocketGuard { path },
             permits: Arc::new(Semaphore::new(max_connections)),
             read_timeout,
+            write_timeout,
+            max_response_bytes,
+            retained_tasks: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    #[cfg(test)]
+    fn retained_tasks(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.retained_tasks)
     }
 
     /// Serves requests until shutdown, then cancels accepted read-only requests.
@@ -152,6 +187,9 @@ where
             guard: _guard,
             permits,
             read_timeout,
+            write_timeout,
+            max_response_bytes,
+            retained_tasks,
         } = self;
         let mut tasks = JoinSet::new();
         tokio::pin!(shutdown);
@@ -160,14 +198,27 @@ where
             tokio::select! {
                 biased;
                 () = &mut shutdown => break,
+                joined = tasks.join_next(), if !tasks.is_empty() => {
+                    retained_tasks.fetch_sub(1, Ordering::Relaxed);
+                    if let Some(Err(error)) = joined {
+                        debug!(%error, "local client task failed");
+                    }
+                },
                 accepted = listener.accept() => {
                     let (stream, _) = accepted?;
                     match Arc::clone(&permits).try_acquire_owned() {
                         Ok(permit) => {
                             let service = Arc::clone(&service);
+                            retained_tasks.fetch_add(1, Ordering::Relaxed);
                             tasks.spawn(async move {
                                 let _permit = permit;
-                                if let Err(error) = serve_connection(stream, service.as_ref(), read_timeout).await {
+                                if let Err(error) = serve_connection(
+                                    stream,
+                                    service.as_ref(),
+                                    read_timeout,
+                                    write_timeout,
+                                    max_response_bytes,
+                                ).await {
                                     debug!(%error, "local client connection failed");
                                 }
                             });
@@ -182,6 +233,7 @@ where
 
         drop(listener);
         tasks.shutdown().await;
+        retained_tasks.store(0, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -190,6 +242,8 @@ async fn serve_connection<S>(
     mut stream: UnixStream,
     service: &S,
     read_timeout: Duration,
+    write_timeout: Duration,
+    max_response_bytes: usize,
 ) -> Result<(), io::Error>
 where
     S: ControlService,
@@ -213,6 +267,8 @@ where
                     None,
                     ErrorBody::new(ErrorCode::Unavailable, "request read timed out"),
                 ),
+                write_timeout,
+                max_response_bytes,
             )
             .await;
         }
@@ -239,17 +295,39 @@ where
         }
     };
 
-    write_response(&mut stream, &response).await
+    write_response(&mut stream, &response, write_timeout, max_response_bytes).await
 }
 
 async fn write_response(
     stream: &mut UnixStream,
     response: &ResponseEnvelope,
+    write_timeout: Duration,
+    max_response_bytes: usize,
 ) -> Result<(), io::Error> {
     let mut output = serde_json::to_vec(response).map_err(io::Error::other)?;
+    if output.len().saturating_add(1) > max_response_bytes {
+        let bounded = ResponseEnvelope {
+            result: conductor_protocol::ResponseResult::Error(ErrorBody::new(
+                ErrorCode::Unavailable,
+                "response exceeds frame limit",
+            )),
+            ..response.clone()
+        };
+        output = serde_json::to_vec(&bounded).map_err(io::Error::other)?;
+    }
+    if output.len().saturating_add(1) > max_response_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "response frame limit cannot contain an error envelope",
+        ));
+    }
     output.push(b'\n');
-    stream.write_all(&output).await?;
-    stream.shutdown().await
+    tokio::time::timeout(write_timeout, async {
+        stream.write_all(&output).await?;
+        stream.shutdown().await
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "response write timed out"))?
 }
 
 fn reject_overloaded(stream: &UnixStream) {
@@ -273,10 +351,10 @@ mod tests {
     };
     use agent_conductor_store::Store;
     use conductor_protocol::{
-        ConsumerStateInput, EventSubscriptionInput, HealthStatus, Request, Response,
-        ResponseResult, SemanticEventInput,
+        ConsumerStateInput, ErrorBody, EventSubscriptionInput, HealthResponse, HealthStatus,
+        Request, Response, ResponseResult, SemanticEventInput, TaskResponse,
     };
-    use conductor_service::{InMemoryControlService, PersistentControlService};
+    use conductor_service::{ControlService, InMemoryControlService, PersistentControlService};
     use tokio::sync::oneshot;
     use uuid::Uuid;
 
@@ -301,6 +379,45 @@ mod tests {
             .await
             .expect("response reads");
         serde_json::from_slice(&response).expect("response is structured JSON")
+    }
+
+    #[derive(Clone)]
+    struct LargeResponseService;
+
+    impl ControlService for LargeResponseService {
+        async fn handle(&self, request: Request) -> Result<Response, ErrorBody> {
+            if matches!(request, Request::Health) {
+                return Ok(Response::Health(HealthResponse {
+                    status: HealthStatus::Ready,
+                    boot_generation: 1,
+                    uptime_millis: 0,
+                }));
+            }
+            if matches!(request, Request::ListTasks { .. }) {
+                return Ok(Response::Tasks {
+                    tasks: vec![TaskResponse {
+                        project_id: "project".into(),
+                        objective: "listed".into(),
+                        priority: 0,
+                        authority: serde_json::json!({}),
+                        aggregate: Box::new(agent_conductor_domain::Task::new(
+                            "listed-task".into(),
+                            vec![],
+                        )),
+                    }],
+                });
+            }
+            Ok(Response::Task(TaskResponse {
+                project_id: "project".into(),
+                objective: "x".repeat(900_000),
+                priority: 0,
+                authority: serde_json::json!({}),
+                aggregate: Box::new(agent_conductor_domain::Task::new(
+                    "large-task".into(),
+                    vec![],
+                )),
+            }))
+        }
     }
 
     #[tokio::test]
@@ -331,6 +448,31 @@ mod tests {
             .expect("daemon task joins")
             .expect("daemon exits cleanly");
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn task_lists_round_trip_through_the_real_socket() {
+        let path = socket_path();
+        let server = LocalServer::bind(&path, LargeResponseService).expect("socket binds");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        let request = RequestEnvelope::new(Request::ListTasks { project_id: None });
+        let response = exchange(
+            &path,
+            &serde_json::to_vec(&request).expect("request serializes"),
+        )
+        .await;
+        let ResponseResult::Ok(Response::Tasks { tasks }) = response.result else {
+            panic!("task list failed to round trip")
+        };
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].aggregate.id.0, "listed-task");
+
+        shutdown_tx.send(()).expect("shutdown sends");
+        task.await.expect("daemon joins").expect("daemon stops");
     }
 
     #[tokio::test]
@@ -465,6 +607,126 @@ mod tests {
             .expect("shutdown remains bounded")
             .expect("daemon joins")
             .expect("daemon exits cleanly");
+    }
+
+    #[tokio::test]
+    async fn unread_responses_time_out_and_release_connection_permits() {
+        let path = socket_path();
+        let server = LocalServer::bind_with_limits(
+            &path,
+            LargeResponseService,
+            2,
+            Duration::from_secs(1),
+            Duration::from_millis(40),
+            MAX_RESPONSE_BYTES,
+        )
+        .expect("socket binds");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        let request = RequestEnvelope::new(Request::GetTask {
+            task_id: "large-task".into(),
+        });
+        let body = serde_json::to_vec(&request).expect("request serializes");
+        let mut unread = Vec::new();
+        for _ in 0..2 {
+            let mut client = UnixStream::connect(&path).await.expect("client connects");
+            client.write_all(&body).await.expect("request writes");
+            client.shutdown().await.expect("request half-closes");
+            unread.push(client);
+        }
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let health = RequestEnvelope::new(Request::Health);
+        let response = exchange(
+            &path,
+            &serde_json::to_vec(&health).expect("health serializes"),
+        )
+        .await;
+        assert!(matches!(
+            response.result,
+            ResponseResult::Ok(Response::Health(_))
+        ));
+
+        drop(unread);
+        shutdown_tx.send(()).expect("shutdown sends");
+        task.await.expect("daemon joins").expect("daemon stops");
+    }
+
+    #[tokio::test]
+    async fn oversized_responses_become_bounded_structured_errors() {
+        let path = socket_path();
+        let server = LocalServer::bind_with_limits(
+            &path,
+            LargeResponseService,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            512,
+        )
+        .expect("socket binds");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+        let request = RequestEnvelope::new(Request::GetTask {
+            task_id: "large-task".into(),
+        });
+        let response = exchange(
+            &path,
+            &serde_json::to_vec(&request).expect("request serializes"),
+        )
+        .await;
+        let ResponseResult::Error(error) = response.result else {
+            panic!("oversized response was sent")
+        };
+        assert_eq!(error.code, ErrorCode::Unavailable);
+        assert_eq!(response.request_message_id, Some(request.message_id));
+
+        shutdown_tx.send(()).expect("shutdown sends");
+        task.await.expect("daemon joins").expect("daemon stops");
+    }
+
+    #[tokio::test]
+    async fn completed_connection_tasks_are_reaped_during_operation() {
+        let path = socket_path();
+        let server = LocalServer::bind_with_config(
+            &path,
+            InMemoryControlService::new(1),
+            4,
+            Duration::from_secs(1),
+        )
+        .expect("socket binds");
+        let retained = server.retained_tasks();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run_until(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        for _ in 0..128 {
+            let request = RequestEnvelope::new(Request::Health);
+            let response = exchange(
+                &path,
+                &serde_json::to_vec(&request).expect("request serializes"),
+            )
+            .await;
+            assert!(matches!(
+                response.result,
+                ResponseResult::Ok(Response::Health(_))
+            ));
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while retained.load(Ordering::Relaxed) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completed tasks are reaped");
+
+        shutdown_tx.send(()).expect("shutdown sends");
+        task.await.expect("daemon joins").expect("daemon stops");
     }
 
     #[tokio::test]
