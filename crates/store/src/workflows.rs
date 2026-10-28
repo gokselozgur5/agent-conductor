@@ -18,6 +18,18 @@ pub struct WorkflowDispatch {
 }
 const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version, auto_recovery_count, EXISTS(SELECT 1 FROM workflow_wakes w WHERE w.task_id=workflow_dispatch.task_id AND w.delivery_id IS NULL) AS waiting_for_event, EXISTS(SELECT 1 FROM workflow_dependencies d WHERE d.task_id=workflow_dispatch.task_id AND d.accepted_source IS NULL) AS waiting_for_dependencies FROM workflow_dispatch";
 impl Store {
+    /// Coalesced scheduling hints; durable eligibility remains authoritative.
+    /// Subscribe before scanning, then mark seen before each scan to retain
+    /// commits that race the scan-to-wait boundary. Restart requires a full scan.
+    #[must_use]
+    pub fn dispatch_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.inner.dispatch_changes.subscribe()
+    }
+
+    pub(crate) fn signal_dispatch(&self) {
+        self.inner.dispatch_changes.send_replace(());
+    }
+
     /// Persists one immutable operator-approved plan, replaying identical input.
     /// # Errors
     /// Rejects collisions, invalid bounds and queue capacity exhaustion.
@@ -67,7 +79,9 @@ impl Store {
             }
             Ok(())
         }.await;
-        finish_transaction(writer, result).await
+        finish_transaction(writer, result).await?;
+        self.signal_dispatch();
+        Ok(())
     }
     /// Reads the persisted trigger as bounded untrusted task context.
     /// # Errors
@@ -188,6 +202,7 @@ impl Store {
                 "dispatch is not available for continuation".into(),
             ));
         }
+        self.signal_dispatch();
         Ok(())
     }
 
@@ -214,6 +229,9 @@ impl Store {
         let mut writer = self.inner.writer.lock().await;
         let changed=sqlx::query("UPDATE workflow_dispatch SET status='queued',resume_version=?,auto_recovery_count=1,outcome_json=NULL,updated_at_ms=? WHERE task_id=? AND status='needs_recovery' AND auto_recovery_count=0 AND (SELECT boot_generation FROM runtime_metadata WHERE singleton=1)=? AND (SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running'))<256")
             .bind(version).bind(now).bind(task_id).bind(generation).execute(&mut *writer).await?.rows_affected();
+        if changed == 1 {
+            self.signal_dispatch();
+        }
         Ok(changed == 1)
     }
 
@@ -232,6 +250,27 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn admission_notifications_follow_success_and_continuation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path().join("notify.sqlite3"))
+            .await
+            .unwrap();
+        let boot = store.start_runtime(1).await.unwrap().boot_generation;
+        let mut changes = store.dispatch_changes();
+        store.enqueue_workflow("task", "{}", 2).await.unwrap();
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        assert!(store.enqueue_workflow("task", "[]", 3).await.is_err());
+        assert!(!changes.has_changed().unwrap());
+        store.claim_workflow(boot, 4).await.unwrap().unwrap();
+        store.finish_workflow("task", boot, "{}", 5).await.unwrap();
+        store.requeue_workflow("task", 1, 6).await.unwrap();
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        assert!(store.requeue_workflow("task", 1, 7).await.is_err());
+        assert!(!changes.has_changed().unwrap());
+    }
     #[tokio::test]
     async fn automatic_recovery_is_once_only_and_boot_bound() {
         let root = tempfile::tempdir().unwrap();
