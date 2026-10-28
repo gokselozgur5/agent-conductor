@@ -48,8 +48,12 @@ class HostRecoveryIntegration(unittest.TestCase):
                     for _ in range(100):
                         self.assertIsNone(child.poll())
                         result = subprocess.run(command + ['status'], capture_output=True, text=True, timeout=5)
-                        if result.returncode == 0 and json.loads(result.stdout)['health']['status'] == 'ready':
-                            return child
+                        if result.returncode == 0:
+                            health = json.loads(result.stdout)['health']
+                            # The launcher's temporary bootstrap also reports ready.
+                            # Wait for the final daemon with observation enabled.
+                            if health['status'] == 'ready' and health['repository_watcher'] == 'running':
+                                return child
                         time.sleep(.1)
                     self.fail('readiness timeout')
                 except BaseException:
