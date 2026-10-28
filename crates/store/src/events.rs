@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{Executor, Row, SqliteConnection};
+use sqlx::{Connection, Row, SqliteConnection};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -179,10 +179,10 @@ impl Store {
         limits: &EventLimits,
     ) -> Result<PublishResult, EventStoreError> {
         validate_event(event, limits)?;
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = publish_in_transaction(&mut writer, event, limits).await;
-        finish_event_transaction(&mut writer, result).await
+        finish_event_transaction(writer, result).await
     }
 
     /// Reads the last atomically published repository observation.
@@ -228,8 +228,8 @@ impl Store {
             None => 0,
             _ => return Err(EventStoreError::NumericRange),
         };
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             let stored: Option<(String,i64)> = sqlx::query_as("SELECT config_json,version FROM repository_observations WHERE id=?")
                 .bind(observation.id).fetch_optional(&mut *writer).await?;
@@ -244,7 +244,7 @@ impl Store {
                 .bind(observation.snapshot_json).bind(observation.now_ms).execute(&mut *writer).await?;
             Ok(())
         }.await;
-        finish_event_transaction(&mut writer, result).await
+        finish_event_transaction(writer, result).await
     }
 
     /// Claims one delivery. An expired lease is deliberately replayable.
@@ -257,8 +257,8 @@ impl Store {
         let lease_expires_at_ms = now_ms
             .checked_add(limits.delivery_lease_ms)
             .ok_or(EventStoreError::NumericRange)?;
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             expire_stale_in_transaction(&mut writer, now_ms).await?;
             let row = sqlx::query(
@@ -284,7 +284,7 @@ impl Store {
             Ok(Some(delivery_from_row(delivery_id, attempts, claim_token, lease_expires_at_ms, &row)?))
         }
         .await;
-        finish_event_transaction(&mut writer, result).await
+        finish_event_transaction(writer, result).await
     }
 
     /// Applies Conductor-owned consumer state and acknowledges a delivery in one commit.
@@ -299,8 +299,8 @@ impl Store {
         if serde_json::from_str::<serde_json::Value>(&effect.value_json).is_err() {
             return Err(EventStoreError::InvalidPayload);
         }
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             expire_stale_in_transaction(&mut writer, now_ms).await?;
             let current_claim: Option<i64> = sqlx::query_scalar(
@@ -358,7 +358,7 @@ impl Store {
             Ok(())
         }
         .await;
-        finish_event_transaction(&mut writer, result).await
+        finish_event_transaction(writer, result).await
     }
 
     pub async fn consumer_state(
@@ -610,20 +610,10 @@ fn event_matches_row(
 }
 
 async fn finish_event_transaction<T>(
-    connection: &mut SqliteConnection,
+    transaction: sqlx::Transaction<'_, sqlx::Sqlite>,
     result: Result<T, EventStoreError>,
 ) -> Result<T, EventStoreError> {
-    match result {
-        Ok(value) => match connection.execute("COMMIT").await {
-            Ok(_) => Ok(value),
-            Err(error) => {
-                let _ = connection.execute("ROLLBACK").await;
-                Err(EventStoreError::Database(error))
-            }
-        },
-        Err(error) => {
-            let _ = connection.execute("ROLLBACK").await;
-            Err(error)
-        }
-    }
+    let value = result?;
+    transaction.commit().await?;
+    Ok(value)
 }

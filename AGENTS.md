@@ -22,6 +22,6 @@ This repository is an English-only, local-first agent coordination control plane
 - Own async write transactions with SQLx `Transaction` so cancellation rolls back
   on drop. A result-based rollback helper does not cover an aborted future.
   Use a deterministic cancellation regression when changing transaction ownership;
-  issue #43 tracks the remaining manual-transaction audit.
+  see docs/STORE_TRANSACTIONS.md for the completed owner inventory and boundaries.
 - Keep adapters outside the state machine. Vendor behavior must not define task truth.
 - Run formatting, lint, tests, and secret checks before each atomic commit.

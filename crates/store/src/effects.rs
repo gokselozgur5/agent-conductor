@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, Row};
+use sqlx::{Connection, Row};
 
 use super::{Store, StoreError, finish_transaction};
 
@@ -222,8 +222,8 @@ impl Store {
     where
         F: FnOnce(&mut EffectRecord) -> Result<&'static str, StoreError>,
     {
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             let mut record = fetch_effect(&mut *writer, token)
                 .await?
@@ -256,7 +256,7 @@ impl Store {
             Ok(record)
         }
         .await;
-        finish_transaction(&mut writer, result).await
+        finish_transaction(writer, result).await
     }
 }
 

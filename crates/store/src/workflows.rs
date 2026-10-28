@@ -1,7 +1,7 @@
 //! Durable dispatch admission and ownership, separate from task acceptance.
 use crate::{Store, StoreError, finish_transaction};
 use serde::Serialize;
-use sqlx::{Executor, FromRow};
+use sqlx::{Connection, FromRow};
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct WorkflowDispatch {
@@ -32,8 +32,8 @@ impl Store {
                 "invalid workflow admission bounds".into(),
             ));
         }
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             let existing: Option<String> = sqlx::query_scalar("SELECT plan_json FROM workflow_dispatch WHERE task_id = ?").bind(task_id).fetch_optional(&mut *writer).await?;
             if let Some(existing) = existing {
@@ -67,7 +67,7 @@ impl Store {
             }
             Ok(())
         }.await;
-        finish_transaction(&mut writer, result).await
+        finish_transaction(writer, result).await
     }
     /// Reads the persisted trigger as bounded untrusted task context.
     /// # Errors
@@ -91,8 +91,8 @@ impl Store {
     ) -> Result<Option<WorkflowDispatch>, StoreError> {
         let generation =
             i64::try_from(generation).map_err(|_| StoreError::BootGenerationOverflow)?;
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             let current: i64 = sqlx::query_scalar("SELECT boot_generation FROM runtime_metadata WHERE singleton = 1").fetch_one(&mut *writer).await?;
             if current != generation { return Err(StoreError::Integrity("stale dispatcher boot".into())); }
@@ -129,7 +129,7 @@ impl Store {
                 Ok(Some(row))
             } else { Ok(None) }
         }.await;
-        finish_transaction(&mut writer, result).await
+        finish_transaction(writer, result).await
     }
     /// Marks old claims for explicit reconciliation, never automatic relaunch.
     /// # Errors
