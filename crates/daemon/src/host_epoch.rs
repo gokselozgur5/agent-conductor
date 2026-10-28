@@ -64,12 +64,14 @@ impl HostEpoch {
 
     #[cfg(target_os = "linux")]
     pub async fn current() -> io::Result<Self> {
-        use std::io::Read;
-        fn bounded(path: &str) -> io::Result<String> {
+        use tokio::io::AsyncReadExt;
+        async fn bounded(path: &str) -> io::Result<String> {
             let mut text = String::new();
-            std::fs::File::open(path)?
+            tokio::fs::File::open(path)
+                .await?
                 .take(65)
-                .read_to_string(&mut text)?;
+                .read_to_string(&mut text)
+                .await?;
             if text.len() > 64 {
                 return Err(invalid());
             }
@@ -77,8 +79,8 @@ impl HostEpoch {
         }
         Self::from_native(
             "linux",
-            &bounded("/etc/machine-id")?,
-            &bounded("/proc/sys/kernel/random/boot_id")?,
+            &bounded("/etc/machine-id").await?,
+            &bounded("/proc/sys/kernel/random/boot_id").await?,
         )
     }
 
