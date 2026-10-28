@@ -45,3 +45,22 @@ verification still belong to the service integration. Disposable check trees
 remain for inspection; this command does not delete them. A normal process exit
 does not prove all descendants are gone, but their writable authority is limited
 to that disposable check tree. Never reuse it as verification source or evidence.
+
+## Service publication
+
+The internal `PersistentControlService::execute_required_check` port connects the
+executor to durable task state. It loads exact argv from the persisted attempt
+packet rather than taking a command from worker output. It requires the execution
+to be fenced, no remaining unfenced execution for the task, the same current
+attempt/worker/epoch, a required check and a bound `snapshot:<sha256>` source.
+
+After execution it reloads those bindings under the lifecycle mutation lock and
+requires the task version to be unchanged. Only then does it transactionally
+record `RecordCheck` as `conductor-check-executor`, with the hash-bound receipt in
+the command audit reason. Runtime nonpassing outcomes record failed checks;
+capture/isolation failures and concurrent lifecycle changes publish no result.
+The real-process service regression covers successful publication and a task
+cancelled while its check is executing. Neither path records a verifier verdict.
+
+This internal port is not yet dispatched by the daemon scheduler or the local
+`run-check` command. The operator CLI remains a standalone check tool.

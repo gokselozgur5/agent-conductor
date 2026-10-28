@@ -119,3 +119,11 @@ copy under macOS isolation. Actual sandbox tests cover original-source write
 refusal, fresh copies, source mismatch, failed commands, timeout and cancellation.
 The real CLI completed a synthetic source check. This local command does not yet
 persist checks into daemon tasks. See [CHECK_EXECUTION.md](CHECK_EXECUTION.md).
+
+### Persistent check integration
+
+The service now executes checks from frozen attempt packets and records receipts
+through the authoritative lifecycle transaction. It requires confirmed writer
+fencing and a matching bound snapshot; a task mutation during execution prevents
+publication. A real-process cancellation race regression passed. Native task
+orchestration and independent verification remain unfinished.

@@ -29,7 +29,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+#[cfg(unix)]
+mod check_execution;
 mod clock;
+#[cfg(unix)]
+pub use check_execution::CheckWorkspace;
 #[cfg(unix)]
 mod execution;
 pub use clock::SystemClock;
@@ -2345,6 +2349,190 @@ mod effect_tests {
             let row = store.task("task").await.expect("task").expect("row");
             let task: Task = serde_json::from_str(&row.aggregate_json).expect("aggregate");
             assert_ne!(task.state, TaskState::Completed);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    // Keep the complete persisted lifecycle and cancellation race visible together.
+    #[allow(clippy::too_many_lines)]
+    async fn runtime_checks_publish_bound_evidence_but_reject_concurrent_cancellation() {
+        use agent_conductor_domain::{CheckId, RequiredCheck, SourceIdentity};
+        use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionUpdate};
+        use conductor_runtime::{CheckDefinition, CheckOutcome, snapshot_paths};
+        for cancel in [false, true] {
+            let (directory, store) = lifecycle_store().await;
+            let service =
+                PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                    .await
+                    .expect("service");
+            let operator = Actor {
+                id: ActorId("operator".into()),
+                role: ActorRole::Operator,
+            };
+            let worker = Actor {
+                id: ActorId("worker".into()),
+                role: ActorRole::Worker,
+            };
+            let row = store.task("task").await.unwrap().unwrap();
+            let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+            service
+                .apply_row(
+                    row,
+                    lifecycle_command(
+                        &task,
+                        operator.clone(),
+                        CommandKind::AddRequiredCheck {
+                            check: RequiredCheck {
+                                id: CheckId("test".into()),
+                                description: "fixture test".into(),
+                            },
+                        },
+                        "require-test",
+                    ),
+                )
+                .await
+                .unwrap();
+            let (_, token) = claim_task(&service).await;
+            let audit = |id| EffectAudit {
+                id,
+                actor_id: "runtime",
+                correlation_id: &token,
+                now_ms: 100,
+            };
+            store
+                .claim_effect(&token, "runner", 10000, audit("claim-runtime"))
+                .await
+                .unwrap();
+            let source = directory.path().join("source");
+            fs::create_dir(&source).unwrap();
+            fs::write(source.join("input"), "original").unwrap();
+            let inventory = vec!["input".into()];
+            let digest = snapshot_paths(&source, &directory.path().join("capture"), &inventory)
+                .unwrap()
+                .sha256()
+                .unwrap();
+            let mut input = runtime_launch(directory.path());
+            input.packet.contract.checks = vec![CheckDefinition {
+                id: "test".into(),
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "echo started > marker; sleep 0.3; test \"$(cat input)\" = original".into(),
+                ],
+                timeout_ms: 5000,
+            }];
+            let record = store
+                .prepare_execution(
+                    &ExecutionPreparation {
+                        effect_token: token.clone(),
+                        task_id: "task".into(),
+                        attempt_id: "attempt".into(),
+                        lease_epoch: 1,
+                        runner_id: "runner".into(),
+                        packet_json: serde_json::to_string(&input.packet).unwrap(),
+                        packet_sha256: input.packet.sha256().unwrap(),
+                    },
+                    audit("prepare-runtime"),
+                )
+                .await
+                .unwrap();
+            // Fixture has no actual writer; production requires its own fence evidence.
+            store
+                .update_execution(
+                    &token,
+                    record.revision,
+                    "fence-fixture",
+                    &ExecutionUpdate::Fenced {
+                        reason: "no writer launched by fixture".into(),
+                    },
+                    audit("fence-runtime"),
+                )
+                .await
+                .unwrap();
+            for (actor, kind, key) in [
+                (
+                    worker.clone(),
+                    CommandKind::Start {
+                        attempt_id: AttemptId("attempt".into()),
+                        lease_epoch: 1,
+                    },
+                    "start",
+                ),
+                (
+                    worker,
+                    CommandKind::BeginVerification {
+                        attempt_id: AttemptId("attempt".into()),
+                        lease_epoch: 1,
+                    },
+                    "verify",
+                ),
+                (
+                    Actor {
+                        id: ActorId("runtime".into()),
+                        role: ActorRole::System,
+                    },
+                    CommandKind::BindVerificationSource {
+                        source: SourceIdentity(format!("snapshot:{digest}")),
+                    },
+                    "bind",
+                ),
+            ] {
+                let row = store.task("task").await.unwrap().unwrap();
+                let task = serde_json::from_str(&row.aggregate_json).unwrap();
+                service
+                    .apply_row(row, lifecycle_command(&task, actor, kind, key))
+                    .await
+                    .unwrap();
+            }
+            let workspace = CheckWorkspace {
+                source,
+                inventory,
+                destination: directory.path().join("check"),
+                toolchain_roots: vec![],
+            };
+            let (_sender, receiver) = tokio::sync::watch::channel(false);
+            let execute = service.execute_required_check(&token, "test", &workspace, receiver);
+            let interrupt = async {
+                if cancel {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while !workspace.destination.join("tree/marker").exists() {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("check started");
+                    let _guard = service.mutations.lock().await;
+                    let row = store.task("task").await.unwrap().unwrap();
+                    let task = serde_json::from_str(&row.aggregate_json).unwrap();
+                    service
+                        .apply_row(
+                            row,
+                            lifecycle_command(&task, operator, CommandKind::Cancel, "cancel-check"),
+                        )
+                        .await
+                        .unwrap();
+                }
+            };
+            let (result, ()) = tokio::join!(execute, interrupt);
+            let row = store.task("task").await.unwrap().unwrap();
+            let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+            if cancel {
+                assert!(result.is_err());
+                assert_eq!(task.state, TaskState::Cancelled);
+                assert!(task.verification.unwrap().checks.is_empty());
+            } else {
+                assert_eq!(result.unwrap().outcome, CheckOutcome::Passed);
+                assert_eq!(task.state, TaskState::Verifying);
+                let verification = task.verification.unwrap();
+                assert_eq!(verification.checks.len(), 1);
+                assert!(verification.checks[0].passed);
+                assert_eq!(
+                    verification.checks[0].recorded_by.0,
+                    "conductor-check-executor"
+                );
+                assert!(verification.verdict.is_none());
+            }
         }
     }
 
