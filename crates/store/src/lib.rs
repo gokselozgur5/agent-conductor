@@ -39,6 +39,10 @@ pub enum StoreError {
     },
     #[error("invalid database path")]
     InvalidPath,
+    #[error("database integrity check failed: {0}")]
+    Integrity(String),
+    #[error("boot generation overflow")]
+    BootGenerationOverflow,
 }
 
 #[derive(Clone)]
@@ -135,6 +139,28 @@ pub struct NewTask<'a> {
     pub created_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStartup {
+    pub boot_generation: u64,
+    pub started_at_ms: i64,
+    pub recovery_pending: Vec<RecoveryLease>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryLease {
+    pub task_id: String,
+    pub attempt_id: String,
+    pub epoch: u64,
+    pub recovery_window_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeInvariantViolation {
+    pub code: String,
+    pub summary: String,
+    pub context_json: String,
+}
+
 impl Store {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
@@ -213,6 +239,140 @@ impl Store {
         let result = persist_in_transaction(&mut writer, batch).await;
         finish_transaction(&mut writer, result).await
     }
+
+    /// Verifies the database and atomically begins a new daemon boot era.
+    ///
+    /// # Errors
+    ///
+    /// Refuses startup when SQLite reports corruption, dangling foreign keys,
+    /// the runtime singleton is missing, or the generation cannot advance.
+    pub async fn start_runtime(&self, started_at_ms: i64) -> Result<RuntimeStartup, StoreError> {
+        let mut writer = self.inner.writer.lock().await;
+        writer.execute("BEGIN IMMEDIATE").await?;
+        let result = async {
+            verify_integrity(&mut writer).await?;
+            let generation = sqlx::query_scalar::<_, i64>(
+                "UPDATE runtime_metadata SET boot_generation = boot_generation + 1, last_started_at_ms = ? WHERE singleton = 1 AND boot_generation < 9223372036854775807 RETURNING boot_generation",
+            )
+            .bind(started_at_ms)
+            .fetch_optional(&mut *writer)
+            .await?
+            .ok_or(StoreError::BootGenerationOverflow)?;
+            let boot_generation = u64::try_from(generation)
+                .map_err(|_| StoreError::Integrity("negative boot generation".to_owned()))?;
+            sqlx::query(
+                "UPDATE leases SET status = 'recovery_pending', boot_generation = ?, remaining_ms = MIN(remaining_ms, grace_ms), display_expires_at_ms = ? + MIN(remaining_ms, grace_ms) WHERE status IN ('active', 'recovery_pending')",
+            )
+            .bind(generation)
+            .bind(started_at_ms)
+            .execute(&mut *writer)
+            .await?;
+            let rows = sqlx::query_as::<_, (String, String, i64, i64)>(
+                "SELECT task_id, attempt_id, epoch, remaining_ms FROM leases WHERE status = 'recovery_pending' ORDER BY task_id",
+            )
+            .fetch_all(&mut *writer)
+            .await?;
+            let mut recovery_pending = Vec::with_capacity(rows.len());
+            for (task_id, attempt_id, epoch, recovery_window_ms) in rows {
+                recovery_pending.push(RecoveryLease {
+                    task_id,
+                    attempt_id,
+                    epoch: u64::try_from(epoch)
+                        .map_err(|_| StoreError::Integrity("negative lease epoch".to_owned()))?,
+                    recovery_window_ms: u64::try_from(recovery_window_ms).map_err(|_| {
+                        StoreError::Integrity("negative recovery window".to_owned())
+                    })?,
+                });
+            }
+            Ok(RuntimeStartup {
+                boot_generation,
+                started_at_ms,
+                recovery_pending,
+            })
+        }
+        .await;
+        finish_transaction(&mut writer, result).await
+    }
+
+    /// Reads persisted state and reports structural contradictions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the invariant snapshot cannot be read.
+    pub async fn check_runtime_invariants(
+        &self,
+    ) -> Result<Vec<RuntimeInvariantViolation>, StoreError> {
+        let mut violations = Vec::new();
+        let integrity: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
+            .fetch_all(&self.inner.readers)
+            .await?;
+        for result in integrity.into_iter().filter(|result| result != "ok") {
+            violations.push(RuntimeInvariantViolation {
+                code: "sqlite_integrity".to_owned(),
+                summary: "SQLite quick_check reported corruption".to_owned(),
+                context_json: serde_json::json!({"result": result}).to_string(),
+            });
+        }
+
+        let foreign_key_failures: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&self.inner.readers)
+                .await?;
+        if foreign_key_failures != 0 {
+            violations.push(RuntimeInvariantViolation {
+                code: "foreign_key_violation".to_owned(),
+                summary: "persisted rows contain dangling foreign keys".to_owned(),
+                context_json: serde_json::json!({"count": foreign_key_failures}).to_string(),
+            });
+        }
+
+        let runtime_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM runtime_metadata WHERE singleton = 1 AND boot_generation > 0",
+        )
+        .fetch_one(&self.inner.readers)
+        .await?;
+        if runtime_rows != 1 {
+            violations.push(RuntimeInvariantViolation {
+                code: "runtime_generation".to_owned(),
+                summary: "runtime boot generation is not initialized".to_owned(),
+                context_json: serde_json::json!({"valid_rows": runtime_rows}).to_string(),
+            });
+        }
+
+        let completed_with_live_lease: Vec<String> = sqlx::query_scalar(
+            "SELECT tasks.id FROM tasks JOIN leases ON leases.task_id = tasks.id WHERE tasks.state = 'completed' AND leases.status IN ('active', 'recovery_pending') ORDER BY tasks.id",
+        )
+        .fetch_all(&self.inner.readers)
+        .await?;
+        for task_id in completed_with_live_lease {
+            violations.push(RuntimeInvariantViolation {
+                code: "completed_with_live_lease".to_owned(),
+                summary: "completed task retains a live lease".to_owned(),
+                context_json: serde_json::json!({"task_id": task_id}).to_string(),
+            });
+        }
+
+        Ok(violations)
+    }
+}
+
+async fn verify_integrity(connection: &mut SqliteConnection) -> Result<(), StoreError> {
+    let results: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_all(&mut *connection)
+        .await?;
+    if results.as_slice() != ["ok"] {
+        return Err(StoreError::Integrity(results.join("; ")));
+    }
+    let foreign_key_failures: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+            .fetch_one(&mut *connection)
+            .await?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} foreign key violation(s)"
+        )));
+    }
+    Ok(())
 }
 
 async fn finish_transaction<T>(

@@ -1,3 +1,4 @@
+use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -5,6 +6,7 @@ use std::sync::Arc;
 
 use conductor_protocol::{ErrorBody, ErrorCode, RequestEnvelope, ResponseEnvelope};
 use conductor_service::ControlService;
+use fs2::FileExt;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -17,6 +19,55 @@ pub const MAX_FRAME_BYTES: u64 = 1024 * 1024;
 pub enum DaemonError {
     #[error("socket I/O failed: {0}")]
     Io(#[from] io::Error),
+    #[error("another daemon owns the runtime lock: {0}")]
+    RuntimeLocked(PathBuf),
+    #[error("refusing to replace a non-socket runtime path: {0}")]
+    UnsafeSocketPath(PathBuf),
+}
+
+/// Process-lifetime ownership for one local daemon socket.
+///
+/// The lock file remains on disk, but its kernel lock is released on process
+/// exit. Holding this guard makes it safe to remove a socket inode left by a
+/// crashed prior owner; regular files are never removed.
+pub struct RuntimeLock {
+    _file: File,
+}
+
+impl RuntimeLock {
+    /// Acquires exclusive daemon ownership and removes only a stale Unix socket.
+    ///
+    /// # Errors
+    ///
+    /// Fails when another process owns the lock, the lock cannot be opened, or
+    /// the requested socket path exists but is not a Unix socket.
+    pub fn acquire(
+        lock_path: impl AsRef<Path>,
+        socket_path: impl AsRef<Path>,
+    ) -> Result<Self, DaemonError> {
+        use std::os::unix::fs::FileTypeExt;
+
+        let lock_path = lock_path.as_ref().to_path_buf();
+        let socket_path = socket_path.as_ref().to_path_buf();
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        file.try_lock_exclusive()
+            .map_err(|_| DaemonError::RuntimeLocked(lock_path))?;
+
+        match std::fs::symlink_metadata(&socket_path) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                std::fs::remove_file(&socket_path)?;
+            }
+            Ok(_) => return Err(DaemonError::UnsafeSocketPath(socket_path)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(DaemonError::Io(error)),
+        }
+        Ok(Self { _file: file })
+    }
 }
 
 #[derive(Debug)]
@@ -121,7 +172,7 @@ where
     } else {
         match serde_json::from_slice::<RequestEnvelope>(&input) {
             Ok(request) => match request.validate() {
-                Ok(()) => match service.handle(request.payload.clone()) {
+                Ok(()) => match service.handle(request.payload.clone()).await {
                     Ok(payload) => ResponseEnvelope::success(&request, payload),
                     Err(error) => ResponseEnvelope::failure(Some(&request), error),
                 },
@@ -144,8 +195,9 @@ where
 mod tests {
     use std::time::Duration;
 
+    use agent_conductor_store::Store;
     use conductor_protocol::{HealthStatus, Request, Response, ResponseResult};
-    use conductor_service::InMemoryControlService;
+    use conductor_service::{InMemoryControlService, PersistentControlService};
     use tokio::sync::oneshot;
     use uuid::Uuid;
 
@@ -258,5 +310,76 @@ mod tests {
             .expect("daemon task joins")
             .expect("daemon exits cleanly");
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn persistent_health_advances_across_daemon_restarts() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("conductor.sqlite3");
+        let path = directory.path().join("conductor.sock");
+
+        for expected_generation in 1_u64..=2 {
+            let store = Store::open(&database).await.expect("store opens");
+            let started_at_ms = i64::try_from(expected_generation).expect("small generation") * 100;
+            let service = PersistentControlService::start(store, started_at_ms)
+                .await
+                .expect("runtime starts");
+            let server = LocalServer::bind(&path, service).expect("socket binds");
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let task = tokio::spawn(server.run_until(async move {
+                let _ = shutdown_rx.await;
+            }));
+
+            let request = RequestEnvelope::new(Request::Health);
+            let response = exchange(
+                &path,
+                &serde_json::to_vec(&request).expect("request serializes"),
+            )
+            .await;
+            let ResponseResult::Ok(Response::Health(health)) = response.result else {
+                panic!("unexpected response");
+            };
+            assert_eq!(health.status, HealthStatus::Ready);
+            assert_eq!(health.boot_generation, expected_generation);
+
+            shutdown_tx.send(()).expect("shutdown sends");
+            task.await
+                .expect("daemon task joins")
+                .expect("daemon exits cleanly");
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn runtime_lock_fences_second_owner_and_recovers_a_stale_socket() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let lock_path = directory.path().join("conductor.lock");
+        let socket_path = directory.path().join("conductor.sock");
+        let stale = std::os::unix::net::UnixListener::bind(&socket_path)
+            .expect("stale socket inode creates");
+        drop(stale);
+        assert!(socket_path.exists());
+
+        let first = RuntimeLock::acquire(&lock_path, &socket_path).expect("first owner locks");
+        assert!(!socket_path.exists());
+        let second = RuntimeLock::acquire(&lock_path, &socket_path);
+        assert!(matches!(second, Err(DaemonError::RuntimeLocked(_))));
+        drop(first);
+        RuntimeLock::acquire(&lock_path, &socket_path).expect("lock releases on drop");
+    }
+
+    #[test]
+    fn runtime_lock_never_removes_a_non_socket_path() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let lock_path = directory.path().join("conductor.lock");
+        let socket_path = directory.path().join("conductor.sock");
+        std::fs::write(&socket_path, b"operator data").expect("regular file creates");
+
+        let result = RuntimeLock::acquire(&lock_path, &socket_path);
+        assert!(matches!(result, Err(DaemonError::UnsafeSocketPath(_))));
+        assert_eq!(
+            std::fs::read(&socket_path).expect("regular file remains"),
+            b"operator data"
+        );
     }
 }
