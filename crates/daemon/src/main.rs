@@ -1,4 +1,5 @@
 mod dispatcher;
+mod host_epoch;
 mod recovery_authority;
 mod watch_signals;
 mod watcher;
@@ -19,6 +20,9 @@ use tracing_subscriber::EnvFilter;
     about = "Agent Conductor local daemon"
 )]
 struct Args {
+    /// Print application-specific native host/boot hashes without opening state.
+    #[arg(long)]
+    host_epoch: bool,
     #[arg(long, default_value = "state/conductor.sqlite3")]
     database: PathBuf,
     /// Observe explicitly configured repositories; never launches models directly.
@@ -49,6 +53,14 @@ async fn main() {
         .init();
 
     let args = Args::parse();
+    let host = read_host_epoch().await;
+    if args.host_epoch {
+        println!(
+            "{}",
+            serde_json::to_string(&host).expect("host epoch serializes")
+        );
+        return;
+    }
     let watches = args
         .watch_config
         .as_ref()
@@ -58,6 +70,13 @@ async fn main() {
             eprintln!("{message}");
             std::process::exit(1)
         });
+    let mut authority = match recovery_authority::Authority::acquire(&args.database, &host) {
+        Ok(authority) => authority,
+        Err(error) => {
+            eprintln!("failed to acquire recovery authority: {error}");
+            std::process::exit(1);
+        }
+    };
     if let Err(error) = ensure_parent(&args.database)
         .and_then(|()| ensure_parent(&args.socket))
         .and_then(|()| ensure_parent(&args.lock))
@@ -72,20 +91,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let mut authority = match recovery_authority::Authority::acquire(&args.database) {
-        Ok(authority) => authority,
-        Err(error) => {
-            eprintln!("failed to acquire recovery authority: {error}");
-            std::process::exit(1);
-        }
-    };
-    let started_at_ms = match unix_time_ms() {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("failed to read wall clock: {error}");
-            std::process::exit(1);
-        }
-    };
+    let started_at_ms = startup_time();
     let service = match start_service(&args.database, started_at_ms, &mut authority).await {
         Ok(service) => service,
         Err(error) => {
@@ -146,6 +152,15 @@ async fn main() {
     stop_board(board_stop, board_task).await;
 }
 
+async fn read_host_epoch() -> host_epoch::HostEpoch {
+    host_epoch::HostEpoch::current()
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("failed to read native host identity: {error}");
+            std::process::exit(1);
+        })
+}
+
 async fn start_service(
     database: &Path,
     started_at_ms: i64,
@@ -167,6 +182,13 @@ fn ensure_parent(path: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+fn startup_time() -> i64 {
+    unix_time_ms().unwrap_or_else(|error| {
+        eprintln!("failed to read wall clock: {error}");
+        std::process::exit(1);
+    })
 }
 
 fn unix_time_ms() -> Result<i64, std::time::SystemTimeError> {

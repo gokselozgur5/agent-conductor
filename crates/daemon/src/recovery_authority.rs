@@ -1,4 +1,5 @@
 //! External boot high-water mark. This does not itself prove orphan fencing.
+use crate::host_epoch::HostEpoch;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,6 +15,12 @@ struct Record {
     database: PathBuf,
     authority_id: String,
     generation_high_water: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host: Option<HostEpoch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_recovery: Option<serde_json::Value>,
 }
 
 pub struct Authority {
@@ -21,6 +28,7 @@ pub struct Authority {
     database: PathBuf,
     record: Option<Record>,
     _lock: File,
+    host: HostEpoch,
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -40,17 +48,60 @@ fn private(metadata: &fs::Metadata, directory: bool) -> io::Result<()> {
     Ok(())
 }
 
-impl Authority {
-    pub fn acquire(database: &Path) -> io::Result<Self> {
-        let parent = database
-            .parent()
-            .ok_or_else(|| invalid("database parent missing"))?;
-        let parent = if parent.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            parent
+fn validate_host(record: &Record, current: &HostEpoch) -> io::Result<()> {
+    match (record.version, &record.host) {
+        (1, None) if record.recovery.is_none() && record.completed_recovery.is_none() => (),
+        (2, Some(host)) => {
+            host.validate()?;
+            if !host.same_host(current) {
+                return Err(invalid("authority belongs to another host"));
+            }
         }
-        .canonicalize()?;
+        _ => return Err(invalid("authority host binding is incomplete")),
+    }
+    if record.recovery.is_some() {
+        return Err(invalid("runtime quarantined for prepared recovery"));
+    }
+    Ok(())
+}
+
+fn canonical_parent(database: &Path) -> io::Result<PathBuf> {
+    let parent = database
+        .parent()
+        .ok_or_else(|| invalid("database parent missing"))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    match parent.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let outer = parent
+                .parent()
+                .ok_or_else(|| invalid("authority parent missing"))?;
+            let outer = if outer.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                outer
+            };
+            if parent.symlink_metadata().is_ok() {
+                return Err(invalid("missing state has a symlink alias"));
+            }
+            Ok(outer.canonicalize()?.join(
+                parent
+                    .file_name()
+                    .ok_or_else(|| invalid("database parent missing"))?,
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+impl Authority {
+    pub fn acquire(database: &Path, host: &HostEpoch) -> io::Result<Self> {
+        host.validate()?;
+        let parent = canonical_parent(database)?;
         let database = parent.join(
             database
                 .file_name()
@@ -96,7 +147,7 @@ impl Authority {
                     return Err(invalid("authority record exceeds bound"));
                 }
                 let record: Record = serde_json::from_slice(&bytes)?;
-                if record.version != 1
+                if !matches!(record.version, 1 | 2)
                     || record.database != database
                     || record.authority_id.len() != 64
                     || !record
@@ -108,6 +159,7 @@ impl Authority {
                 {
                     return Err(invalid("authority record does not match this runtime"));
                 }
+                validate_host(&record, host)?;
                 Some(record)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound && created => None,
@@ -130,6 +182,7 @@ impl Authority {
             database,
             record,
             _lock: lock,
+            host: host.clone(),
         })
     }
 
@@ -152,7 +205,12 @@ impl Authority {
             database: self.database.clone(),
             authority_id: format!("{:x}", Sha256::digest(uuid::Uuid::now_v7().as_bytes())),
             generation_high_water: 0,
+            host: None,
+            recovery: None,
+            completed_recovery: None,
         });
+        record.version = 2;
+        record.host = Some(self.host.clone());
         record.generation_high_water = record
             .generation_high_water
             .max(database_generation)
@@ -188,6 +246,14 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    fn host() -> HostEpoch {
+        HostEpoch {
+            platform: "macos".into(),
+            host_id: "a".repeat(64),
+            boot_id: "b".repeat(64),
+        }
+    }
+
     fn fixture() -> (tempfile::TempDir, PathBuf) {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
@@ -200,12 +266,12 @@ mod tests {
     #[test]
     fn reservation_survives_database_rollback_and_unused_reservations() {
         let (_root, database) = fixture();
-        let mut authority = Authority::acquire(&database).unwrap();
+        let mut authority = Authority::acquire(&database, &host()).unwrap();
         let (id, first) = authority.reserve(None, 20).unwrap();
         assert_eq!(first, 21);
-        assert!(Authority::acquire(&database).is_err());
+        assert!(Authority::acquire(&database, &host()).is_err());
         drop(authority);
-        let mut authority = Authority::acquire(&database).unwrap();
+        let mut authority = Authority::acquire(&database, &host()).unwrap();
         // No database boot consumed 21; its external reservation still cannot repeat.
         assert_eq!(authority.reserve(Some(&id), 3).unwrap(), (id.clone(), 22));
         assert_eq!(authority.reserve(Some(&id), 40).unwrap(), (id, 41));
@@ -214,22 +280,22 @@ mod tests {
     #[test]
     fn missing_database_or_record_never_creates_fresh_authority() {
         let (_root, database) = fixture();
-        let mut authority = Authority::acquire(&database).unwrap();
+        let mut authority = Authority::acquire(&database, &host()).unwrap();
         authority.reserve(None, 1).unwrap();
         let record = authority.root.join("authority.json");
         drop(authority);
         fs::rename(&database, database.with_extension("retained")).unwrap();
-        assert!(Authority::acquire(&database).is_err());
+        assert!(Authority::acquire(&database, &host()).is_err());
         assert!(!database.exists());
         fs::rename(database.with_extension("retained"), &database).unwrap();
         fs::remove_file(record).unwrap();
-        assert!(Authority::acquire(&database).is_err());
+        assert!(Authority::acquire(&database, &host()).is_err());
     }
 
     #[test]
     fn changed_binding_and_overflow_preserve_record_bytes() {
         let (_root, database) = fixture();
-        let mut authority = Authority::acquire(&database).unwrap();
+        let mut authority = Authority::acquire(&database, &host()).unwrap();
         let (id, _) = authority.reserve(None, 1).unwrap();
         let path = authority.root.join("authority.json");
         let before = fs::read(&path).unwrap();
@@ -245,18 +311,41 @@ mod tests {
     #[test]
     fn record_links_permissions_and_corruption_are_refused() {
         let (_root, database) = fixture();
-        let mut authority = Authority::acquire(&database).unwrap();
+        let mut authority = Authority::acquire(&database, &host()).unwrap();
         authority.reserve(None, 1).unwrap();
         let path = authority.root.join("authority.json");
         drop(authority);
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(Authority::acquire(&database).is_err());
+        assert!(Authority::acquire(&database, &host()).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let other = path.with_extension("retained");
         fs::hard_link(&path, &other).unwrap();
-        assert!(Authority::acquire(&database).is_err());
+        assert!(Authority::acquire(&database, &host()).is_err());
         fs::remove_file(&other).unwrap();
         fs::write(&path, b"corrupt").unwrap();
-        assert!(Authority::acquire(&database).is_err());
+        assert!(Authority::acquire(&database, &host()).is_err());
+    }
+
+    #[test]
+    fn host_binding_and_quarantine_refuse_before_database_recreation() {
+        let (_root, database) = fixture();
+        let mut authority = Authority::acquire(&database, &host()).unwrap();
+        authority.reserve(None, 1).unwrap();
+        let path = authority.root.join("authority.json");
+        drop(authority);
+        let mut other = host();
+        other.host_id = "d".repeat(64);
+        assert!(Authority::acquire(&database, &other).is_err());
+        other = host();
+        other.boot_id = "e".repeat(64);
+        assert!(Authority::acquire(&database, &other).is_ok());
+        let mut record: Record = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record.recovery = Some(serde_json::json!({"id": "prepared"}));
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let state = database.parent().unwrap();
+        fs::rename(state, state.with_extension("retained")).unwrap();
+        let error = Authority::acquire(&database, &host()).err().unwrap();
+        assert!(error.to_string().contains("quarantined"));
+        assert!(!state.exists());
     }
 }

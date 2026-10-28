@@ -77,6 +77,11 @@ def main():
     restore.add_argument('--retain-current', type=Path, required=True)
     repair = sub.add_parser('repair-restore', help='repair an interrupted directory publication without launching tasks')
     repair.add_argument('--retained', type=Path, required=True)
+    prepare_recovery = sub.add_parser('prepare-recovery', help='quarantine startup and prepare same-host recovery; requires a later host restart')
+    prepare_recovery.add_argument('snapshot', type=Path)
+    prepare_recovery.add_argument('--retained', type=Path, required=True)
+    sub.add_parser('recover-state', help='finish prepared recovery after a verified host restart; never starts tasks')
+    sub.add_parser('cancel-recovery', help='cancel preparation before publication staging; never restores or starts work')
     sub.add_parser('status')
     inspect = sub.add_parser('inspect', help='show bounded advisory document references without model calls')
     inspect.add_argument('--workspace-root', type=Path)
@@ -131,6 +136,16 @@ def main():
         (state / 'plans').mkdir(mode=0o700)
         (state / 'artifacts').mkdir(mode=0o700)
         print(f'Initialized {state}\nRun tools/conductor --state {state} run --dispatch')
+        return
+    if args.command in ('prepare-recovery', 'recover-state', 'cancel-recovery'):
+        import disaster_recovery
+        if args.command == 'prepare-recovery':
+            result = disaster_recovery.prepare(state, args.snapshot, args.retained)
+        elif args.command == 'recover-state':
+            result = disaster_recovery.finish(state)
+        else:
+            result = disaster_recovery.cancel(state)
+        print(json.dumps(result, indent=2))
         return
     if args.command == 'repair-restore':
         from restore_publication import repair

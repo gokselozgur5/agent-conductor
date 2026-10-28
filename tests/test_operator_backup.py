@@ -58,7 +58,8 @@ class BackupTests(unittest.TestCase):
 
     def test_snapshot_preserves_bytes_modes_and_database(self):
         before = backup.inventory(self.state, backup.SKIP)
-        backup.backup(self.state, self.target)
+        result = backup.backup(self.state, self.target)
+        self.assertEqual(result['schema'], 17)
         manifest = json.loads((self.target / 'manifest.json').read_text())
         self.assertEqual(manifest['entries'], backup.inventory(self.target / 'state'))
         self.assertEqual(before, backup.inventory(self.state, backup.SKIP))

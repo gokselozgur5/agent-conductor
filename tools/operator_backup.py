@@ -218,7 +218,7 @@ def _backup(state, destination):
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-        return {'backup': str(destination), 'entries': len(manifest['entries']), 'schema': 16, 'limits': manifest['limits']}
+        return {'backup': str(destination), 'entries': len(manifest['entries']), 'schema': migrations[-1]['version'], 'limits': manifest['limits']}
 
 
 def verify(destination, external=False):

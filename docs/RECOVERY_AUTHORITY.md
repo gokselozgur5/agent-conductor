@@ -13,9 +13,10 @@ state. It is independent recovery infrastructure, not a disposable cache.
 
 ## Startup ordering
 
-1. Hold the existing runtime lock, then the independent authority lock for the
-   daemon's entire lifetime. Changing the socket or runtime-lock argument cannot
-   bypass the authority lock for the same canonical database.
+1. Read the native host/boot identity and acquire the independent authority lock
+   before creating runtime directories or acquiring the runtime lock. Refuse a
+   different host or a pending recovery request. Hold both locks for the daemon
+   lifetime; alternate socket/runtime-lock arguments cannot bypass quarantine.
 2. Open/migrate the database and read its authority binding and generation.
 3. Reserve `max(database_generation, external_high_water) + 1`. Publish the private
    record through a flushed temporary file and flush its directory and parent.
@@ -55,10 +56,13 @@ tools, whose schema verification remains exact.
 
 This record establishes generation history and exclusive daemon admission. It
 does **not** establish that a writer surviving a crashed daemon has stopped.
-No missing/corrupt-state restore or force flag is enabled by this change.
-Full recovery still needs a separately proven process ownership boundary, such
-as verified host restart with startup exclusion, plus a retained valid authority
-record. Cross-host relocation, simultaneous loss of state and authority, cloned
+The separate [prepared recovery workflow](DISASTER_RECOVERY.md) quarantines
+startup and requires a native boot transition on the same host before restoring
+missing/corrupt state. Authority format 2 binds that host and retains the recovery
+request outside state. Normal startup upgrades format 1; older binaries refuse
+format 2. Preserve matching tools and take a fresh snapshot after upgrading.
+Automated positive transitions are simulated; real host-restart acceptance
+remains pending under issue #59. Cross-host relocation, simultaneous loss of state and authority, cloned
 host identities and physical power-loss certification are not covered.
 
 The trusted local operator owns these files. Hashes and identifiers do not defend
