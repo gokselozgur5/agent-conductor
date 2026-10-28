@@ -77,8 +77,11 @@ worker expiry separately from owner margin and displays check/verdict provenance
 See [LEASE_OBSERVATION.md](LEASE_OBSERVATION.md) for snapshot/authority limits.
 Adapter-reported terminal usage is now retained per invocation and visible through
 the inventory; missing reports remain unknown. See [REPORTED_USAGE.md](REPORTED_USAGE.md).
+Repository-hook issue #19 now has a requirement-to-evidence acceptance matrix in
+[REPOSITORY_HOOKS.md](REPOSITORY_HOOKS.md), including real active instruction
+invalidation, fenced retained observation and bounded causal wake refusal.
 The working local workflow is not full v1 acceptance. Remaining work includes
-deeper execution evidence, abnormal ownership recovery,
+deeper execution evidence and broader recovery,
 host protocol/Thor/Linux isolation,
 load/restore/redaction validation and seven-day soak. Issue #20 retains an
 unresolved historical supervision deadline; do not infer a cause from green tests.
