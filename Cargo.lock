@@ -315,6 +315,7 @@ dependencies = [
  "conductor-runtime",
  "conductor-service",
  "fs2",
+ "nix",
  "notify",
  "serde",
  "serde_json",

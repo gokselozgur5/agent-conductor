@@ -1,4 +1,5 @@
 mod dispatcher;
+mod recovery_authority;
 mod watch_signals;
 mod watcher;
 use std::path::{Path, PathBuf};
@@ -71,6 +72,13 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let mut authority = match recovery_authority::Authority::acquire(&args.database) {
+        Ok(authority) => authority,
+        Err(error) => {
+            eprintln!("failed to acquire recovery authority: {error}");
+            std::process::exit(1);
+        }
+    };
     let started_at_ms = match unix_time_ms() {
         Ok(value) => value,
         Err(error) => {
@@ -78,14 +86,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let store = match Store::open(&args.database).await {
-        Ok(store) => store,
-        Err(error) => {
-            eprintln!("failed to open {}: {error}", args.database.display());
-            std::process::exit(1);
-        }
-    };
-    let service = match PersistentControlService::start(store, started_at_ms).await {
+    let service = match start_service(&args.database, started_at_ms, &mut authority).await {
         Ok(service) => service,
         Err(error) => {
             eprintln!("runtime startup checks failed: {error}");
@@ -143,6 +144,20 @@ async fn main() {
         let _ = task.await;
     }
     stop_board(board_stop, board_task).await;
+}
+
+async fn start_service(
+    database: &Path,
+    started_at_ms: i64,
+    authority: &mut recovery_authority::Authority,
+) -> Result<PersistentControlService, Box<dyn std::error::Error>> {
+    let store = Store::open(database).await?;
+    let (binding, generation) = store.runtime_authority().await?;
+    let (identity, generation) = authority.reserve(binding.as_deref(), generation)?;
+    Ok(
+        PersistentControlService::start_reserved(store, started_at_ms, &identity, generation)
+            .await?,
+    )
 }
 
 fn ensure_parent(path: &Path) -> std::io::Result<()> {

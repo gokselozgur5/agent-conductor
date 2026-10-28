@@ -47,6 +47,11 @@ Database packets retain absolute paths and identities. Do not relocate the state
 rewrite packet paths or start a second dispatcher from a copied database. New
 version 2 snapshots record external prerequisites for explicit `--external`
 verification; these records do not include external project/toolchain contents.
+Migration 17 snapshots also bind the independent recovery authority's stable
+identity and lock. Its high-water mark may advance and is not copied into the
+snapshot. Retain that external directory; see
+[RECOVERY_AUTHORITY.md](RECOVERY_AUTHORITY.md). Snapshot tools require their exact
+supported schema, so preserve matching tools for pre-upgrade snapshots.
 Recorded interrupted publications can now be repaired through `repair-restore`;
 full state-loss ownership and generation recovery remain open under issue #59.
 

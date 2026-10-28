@@ -12,6 +12,7 @@ import time
 import uuid
 import operator_backup as snapshot
 import recovery_dependencies
+import recovery_authority
 
 
 def generation(path):
@@ -47,6 +48,11 @@ def write_record(path, value):
 
 
 def restore(state, source, retained):
+    with recovery_authority.hold(state):
+        return _restore(state, source, retained)
+
+
+def _restore(state, source, retained):
     snapshot.private_root(state)
     source = source.expanduser().absolute()
     retained = retained.expanduser().absolute()

@@ -17,6 +17,14 @@ cover both rollback and completed-publication outcomes. See
 uncertain orphan writers, cross-host recovery and physical power-loss acceptance
 remain outside this repair; the full operational recovery issue remains open.
 
+Migration 17 binds daemon startup to an independent, locked generation record
+outside the replaceable state directory. Generations are reserved durably before
+SQLite boot recovery and remain consumed after failed startup or database
+rollback. Backup/restore/repair share that lock. See
+[RECOVERY_AUTHORITY.md](RECOVERY_AUTHORITY.md) for upgrade and retention rules.
+This establishes generation history, not proof that orphan writers have stopped;
+missing/corrupt-state restoration remains refused.
+
 Repository hooks now observe configured source repositories and owned attempt
 trees, debounce changes, flush normal accepted terminal captures and admit one
 approved subscribed workflow through atomic delivery acknowledgement. Advisory

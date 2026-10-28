@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 import stat
 import recovery_dependencies
+import recovery_authority
 
 MAX_FILES = 100000
 MAX_BYTES = 10 * 1024 ** 3
@@ -142,6 +143,11 @@ def flush_directories(root):
 
 
 def backup(state, destination):
+    with recovery_authority.hold(state):
+        return _backup(state, destination)
+
+
+def _backup(state, destination):
     private_root(state)
     if (state / 'ARCHIVED_STATE.json').exists():
         raise ValueError('retained archive is not a live operator state')
