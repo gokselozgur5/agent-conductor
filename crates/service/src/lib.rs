@@ -30,6 +30,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 mod clock;
+#[cfg(unix)]
+mod execution;
 pub use clock::SystemClock;
 
 pub trait ControlService: Send + Sync + 'static {
@@ -2067,5 +2069,119 @@ mod effect_tests {
             main_identity.git_common_dir_identity,
             worktree_identity.git_common_dir_identity
         );
+    }
+    fn runtime_launch(directory: &Path) -> conductor_runtime::RunnerLaunch {
+        serde_json::from_value(serde_json::json!({
+            "packet": {"contract": {
+                "version":1,"task_id":"task","attempt_id":"attempt","lease_epoch":1,"worker_id":"worker",
+                "adapter":{"kind":"fake","version":"v1","executable_sha256":"a".repeat(64),"conformance_sha256":"b".repeat(64)},
+                "workspace":directory,"starting_head":"c".repeat(40),
+                "authority":{"read_roots":[directory],"write_roots":[directory],"network":"denied","allow_workspace_commands":true},
+                "instructions":[],"checks":[],"max_runtime_ms":5000
+            },"objective":"fixture","checkpoint":null,"untrusted_context":[]},
+            "executable":"/bin/true","arguments":[],"environment":{},"output_limit":1024,"heartbeat_timeout_ms":1000
+        })).expect("runtime fixture")
+    }
+
+    #[tokio::test]
+    async fn runtime_ownership_uses_monotonic_deadline_not_sql_active_flag() {
+        let (directory, store) = lifecycle_store().await;
+        let clock = FixedClock::new(0);
+        let service = PersistentControlService::start_with_clock(store.clone(), 100, clock.clone())
+            .await
+            .expect("service");
+        claim_task(&service).await;
+        let input = runtime_launch(directory.path());
+        service
+            .validate_runtime_owner(&input.packet)
+            .await
+            .expect("current lease");
+        let mut wrong = input.packet.clone();
+        wrong.contract.worker_id = "other".into();
+        assert!(service.validate_runtime_owner(&wrong).await.is_err());
+        clock.set(10);
+        assert!(service.validate_runtime_owner(&input.packet).await.is_err());
+        let state: String =
+            sqlx::query_scalar("SELECT status FROM leases WHERE attempt_id = 'attempt'")
+                .fetch_one(store.readers())
+                .await
+                .expect("projection");
+        assert_eq!(
+            state, "active",
+            "expiry does not require maintenance to reject launch"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn controlled_launch_records_ack_refuses_replay_and_expired_renewal() {
+        use agent_conductor_store::{EffectAudit, ExecutionState};
+        use conductor_runtime::{PacketAcknowledgement, RunnerEvent};
+        use std::os::unix::fs::PermissionsExt;
+        let (directory, store) = lifecycle_store().await;
+        let clock = FixedClock::new(0);
+        let service = PersistentControlService::start_with_clock(store.clone(), 100, clock.clone())
+            .await
+            .expect("service");
+        let (_, token) = claim_task(&service).await;
+        store
+            .claim_effect(
+                &token,
+                "runner",
+                10000,
+                EffectAudit {
+                    id: "claim-runtime",
+                    actor_id: "runtime",
+                    correlation_id: &token,
+                    now_ms: 100,
+                },
+            )
+            .await
+            .expect("effect claim");
+        let input = runtime_launch(directory.path());
+        let ready = serde_json::to_string(&RunnerEvent::Ready {
+            acknowledgement: PacketAcknowledgement {
+                version: 1,
+                attempt_id: "attempt".into(),
+                lease_epoch: 1,
+                packet_sha256: input.packet.sha256().expect("hash"),
+                instruction_sha256: vec![],
+            },
+        })
+        .expect("ready");
+        let wrapper = directory.path().join("wrapper.sh");
+        // A controlled protocol peer: actual process-group watchdog behavior is
+        // independently exercised by conductor-runtime's real wrapper tests.
+        std::fs::write(&wrapper, format!("#!/bin/sh\nread -r launch\nprintf '%s\\n' '{ready}'\nread -r release\nread -r next\n")).expect("fixture");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let (record, mut connection) = service
+            .launch_controlled_execution(&wrapper, &input, &token, "runner")
+            .await
+            .expect("launch");
+        assert_eq!(record.state, ExecutionState::Started);
+        assert_eq!(
+            store.execution(&token).await.expect("read"),
+            Some(record.clone())
+        );
+        assert!(
+            service
+                .launch_controlled_execution(&wrapper, &input, &token, "runner")
+                .await
+                .is_err()
+        );
+        clock.set(10);
+        assert!(
+            service
+                .renew_controlled_execution(
+                    &token,
+                    record.wrapper_identity.as_deref().expect("identity"),
+                    &mut connection
+                )
+                .await
+                .is_err()
+        );
+        connection.cancel().await.expect("close fixture");
+        connection.wait().await.expect("peer exited");
     }
 }

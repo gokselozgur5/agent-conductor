@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+conductor-runtime = { path = "../runtime" }
 agent-conductor-domain = { path = "../domain" }
 agent-conductor-store = { path = "../store" }
 conductor-protocol = { path = "../protocol" }

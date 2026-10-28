@@ -48,9 +48,16 @@ and stops controlled process groups on parent loss or watchdog expiry. Its
 protocol tests cover pre-release refusal, parent loss, renewal and spawn failure.
 This is not a hostile-process sandbox: wrapper SIGKILL, escaping descendants and
 normal-exit orphan fencing still need stronger isolation and recovery evidence.
-Next: connect durable preparation/acknowledgement to wrapper release in the
-controller, then isolated source capture and real adapters. Real agents have
-not been launched yet.
+The service now connects fresh durable preparation and recorded acknowledgement
+to wrapper release under the lifecycle mutation lock. Launch and renewal check
+the authoritative monotonic lease; replay and mismatched connection hashes are
+refused. This internal port accepts controlled fake adapters only. Service tests
+use a controlled protocol peer; real wrapper watchdog tests remain in runtime.
+Next: bind wrapper expiry to the exact service lease deadline, persist terminal
+observations and reconcile cancellation/restart before exposing an operator
+launcher. A relative heartbeat timeout alone is not proof of fencing before
+reassignment. Then complete isolated source capture and vendor adapters. Real
+agents have not been launched yet.
 The full product workflow remains the target; later phase and soak requirements
 are not waived by the same-day usability objective.
 

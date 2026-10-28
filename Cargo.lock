@@ -298,6 +298,7 @@ dependencies = [
  "agent-conductor-store",
  "agent-conductor-testkit",
  "conductor-protocol",
+ "conductor-runtime",
  "nix",
  "serde_json",
  "sha2",

@@ -27,6 +27,12 @@ pub enum RunnerConnectionError {
 }
 
 impl RunnerConnection {
+    /// Immutable packet identity bound to this connection's release and renewals.
+    #[must_use]
+    pub fn packet_sha256(&self) -> &str {
+        &self.packet_sha256
+    }
+
     /// Launches a wrapper, validates its acknowledgement, and records it through
     /// the controller callback before releasing the worker. The caller must have
     /// obtained a fresh durable preparation; replay must never call this method.
