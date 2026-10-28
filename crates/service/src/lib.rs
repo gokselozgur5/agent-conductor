@@ -2249,6 +2249,105 @@ mod effect_tests {
                 .expect("fence status")
         );
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_terminal_observation_binds_output_and_blocks_invalid_results() {
+        use agent_conductor_store::{EffectAudit, ExecutionState};
+        use conductor_runtime::{AdapterKind, PacketAcknowledgement, RunnerEvent};
+        use std::os::unix::fs::PermissionsExt;
+        for (valid, replace_packet) in [(true, false), (false, false), (true, true)] {
+            let (directory, store) = lifecycle_store().await;
+            let service =
+                PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                    .await
+                    .expect("service");
+            let (_, token) = claim_task(&service).await;
+            store
+                .claim_effect(
+                    &token,
+                    "runner",
+                    10000,
+                    EffectAudit {
+                        id: "native-claim",
+                        actor_id: "runtime",
+                        correlation_id: &token,
+                        now_ms: 100,
+                    },
+                )
+                .await
+                .expect("claim");
+            let mut input = runtime_launch(directory.path());
+            input.packet.contract.adapter.kind = AdapterKind::Claude;
+            let ready = serde_json::to_string(&RunnerEvent::Ready {
+                acknowledgement: PacketAcknowledgement {
+                    version: 1,
+                    attempt_id: "attempt".into(),
+                    lease_epoch: 1,
+                    packet_sha256: input.packet.sha256().expect("hash"),
+                    instruction_sha256: vec![],
+                },
+            })
+            .expect("ready");
+            let stdout = if valid {
+                b"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"candidate only\"}\n".to_vec()
+            } else {
+                b"truncated".to_vec()
+            };
+            let finished = serde_json::to_string(&RunnerEvent::Finished {
+                exit_code: Some(0),
+                stdout,
+                stderr: vec![],
+            })
+            .expect("terminal");
+            let wrapper = directory.path().join("peer.sh");
+            // Tests service lifecycle semantics, not vendor identity or sandboxing.
+            fs::write(&wrapper, format!("#!/bin/sh\nread -r launch\nprintf '%s\\n' '{ready}'\nread -r release\nprintf '%s\\n' '{finished}'\n")).expect("peer");
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("mode");
+            let (record, connection) = service
+                .launch_execution(&wrapper, &input, &token, "runner")
+                .await
+                .expect("release");
+            let mut packet = input.packet.clone();
+            if replace_packet {
+                packet.objective = "different task text".into();
+            }
+            let result = service
+                .await_native_execution(
+                    &token,
+                    record.wrapper_identity.as_deref().expect("identity"),
+                    &packet,
+                    connection,
+                )
+                .await;
+            let persisted = store
+                .execution(&token)
+                .await
+                .expect("read")
+                .expect("record");
+            if replace_packet {
+                assert!(result.is_err());
+                assert_eq!(persisted.state, ExecutionState::Started);
+            } else if valid {
+                let (observed, candidate) = result.expect("candidate");
+                assert_eq!(candidate.text, "candidate only");
+                assert_eq!(observed.state, ExecutionState::Exited);
+                assert_eq!(persisted, observed);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(persisted.state, ExecutionState::Blocked);
+            }
+            assert!(
+                store
+                    .has_unfenced_execution("task")
+                    .await
+                    .expect("still unfenced")
+            );
+            let row = store.task("task").await.expect("task").expect("row");
+            let task: Task = serde_json::from_str(&row.aggregate_json).expect("aggregate");
+            assert_ne!(task.state, TaskState::Completed);
+        }
+    }
+
     #[tokio::test]
     async fn restart_blocks_unobserved_runtime_intent_without_spawning_or_losing_packet() {
         use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionState};

@@ -102,3 +102,12 @@ HTTP/dashboard and hooks, Thor/multi-host, performance targets, seven-day soak,
 full backup/restore rehearsal, release architecture matrix and end-to-end v1
 acceptance remain outside this phase. Database reopen tests do not establish the
 full disaster-recovery procedure.
+
+### Native result integration
+
+The service now exposes pinned restricted-Claude launch and terminal observation
+ports with current-lease renewal. Accepted output becomes an attempt-bound
+candidate and durable `exited` record; malformed output becomes `blocked`.
+Successful exit never implies a write fence or task completion. Packet substitution
+is rejected. The CLI/daemon workflow, check execution and independent verification
+still need connecting before the product is usable end to end.

@@ -37,3 +37,8 @@ pub use sandbox::*;
 mod vendor;
 #[cfg(unix)]
 pub use vendor::*;
+
+#[cfg(unix)]
+mod vendor_output;
+#[cfg(unix)]
+pub use vendor_output::*;

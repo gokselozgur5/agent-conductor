@@ -41,15 +41,27 @@ inside file exists, outside marker does not, and the canary is absent from outpu
 
 Sanitized receipts and reproducible private probe scripts live under the workspace
 review directory `reviews/agent-conductor-runtime-20261028/vendor-probes/`.
-Production code is `crates/runtime/src/vendor.rs`; no real vendor is enabled in
-the service launcher yet.
+Production command construction is in `crates/runtime/src/vendor.rs`. The service
+has a pinned restricted-Claude launch/observation port; it is not yet exposed
+through the daemon or CLI.
 
 ## Outstanding gates
 
-These are preliminary write-tool checks, not full adapter acceptance. Read-only
-verifier denial, network/control-socket attempts through each actual harness,
-plugin/config prompt injection, interruption/resume, output protocol validation,
-source/check binding and full daemon integration still require evidence. Claude
+Additional local probes exercised read-only modes. Claude advertised exactly
+Read/Glob/Grep, read the fixture and left source unchanged. Codex ran a synthetic
+probe through its actual model shell: fixture reads succeeded while workspace
+writes, live TCP connections and a live Unix control socket were denied with
+PermissionDenied. Sanitized receipts are `claude-readonly-v1/receipt.json` and
+`codex-readonly-network-v2/receipt.json` under the same private evidence root.
+
+Bounded native output parsing rejects malformed/truncated streams, duplicate
+terminal events, nonzero exits and vendor failures. Tool/model prose stays data.
+Service regressions bind candidates to the released packet, persist invalid
+results as blocked, and prove that successful exit does not complete or fence a
+task. These protocol fixtures are not real vendor integration acceptance.
+
+Full adapter acceptance still requires plugin/config prompt injection,
+interruption/resume, source/check binding and full daemon integration evidence. Claude
 currently has no command execution capability; checks belong to the trusted
 bounded check executor. The initial command builder keeps its per-call $0.50 cap.
 Binary hash validation is not protection against a malicious same-user process
