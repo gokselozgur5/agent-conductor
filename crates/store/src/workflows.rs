@@ -13,8 +13,9 @@ pub struct WorkflowDispatch {
     pub outcome_json: Option<String>,
     pub resume_version: Option<i64>,
     pub auto_recovery_count: i64,
+    pub waiting_for_event: bool,
 }
-const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version, auto_recovery_count FROM workflow_dispatch";
+const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version, auto_recovery_count, EXISTS(SELECT 1 FROM workflow_wakes w WHERE w.task_id=workflow_dispatch.task_id AND w.delivery_id IS NULL) AS waiting_for_event FROM workflow_dispatch";
 impl Store {
     /// Persists one immutable operator-approved plan, replaying identical input.
     /// # Errors
@@ -37,13 +38,42 @@ impl Store {
             if let Some(existing) = existing {
                 return if existing == plan { Ok(()) } else { Err(StoreError::IdempotencyCollision) };
             }
+        let input: serde_json::Value = serde_json::from_str(plan)
+            .map_err(|_| StoreError::Integrity("invalid workflow JSON".into()))?;
+        let wake = input
+            .get("wake_subscription")
+            .filter(|v| !v.is_null())
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 128)
+                    .ok_or_else(|| StoreError::Integrity("invalid wake subscription".into()))
+            })
+            .transpose()?;
             let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running')").fetch_one(&mut *writer).await?;
             if pending >= 256 { return Err(StoreError::Integrity("workflow queue capacity reached".into())); }
             sqlx::query("INSERT INTO workflow_dispatch(task_id,plan_json,status,created_at_ms,updated_at_ms) VALUES (?,?,'queued',?,?)")
                 .bind(task_id).bind(plan).bind(now).bind(now).execute(&mut *writer).await?;
+            if let Some(subscription) = wake {
+                let eligible: Option<i64> = sqlx::query_scalar("SELECT 1 FROM event_subscriptions WHERE id=? AND agent_id=? AND active=1 AND echo_source=0")
+                    .bind(subscription).bind(format!("{task_id}:worker")).fetch_optional(&mut *writer).await?;
+                if eligible.is_none() { return Err(StoreError::Integrity("wake requires an active non-echo subscription for the planned worker".into())); }
+                sqlx::query("INSERT INTO workflow_wakes(task_id,subscription_id) VALUES (?,?)").bind(task_id).bind(subscription).execute(&mut *writer).await?;
+            }
             Ok(())
         }.await;
         finish_transaction(&mut writer, result).await
+    }
+    /// Reads the persisted trigger as bounded untrusted task context.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn workflow_trigger(&self, task_id: &str) -> Result<Option<String>, StoreError> {
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT trigger_json FROM workflow_wakes WHERE task_id=?",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.inner.readers)
+        .await?
+        .flatten())
     }
     /// Claims at most one plan; no second running dispatch is admitted.
     /// # Errors
@@ -62,10 +92,24 @@ impl Store {
             if current != generation { return Err(StoreError::Integrity("stale dispatcher boot".into())); }
             let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_dispatch WHERE status = 'running'").fetch_one(&mut *writer).await?;
             if running != 0 { return Ok(None); }
-            let row = sqlx::query_as::<_, WorkflowDispatch>(&format!("{SELECT} WHERE status = 'queued' ORDER BY created_at_ms,task_id LIMIT 1")).fetch_optional(&mut *writer).await?;
+            let rows = sqlx::query_as::<_, WorkflowDispatch>(&format!("{SELECT} WHERE status = 'queued' ORDER BY created_at_ms,task_id LIMIT 256")).fetch_all(&mut *writer).await?;
+            let mut selected = None;
+            for row in rows {
+                let binding: Option<(String, Option<String>)> = sqlx::query_as("SELECT subscription_id,delivery_id FROM workflow_wakes WHERE task_id=?").bind(&row.task_id).fetch_optional(&mut *writer).await?;
+                if let Some((subscription, None)) = binding {
+                        let delivery: Option<(String,String)> = sqlx::query_as("SELECT d.id,json_object('id',e.id,'correlation_id',e.correlation_id,'generation',e.generation,'topic',e.topic,'project_id',e.project_id,'task_id',e.task_id,'path_scope',e.path_scope,'payload',json(e.payload_json)) FROM event_deliveries d JOIN semantic_events e ON e.id=d.event_id JOIN event_subscriptions s ON s.id=d.subscription_id WHERE d.subscription_id=? AND s.active=1 AND s.echo_source=0 AND s.agent_id=d.target_agent_id AND d.target_agent_id=? AND e.source_agent_id<>d.target_agent_id AND d.status='pending' AND d.available_at_ms<=? AND e.expires_at_ms>? AND e.created_at_ms<=? AND d.attempts<e.max_retries AND e.generation<8 ORDER BY e.created_at_ms,d.id LIMIT 1")
+                            .bind(&subscription).bind(format!("{}:worker",row.task_id)).bind(now).bind(now).bind(now).fetch_optional(&mut *writer).await?;
+                        let Some((delivery, trigger)) = delivery else { continue; };
+                        if trigger.len() > 65_536 { continue; }
+                        sqlx::query("UPDATE event_deliveries SET status='acked',acked_at_ms=? WHERE id=?").bind(now).bind(&delivery).execute(&mut *writer).await?;
+                        sqlx::query("UPDATE workflow_wakes SET delivery_id=?,trigger_json=? WHERE task_id=?").bind(delivery).bind(trigger).bind(&row.task_id).execute(&mut *writer).await?;
+                }
+                selected = Some(row); break;
+            }
+            let row = selected;
             if let Some(mut row) = row {
                 sqlx::query("UPDATE workflow_dispatch SET status='running',boot_generation=?,updated_at_ms=? WHERE task_id=? AND status='queued'").bind(generation).bind(now).bind(&row.task_id).execute(&mut *writer).await?;
-                row.status = "running".into(); row.boot_generation = Some(generation);
+                row.status = "running".into(); row.boot_generation = Some(generation); row.waiting_for_event = false;
                 Ok(Some(row))
             } else { Ok(None) }
         }.await;

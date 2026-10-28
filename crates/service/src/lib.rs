@@ -23,7 +23,7 @@ use agent_conductor_store::{
 use conductor_protocol::{
     CommandAppliedResponse, ErrorBody, ErrorCode, EventDeliveryResponse, EventPublishedResponse,
     HealthResponse, HealthStatus, InvariantResponse, InvariantViolation, Request, Response,
-    SemanticEventResponse, TaskResponse,
+    SemanticEventResponse, TaskResponse, WatcherStatus,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -33,11 +33,17 @@ use uuid::Uuid;
 mod check_execution;
 mod clock;
 #[cfg(unix)]
+mod instruction_policy;
+#[cfg(unix)]
+mod repository_watch;
+#[cfg(unix)]
 mod workflow;
 #[cfg(unix)]
 mod workflow_continuation;
 #[cfg(unix)]
 mod workflow_dispatch;
+#[cfg(unix)]
+pub use repository_watch::{OwnedWatchState, RepositoryWatch, RepositoryWatchState};
 #[cfg(unix)]
 pub use workflow::{NativeWorkflowPlan, WorkflowOutcome};
 #[cfg(unix)]
@@ -64,6 +70,8 @@ pub struct PersistentControlService<C = SystemClock> {
     started_at: Instant,
     clock: Arc<C>,
     mutations: Arc<Mutex<()>>,
+    watcher_status: Arc<RwLock<WatcherStatus>>,
+    observed_projects: Arc<RwLock<std::collections::BTreeSet<String>>>,
 }
 
 impl<C: Clock> Clone for PersistentControlService<C> {
@@ -74,6 +82,8 @@ impl<C: Clock> Clone for PersistentControlService<C> {
             started_at: self.started_at,
             clock: Arc::clone(&self.clock),
             mutations: Arc::clone(&self.mutations),
+            watcher_status: Arc::clone(&self.watcher_status),
+            observed_projects: Arc::clone(&self.observed_projects),
         }
     }
 }
@@ -90,6 +100,13 @@ impl PersistentControlService<SystemClock> {
 }
 
 impl<C: Clock> PersistentControlService<C> {
+    /// Updates process-local watcher health without changing durable task truth.
+    pub fn set_watcher_status(&self, status: WatcherStatus) {
+        if let Ok(mut current) = self.watcher_status.write() {
+            *current = status;
+        }
+    }
+
     /// Starts with an injected authoritative clock.
     /// # Errors
     /// Returns an error when durable startup or recovery cannot complete.
@@ -108,6 +125,8 @@ impl<C: Clock> PersistentControlService<C> {
             started_at: Instant::now(),
             clock: Arc::new(clock),
             mutations: Arc::new(Mutex::new(())),
+            watcher_status: Arc::new(RwLock::new(WatcherStatus::Disabled)),
+            observed_projects: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
         };
         for lease in startup.recovery_pending {
             let Some(row) = service.store.task(&lease.task_id).await? else {
@@ -586,8 +605,17 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
             }
             Request::Health => {
                 let v = invariants(&self.store).await?;
+                let repository_watcher = self
+                    .watcher_status
+                    .read()
+                    .map_or(WatcherStatus::Failed, |s| *s);
                 Ok(Response::Health(HealthResponse {
-                    status: if v.is_empty() {
+                    repository_watcher,
+                    status: if v.is_empty()
+                        && matches!(
+                            repository_watcher,
+                            WatcherStatus::Disabled | WatcherStatus::Running
+                        ) {
                         HealthStatus::Ready
                     } else {
                         HealthStatus::Degraded
@@ -708,6 +736,45 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     .map_err(store_error)?
                     .ok_or_else(not_found)?;
                 Ok(Response::Task(Self::task_response(row)?))
+            }
+            Request::TaskHistory { task_id, before } => {
+                let before = before
+                    .map(|value| {
+                        value.parse::<i64>().ok().filter(|v| *v > 0).ok_or_else(|| {
+                            ErrorBody::new(ErrorCode::Validation, "invalid history cursor")
+                        })
+                    })
+                    .transpose()?;
+                self.store
+                    .task(&task_id)
+                    .await
+                    .map_err(store_error)?
+                    .ok_or_else(not_found)?;
+                let mut rows = self
+                    .store
+                    .task_history(&task_id, before)
+                    .await
+                    .map_err(store_error)?;
+                let has_more = rows.len() > 100;
+                rows.truncate(100);
+                let next_before = if has_more {
+                    rows.last().map(|row| row.sequence.to_string())
+                } else {
+                    None
+                };
+                Ok(Response::TaskHistory {
+                    entries: rows
+                        .into_iter()
+                        .map(|row| conductor_protocol::TaskHistoryEntry {
+                            sequence: row.sequence.to_string(),
+                            kind: row.kind,
+                            actor_id: row.actor_id,
+                            correlation_id: row.correlation_id,
+                            occurred_at_ms: row.occurred_at_ms,
+                        })
+                        .collect(),
+                    next_before,
+                })
             }
             Request::ListTasks { project_id } => {
                 let rows = self
@@ -915,6 +982,9 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
     }
 
     async fn maintain(&self) -> Result<(), ErrorBody> {
+        self.invalidate_instruction_tasks()
+            .await
+            .map_err(store_error)?;
         self.recover_fenced_receipts().await.map_err(store_error)?;
         self.reconcile_expired()
             .await
@@ -952,6 +1022,7 @@ impl ControlService for InMemoryControlService {
         let v = self.violations.read().expect("lock").clone();
         match request {
             Request::Health => Ok(Response::Health(HealthResponse {
+                repository_watcher: WatcherStatus::Disabled,
                 status: if v.is_empty() {
                     HealthStatus::Ready
                 } else {
@@ -2312,6 +2383,126 @@ mod effect_tests {
                 .expect("fence status")
         );
     }
+    #[tokio::test]
+    // Keep persisted invalidation, operator precedence and restart in one scenario.
+    #[allow(clippy::too_many_lines)]
+    async fn instruction_invalidation_is_durable_and_preserves_operator_stop() {
+        use agent_conductor_store::{EffectAudit, ExecutionPreparation};
+        use conductor_runtime::InstructionPin;
+        for operator_stop in [None, Some(CommandKind::Pause), Some(CommandKind::Cancel)] {
+            let (directory, store) = lifecycle_store().await;
+            let service =
+                PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                    .await
+                    .unwrap();
+            let (claimed, token) = claim_task(&service).await;
+            store
+                .claim_effect(
+                    &token,
+                    "runner",
+                    10000,
+                    EffectAudit {
+                        id: "claim",
+                        actor_id: "runtime",
+                        correlation_id: &token,
+                        now_ms: 100,
+                    },
+                )
+                .await
+                .unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let workspace = root.join("work");
+            fs::create_dir(&workspace).unwrap();
+            fs::write(workspace.join("retained"), "unfinished work").unwrap();
+            let source = root.join("outer-policy.md");
+            fs::write(&source, "approved").unwrap();
+            let mut input = runtime_launch(&workspace);
+            input.packet.contract.instructions = vec![InstructionPin {
+                path: source.clone(),
+                sha256: hash("approved"),
+            }];
+            input
+                .packet
+                .contract
+                .authority
+                .read_roots
+                .push(source.clone());
+            store
+                .prepare_execution(
+                    &ExecutionPreparation {
+                        effect_token: token.clone(),
+                        task_id: "task".into(),
+                        attempt_id: "attempt".into(),
+                        lease_epoch: 1,
+                        runner_id: "runner".into(),
+                        packet_json: serde_json::to_string(&input.packet).unwrap(),
+                        packet_sha256: input.packet.sha256().unwrap(),
+                    },
+                    EffectAudit {
+                        id: "prepare",
+                        actor_id: "runtime",
+                        correlation_id: &token,
+                        now_ms: 100,
+                    },
+                )
+                .await
+                .unwrap();
+            service.invalidate_instruction_tasks().await.unwrap();
+            assert_eq!(
+                service.workflow_task("task").await.unwrap().version,
+                claimed.version
+            );
+            if let Some(kind) = operator_stop.clone() {
+                let row = store.task("task").await.unwrap().unwrap();
+                service
+                    .apply_row(
+                        row,
+                        lifecycle_command(
+                            &claimed,
+                            Actor {
+                                id: ActorId("operator".into()),
+                                role: ActorRole::Operator,
+                            },
+                            kind,
+                            "operator-stop",
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+            fs::write(&source, "changed").unwrap();
+            service.invalidate_instruction_tasks().await.unwrap();
+            let task = service.workflow_task("task").await.unwrap();
+            let expected = match operator_stop {
+                None => TaskState::Blocked,
+                Some(CommandKind::Pause) => TaskState::Paused,
+                _ => TaskState::Cancelled,
+            };
+            assert_eq!(task.state, expected);
+            if expected == TaskState::Blocked {
+                assert_eq!(task.blocker.as_ref().unwrap().kind, "instruction_changed");
+            }
+            service.invalidate_instruction_tasks().await.unwrap();
+            assert_eq!(
+                service.workflow_task("task").await.unwrap().version,
+                task.version
+            );
+            assert_eq!(
+                fs::read(workspace.join("retained")).unwrap(),
+                b"unfinished work"
+            );
+            drop(service);
+            let restarted =
+                PersistentControlService::start_with_clock(store, 101, FixedClock::new(0))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                restarted.workflow_task("task").await.unwrap().state,
+                expected
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
@@ -2319,13 +2510,14 @@ mod effect_tests {
         use agent_conductor_store::{EffectAudit, ExecutionState};
         use conductor_runtime::{AdapterKind, PacketAcknowledgement, RunnerEvent};
         use std::os::unix::fs::PermissionsExt;
-        for (valid, replace_packet, fail_publication, stopped) in [
-            (true, false, false, false),
-            (false, false, false, false),
-            (true, true, false, false),
-            (true, false, true, false),
-            (true, false, false, true),
-            (false, false, false, true),
+        for (valid, replace_packet, fail_publication, stopped, watch_final) in [
+            (true, false, false, false, true),
+            (true, false, false, false, false),
+            (false, false, false, false, false),
+            (true, true, false, false, false),
+            (true, false, true, false, false),
+            (true, false, false, true, false),
+            (false, false, false, true, false),
         ] {
             let (directory, store) = lifecycle_store().await;
             let service =
@@ -2370,6 +2562,7 @@ mod effect_tests {
             let workspace = directory.path().join("work");
             fs::create_dir(&workspace).unwrap();
             fs::write(workspace.join("result.txt"), "candidate source").unwrap();
+            let workspace = workspace.canonicalize().unwrap();
             let mut input = runtime_launch(&workspace);
             input.packet.contract.authority.allow_workspace_commands = false;
             input.packet.contract.adapter.kind = AdapterKind::Claude;
@@ -2410,6 +2603,124 @@ mod effect_tests {
                 .launch_execution(&wrapper, &input, &token, "runner")
                 .await
                 .expect("release");
+            let project = store.task("task").await.unwrap().unwrap().project_id;
+            let mut owned_state = OwnedWatchState::default();
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(10)
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+            store
+                .upsert_event_subscription(&EventSubscription {
+                    schema_version: 1,
+                    id: "owned-test".into(),
+                    agent_id: "worker".into(),
+                    topic_filter: "file.*".into(),
+                    project_id: Some(project.clone()),
+                    path_prefix: None,
+                    echo_source: true,
+                    created_at_ms: 100,
+                })
+                .await
+                .unwrap();
+            fs::write(workspace.join("observed.txt"), "private observed output").unwrap();
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(10)
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(11)
+                    )
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(11)
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+            let delivery = store
+                .claim_event_delivery("worker", 100, &EventLimits::default())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(delivery.event.source_agent_id, "worker");
+            assert_eq!(delivery.event.task_id.as_deref(), Some("task"));
+            assert_eq!(delivery.event.attempt_id.as_deref(), Some("attempt"));
+            assert_eq!(delivery.event.lease_epoch, Some(1));
+            assert_eq!(delivery.event.correlation_id, token);
+            assert_eq!(delivery.event.generation, 0);
+            assert!(
+                !delivery
+                    .event
+                    .payload_json
+                    .contains("private observed output")
+            );
+            fs::remove_file(workspace.join("observed.txt")).unwrap();
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(12)
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(13)
+                    )
+                    .await
+                    .unwrap(),
+                1
+            );
+            if valid && !replace_packet && !fail_publication && !stopped {
+                if watch_final {
+                    service.configure_repository_observation(&[RepositoryWatch {
+                        id: "terminal-watch".into(),
+                        project_id: project.clone(),
+                        source_agent_id: "worker".into(),
+                        root: workspace.clone(),
+                    }]);
+                }
+                // Simulate a final burst after the last periodic observation.
+                for index in 0..300 {
+                    fs::write(
+                        workspace.join(format!("terminal-{index:04}.txt")),
+                        "terminal bytes",
+                    )
+                    .unwrap();
+                }
+            }
             // Force a failed renewal while the matching terminal frame is still
             // in transit. Previously this discarded a successful native result.
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2439,6 +2750,19 @@ mod effect_tests {
             if replace_packet {
                 assert!(result.is_err());
                 assert_eq!(persisted.state, ExecutionState::Started);
+                service.clock.set(100_000);
+                fs::write(workspace.join("expired.txt"), "unowned after lease expiry").unwrap();
+                assert_eq!(
+                    service
+                        .poll_owned_workspaces(
+                            &project,
+                            &mut owned_state,
+                            std::time::Duration::from_secs(14)
+                        )
+                        .await
+                        .unwrap(),
+                    0
+                );
             } else if stopped && valid {
                 assert!(result.is_err(), "stop is never a successful candidate");
                 assert_eq!(persisted.state, ExecutionState::Fenced);
@@ -2534,7 +2858,26 @@ mod effect_tests {
                     )
                     .await
                     .expect("capture and bind");
-                assert_eq!(captured.entries.len(), 1);
+                assert_eq!(captured.entries.len(), 301);
+                let mut database = SqliteConnection::connect(&format!(
+                    "sqlite://{}",
+                    directory.path().join("state.sqlite3").display()
+                ))
+                .await
+                .unwrap();
+                let deliveries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event_deliveries d JOIN semantic_events e ON e.id=d.event_id WHERE e.path_scope LIKE 'terminal-%' AND e.attempt_id='attempt' AND e.lease_epoch=1").fetch_one(&mut database).await.unwrap();
+                assert_eq!(deliveries, if watch_final { 300 } else { 0 });
+                assert_eq!(
+                    service
+                        .poll_owned_workspaces(
+                            &project,
+                            &mut owned_state,
+                            std::time::Duration::from_secs(14)
+                        )
+                        .await
+                        .unwrap(),
+                    0
+                );
                 let row = store.task("task").await.unwrap().unwrap();
                 let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
                 assert_eq!(task.state, TaskState::Verifying);

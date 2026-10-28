@@ -152,6 +152,39 @@ pub fn snapshot_paths(
     Ok(manifest)
 }
 
+/// Read-only bounded manifest observation using the snapshot path/link boundary.
+/// No file contents are retained in the returned manifest or written to disk.
+pub(crate) fn observe_paths(
+    source: &Path,
+    paths: &[String],
+) -> Result<SnapshotManifest, SnapshotError> {
+    let inventory = validate_paths(paths)?;
+    let root = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+        .open(source)
+        .map_err(|_| SnapshotError::Io)?;
+    let mut manifest = SnapshotManifest {
+        version: 1,
+        entries: Vec::new(),
+    };
+    let mut total = 0_u64;
+    for path in inventory {
+        let item = entry(&path, read_source(&root, &path)?.as_ref());
+        total = total
+            .checked_add(item.bytes)
+            .filter(|total| *total <= TOTAL_LIMIT)
+            .ok_or(SnapshotError::Bounds)?;
+        manifest.entries.push(item);
+    }
+    for expected in &manifest.entries {
+        if entry(&expected.path, read_source(&root, &expected.path)?.as_ref()) != *expected {
+            return Err(SnapshotError::Changed);
+        }
+    }
+    Ok(manifest)
+}
+
 fn validate_paths(paths: &[String]) -> Result<BTreeSet<String>, SnapshotError> {
     if paths.len() > PATH_LIMIT {
         return Err(SnapshotError::Bounds);
@@ -183,6 +216,13 @@ fn entry(path: &str, content: Option<&(Vec<u8>, bool)>) -> SnapshotEntry {
     }
 }
 fn read_source(root: &File, path: &str) -> Result<Option<(Vec<u8>, bool)>, SnapshotError> {
+    read_source_bounded(root, path, FILE_LIMIT)
+}
+pub(crate) fn read_source_bounded(
+    root: &File,
+    path: &str,
+    limit: u64,
+) -> Result<Option<(Vec<u8>, bool)>, SnapshotError> {
     let mut directory = root.try_clone().map_err(|_| SnapshotError::Io)?;
     let components: Vec<_> = path.split('/').collect();
     for (index, component) in components.iter().enumerate() {
@@ -210,15 +250,15 @@ fn read_source(root: &File, path: &str) -> Result<Option<(Vec<u8>, bool)>, Snaps
         if !before.is_file() || before.nlink() != 1 {
             return Err(SnapshotError::Unsupported);
         }
-        if before.len() > FILE_LIMIT {
+        if before.len() > limit {
             return Err(SnapshotError::Bounds);
         }
         let mut bytes = Vec::new();
         (&file)
-            .take(FILE_LIMIT + 1)
+            .take(limit + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| SnapshotError::Io)?;
-        if bytes.len() as u64 > FILE_LIMIT {
+        if bytes.len() as u64 > limit {
             return Err(SnapshotError::Bounds);
         }
         let after = file.metadata().map_err(|_| SnapshotError::Io)?;
@@ -257,6 +297,23 @@ pub fn snapshot_attempt_tree(
     }
     Ok(manifest)
 }
+/// Observes a private non-Git attempt tree without creating a snapshot copy.
+/// Missing paths are represented by absence; callers compare their durable baseline.
+/// This is sampled observation, not proof of writer quiescence or attribution.
+/// # Errors
+/// Refuses noncanonical roots, unsupported objects, bounds and observed changes.
+pub fn observe_attempt_tree(source: &Path) -> Result<SnapshotManifest, SnapshotError> {
+    if !source.is_absolute() || source.canonicalize().map_err(|_| SnapshotError::Io)? != source {
+        return Err(SnapshotError::Invalid);
+    }
+    let before = tree_inventory(source)?;
+    let manifest = observe_paths(source, &before.iter().cloned().collect::<Vec<_>>())?;
+    if tree_inventory(source)? != before || manifest.entries.iter().any(|e| e.sha256.is_none()) {
+        return Err(SnapshotError::Changed);
+    }
+    Ok(manifest)
+}
+
 fn tree_inventory(root: &Path) -> Result<BTreeSet<String>, SnapshotError> {
     let mut pending = vec![root.to_path_buf()];
     let mut paths = BTreeSet::new();

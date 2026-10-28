@@ -89,6 +89,19 @@ impl Store {
             .fetch_all(&self.inner.readers).await?.into_iter().map(decode).collect()
     }
 
+    /// Reads one bounded page of started executions for a registered project.
+    /// # Errors
+    /// Returns database or record decoding errors.
+    pub async fn started_execution_page(
+        &self,
+        project_id: &str,
+        after: &str,
+    ) -> Result<Vec<ExecutionRecord>, StoreError> {
+        sqlx::query("SELECT e.* FROM executions e JOIN tasks t ON t.id=e.task_id WHERE t.project_id=? AND e.state='started' AND e.effect_token>? ORDER BY e.effect_token LIMIT 16")
+            .bind(project_id).bind(after).fetch_all(&self.inner.readers).await?
+            .into_iter().map(decode).collect()
+    }
+
     /// Lists blocked observations that may later acquire a durable wrapper receipt.
     /// # Errors
     /// Returns database/record errors.

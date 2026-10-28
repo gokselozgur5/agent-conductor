@@ -60,6 +60,30 @@ pub async fn snapshot_git(source: &Path, destination: &Path) -> Result<GitSnapsh
     file.sync_all().map_err(|_| SnapshotError::Io)?;
     Ok(snapshot)
 }
+/// Observes repository content identities without copying files or changing Git.
+/// This is a bounded, double-checked observation, not an atomic filesystem freeze.
+/// Ignored files stay excluded; later equal status text does not hide byte changes.
+/// # Errors
+/// Refuses unsupported layouts/links, changing inventory and snapshot bounds.
+pub async fn observe_git(source: &Path) -> Result<GitSnapshot, SnapshotError> {
+    let source = source.canonicalize().map_err(|_| SnapshotError::Io)?;
+    let before = inventory(&source).await?;
+    let root = source.clone();
+    let paths = before.paths.clone();
+    let manifest =
+        tokio::task::spawn_blocking(move || crate::snapshot::observe_paths(&root, &paths))
+            .await
+            .map_err(|_| SnapshotError::Io)??;
+    if inventory(&source).await? != before {
+        return Err(SnapshotError::Changed);
+    }
+    Ok(GitSnapshot {
+        starting_head: before.head,
+        status_sha256: before.status_sha256,
+        manifest,
+    })
+}
+
 async fn inventory(root: &Path) -> Result<Inventory, SnapshotError> {
     let toplevel = git(root, &["rev-parse", "--show-toplevel"]).await?;
     let top = PathBuf::from(

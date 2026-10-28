@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Local operator launcher; lifecycle authority stays in the Rust daemon."""
+import argparse
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+import secrets
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def private_read(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError('operator configuration must be an owned private regular file')
+        data = stream.read(131073)
+        if len(data) > 131072:
+            raise ValueError('operator configuration exceeds its bound')
+        return data.decode()
+
+
+def write_new(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(text)
+
+
+def call(config, state, *args):
+    result = subprocess.run([str(Path(config['bin_dir']) / 'conductorctl'), '--socket', str(state / 'control.sock'), '--json', *map(str, args)], capture_output=True, text=True, timeout=15)
+    if result.returncode:
+        raise ValueError('Conductor refused the request; inspect daemon output and current state')
+    return json.loads(result.stdout)['result']['payload']
+
+
+def stop(process):
+    if process.poll() is None:
+        process.send_signal(signal.SIGINT)
+        process.wait(timeout=20)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--state', type=Path, default=REPO / 'state/operator')
+    sub = parser.add_subparsers(dest='command', required=True)
+    init = sub.add_parser('init', help='create private operator configuration without model calls')
+    init.add_argument('--project', type=Path, required=True)
+    init.add_argument('--bin-dir', type=Path, default=REPO / 'target/debug')
+    init.add_argument('--port', type=int, default=8787)
+    run = sub.add_parser('run', help='run the board and hooks in the foreground')
+    run.add_argument('--anthropic-key-file', type=Path, help='read one existing API key into the daemon environment only')
+    run.add_argument('--dispatch', action='store_true', help='execute explicitly submitted plans')
+    run.add_argument('--recover-fenced', action='store_true')
+    sub.add_parser('status')
+    sub.add_parser('inspect', help='show bounded advisory document references without model calls')
+    sub.add_parser('token', help='print the private board token for operator login')
+    ctl = sub.add_parser('ctl', help='forward a command to the existing Rust CLI')
+    ctl.add_argument('--json', action='store_true')
+    ctl.add_argument('arguments', nargs=argparse.REMAINDER)
+    plan = sub.add_parser('plan', help='prepare a plan from previously accepted adapter pins')
+    plan.add_argument('--from-plan', type=Path, required=True)
+    plan.add_argument('--task', required=True)
+    plan.add_argument('--objective-file', type=Path, required=True)
+    plan.add_argument('--checks-file', type=Path, required=True)
+    plan.add_argument('--instruction', type=Path, action='append', default=[])
+    submit = sub.add_parser('submit', help='authorize and queue one prepared native plan')
+    submit.add_argument('plan', type=Path)
+    submit.add_argument('--on-topic')
+    submit.add_argument('--path-prefix')
+    args = parser.parse_args()
+    os.umask(0o077)
+    state = args.state.expanduser().absolute()
+    if len(os.fsencode(state / 'control.sock')) > 100:
+        raise ValueError('choose a shorter --state path for the Unix socket')
+    if args.command == 'init':
+        project = args.project.expanduser().resolve(strict=True)
+        subprocess.run(['git', '-C', str(project), 'rev-parse', '--show-toplevel'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        head = subprocess.run(['git', '-C', str(project), 'rev-parse', '--verify', 'HEAD'], capture_output=True)
+        if head.returncode:
+            raise ValueError('project needs an existing Git commit before observation and snapshots')
+        bins = args.bin_dir.resolve(strict=True)
+        for name in ['conductor-daemon', 'conductorctl', 'conductor-runner']:
+            if not os.access(bins / name, os.X_OK):
+                raise ValueError('build the Rust workspace before initialization')
+        if not 1024 <= args.port <= 65535:
+            raise ValueError('board port must be between 1024 and 65535')
+        state.mkdir(mode=0o700, parents=True, exist_ok=False)
+        state = state.resolve(strict=True)
+        config = dict(project=str(project), project_id='operator-project', bin_dir=str(bins), port=args.port)
+        write_new(state / 'operator.json', json.dumps(config, indent=2) + '\n')
+        write_new(state / 'board-token', secrets.token_urlsafe(32) + '\n')
+        (state / 'plans').mkdir(mode=0o700)
+        (state / 'artifacts').mkdir(mode=0o700)
+        print(f'Initialized {state}\nRun tools/conductor --state {state} run --dispatch')
+        return
+    state = state.resolve(strict=True)
+    if state.stat().st_mode & 0o077 or state.stat().st_uid != os.getuid():
+        raise ValueError('state directory must be private and owned by the operator')
+    config = json.loads(private_read(state / 'operator.json'))
+    if args.command == 'token':
+        print(private_read(state / 'board-token').strip())
+    elif args.command == 'ctl':
+        forwarded = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
+        os.execv(str(Path(config['bin_dir']) / 'conductorctl'), ['conductorctl', '--socket', str(state / 'control.sock'), *(['--json'] if args.json else []), *forwarded])
+    elif args.command == 'inspect':
+        os.execv(str(Path(config['bin_dir']) / 'conductorctl'), ['conductorctl', 'inspect-project', config['project']])
+    elif args.command == 'status':
+        print(json.dumps(dict(health=call(config, state, 'health'), tasks=call(config, state, 'list-tasks'), workflows=call(config, state, 'list-workflows')), indent=2))
+    elif args.command == 'plan':
+        if not args.task or len(args.task) > 100 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in args.task):
+            raise ValueError('task ID must use 1-100 letters, digits, underscores or hyphens')
+        template = json.loads(args.from_plan.read_text())
+        value = {key: template[key] for key in ('worker', 'verifier', 'model_timeout_ms')}
+        for pin in (value['worker'], value['verifier']):
+            executable = Path(pin['executable']).resolve(strict=True)
+            if hashlib.sha256(executable.read_bytes()).hexdigest() != pin['executable_sha256']:
+                raise ValueError('accepted adapter binary changed; conformance must be revalidated')
+            pin['executable'] = str(executable)
+        value.update(task_id=args.task, project=config['project'], objective=args.objective_file.read_text(), artifacts=str(state / 'artifacts' / args.task), wrapper=str(Path(config['bin_dir']) / 'conductor-runner'), checks=json.loads(args.checks_file.read_text()), toolchain_roots=template.get('toolchain_roots', []), instructions=[])
+        for source in args.instruction:
+            source = source.resolve(strict=True)
+            value['instructions'].append(dict(path=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest()))
+        output = state / 'plans' / (args.task + '.json')
+        write_new(output, json.dumps(value, indent=2) + '\n')
+        print(output)
+    elif args.command == 'submit':
+        value = json.loads(args.plan.read_text())
+        if value['project'] != config['project']:
+            raise ValueError('plan project differs from this operator runtime')
+        if args.path_prefix and not args.on_topic:
+            raise ValueError('--path-prefix requires --on-topic')
+        if args.on_topic:
+            worker = value['task_id'] + ':worker'
+            pin = value['worker']
+            call(config, state, 'register-agent', 'operator', worker + ':register', worker, pin['kind'], pin['conformance_sha256'], pin['executable_sha256'], 'read_write')
+            subscription = value['task_id'] + ':input'
+            call(config, state, 'subscribe-events', json.dumps(dict(schema_version=1, id=subscription, agent_id=worker, topic_filter=args.on_topic, project_id=config['project_id'], path_prefix=args.path_prefix, echo_source=False)))
+            value['wake_subscription'] = subscription
+            target = state / 'plans' / (hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest() + '.submitted.json')
+            if not target.exists():
+                write_new(target, json.dumps(value, indent=2))
+        else:
+            target = args.plan.resolve(strict=True)
+        print(json.dumps(call(config, state, 'submit-workflow', target), indent=2))
+    elif args.command == 'run':
+        if args.recover_fenced and not args.dispatch:
+            raise ValueError('--recover-fenced requires --dispatch')
+        daemon = str(Path(config['bin_dir']) / 'conductor-daemon')
+        common = [daemon, '--database', str(state / 'state.sqlite3'), '--socket', str(state / 'control.sock'), '--lock', str(state / 'runtime.lock')]
+        try:
+            call(config, state, 'health')
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        else:
+            raise ValueError('this operator runtime is already running')
+        bootstrap = subprocess.Popen(common)
+        try:
+            for _ in range(100):
+                if bootstrap.poll() is not None:
+                    raise ValueError('bootstrap daemon exited; another owner may already be running')
+                try:
+                    call(config, state, 'health')
+                    break
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    time.sleep(.1)
+            else:
+                raise ValueError('daemon readiness deadline')
+            call(config, state, 'register-project', 'operator', 'operator-project:register', config['project_id'], config['project'])
+            call(config, state, 'register-agent', 'operator', 'operator-observer:register', 'operator-observer', 'hook', 'hook-v1', 'read-only', 'read_only')
+        finally:
+            stop(bootstrap)
+        watch = state / 'watches.json'
+        expected = json.dumps([dict(id='operator-watch', project_id=config['project_id'], source_agent_id='operator-observer', root=config['project'])])
+        if not watch.exists():
+            write_new(watch, expected)
+        elif private_read(watch) != expected:
+            raise ValueError('watch configuration changed; inspect it before restarting')
+        if args.anthropic_key_file:
+            key_text = private_read(args.anthropic_key_file.expanduser().resolve(strict=True))
+            matches = re.findall(r'sk' r'-ant-[A-Za-z0-9_-]+', key_text)
+            if len(matches) != 1:
+                raise ValueError('key file must contain exactly one Anthropic API key')
+            os.environ['ANTHROPIC_API_KEY'] = matches[0]
+            del key_text, matches
+        os.environ['CONDUCTOR_OPERATOR_TOKEN'] = private_read(state / 'board-token').strip()
+        argv = common + ['--watch-config', str(watch), '--http', f"127.0.0.1:{config['port']}"]
+        if args.dispatch:
+            argv.append('--dispatch')
+        if args.recover_fenced:
+            argv.append('--recover-fenced')
+        print(f"Board: http://127.0.0.1:{config['port']}\nUse the token command in another terminal to log in. Ctrl-C stops this runtime.", flush=True)
+        os.execv(daemon, argv)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except (ValueError, OSError, subprocess.SubprocessError, KeyError, json.JSONDecodeError) as error:
+        print(f'Operator launcher failed: {type(error).__name__}; {error}', file=sys.stderr)
+        sys.exit(1)

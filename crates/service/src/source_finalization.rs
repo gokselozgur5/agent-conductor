@@ -65,6 +65,8 @@ impl<C: Clock> PersistentControlService<C> {
                 .map_err(|_| invalid("source capture task failed"))?
                 .map_err(|_| invalid("source capture failed"))?;
         self.validate_runtime_owner(&packet).await?;
+        self.publish_final_owned_capture(token, &packet, &manifest)
+            .await?;
         let source = SourceIdentity(format!(
             "snapshot:{}",
             manifest

@@ -1,4 +1,5 @@
 mod dispatcher;
+mod watcher;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,9 @@ use tracing_subscriber::EnvFilter;
 struct Args {
     #[arg(long, default_value = "state/conductor.sqlite3")]
     database: PathBuf,
+    /// Observe explicitly configured repositories; never launches models directly.
+    #[arg(long, conflicts_with = "run_plan")]
+    watch_config: Option<PathBuf>,
     /// Run one explicitly authorized native workflow while serving status, then exit.
     #[arg(long)]
     run_plan: Option<PathBuf>,
@@ -43,6 +47,15 @@ async fn main() {
         .init();
 
     let args = Args::parse();
+    let watches = args
+        .watch_config
+        .as_ref()
+        .map(|path| watcher::load(path))
+        .transpose()
+        .unwrap_or_else(|message| {
+            eprintln!("{message}");
+            std::process::exit(1)
+        });
     if let Err(error) = ensure_parent(&args.database)
         .and_then(|()| ensure_parent(&args.socket))
         .and_then(|()| ensure_parent(&args.lock))
@@ -78,6 +91,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(configs) = &watches {
+        service.configure_repository_observation(configs);
+        service.set_watcher_status(conductor_protocol::WatcherStatus::Starting);
+    }
     let (board_stop, board_task) = start_board(args.http, service.clone()).await;
     let workflow_service = service.clone();
     let server = match LocalServer::bind(&args.socket, service) {
@@ -94,6 +111,9 @@ async fn main() {
         return;
     }
 
+    let (watch_stop, watch_rx) = tokio::sync::watch::channel(false);
+    let watch_task = watches
+        .map(|configs| tokio::spawn(watcher::serve(workflow_service.clone(), configs, watch_rx)));
     let (dispatch_stop, dispatch_rx) = tokio::sync::watch::channel(false);
     let dispatch_task = args.dispatch.then(|| {
         tokio::spawn(dispatcher::serve(
@@ -112,6 +132,10 @@ async fn main() {
     {
         eprintln!("daemon failed: {error}");
         std::process::exit(1);
+    }
+    let _ = watch_stop.send(true);
+    if let Some(task) = watch_task {
+        let _ = task.await;
     }
     let _ = dispatch_stop.send(true);
     if let Some(task) = dispatch_task {

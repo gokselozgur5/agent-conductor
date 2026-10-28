@@ -4,17 +4,36 @@ Agent Conductor is a local-first control plane for durable, evidence-backed work
 
 It does not trust a conversation to remain alive and it does not accept a worker's claim of completion as proof. Tasks, leases, checkpoints, events, subscriptions, deliveries, and verification decisions live in SQLite.
 
+## Run the local operator workflow
+
+Build once, initialize a private runtime for a committed Git project, then run it:
+
+```sh
+cargo build --workspace
+./tools/conductor init --project /absolute/path/to/project
+./tools/conductor run --dispatch
+```
+
+Open http://127.0.0.1:8787 and log in with the credential from
+`./tools/conductor token` (use `| pbcopy` on macOS). The launcher configures the
+socket, database, project registration and repository watcher. In another terminal,
+`./tools/conductor status` shows authoritative health, tasks and dispatch state.
+See [local operator setup](docs/LOCAL_OPERATOR.md) for model authentication,
+preparing plans with accepted adapter pins, event-triggered tasks and restart.
+
 ## Current implementation
 
-Phase 1 implements the Rust control core: a local Unix-socket daemon, transactional
-SQLite store, task/attempt lifecycle, fenced leases, durable events and delivery,
-independent verification records, and fake-effect recovery tests. Acceptance and
-remaining boundaries are tracked in [STATUS](docs/STATUS.md) and the
-[Phase 1 evidence matrix](docs/PHASE1_ACCEPTANCE.md).
+The Rust runtime supports durable task/lease state, private dirty Git snapshots,
+pinned native Claude writers, independent Codex/Claude review, macOS isolated
+checks, retained-work continuation, attributed repository events and subscribed
+workflow wake admission. The authenticated local board submits plans and projects
+the same state as the CLI. Workers cannot complete or verify their own tasks.
 
-The socket is privileged single-operator access, not authenticated agent transport.
-Verification sources and check outcomes are operator/test inputs in this phase;
-Conductor does not yet capture Git trees, run checks, or fence filesystem writes.
+The local socket is privileged operator access. Native file-only writer fencing
+relies on the accepted trusted CLI capability profile; generic hostile-process
+fencing, other-host isolation and full product hardening remain open. See
+[status](docs/STATUS.md), [requirements](docs/REQUIREMENTS.md), and
+[adapter boundaries](docs/ADAPTER_CONFORMANCE.md). This is not a completed v1 release.
 
 ## Rust quick start
 
@@ -68,9 +87,8 @@ conductor --db ./state/spike.db init
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-Real Codex/Claude adapters, worktree control, instruction discovery in the Rust
-runtime, filesystem hooks, HTTP/dashboard, and multi-host operation remain later
-phases. See [phases](docs/PHASES.md), [requirements](docs/REQUIREMENTS.md),
+The Python spike is not the production runtime. Automatic advisory instruction
+discovery, broader host support and remaining v1 acceptance are tracked separately. See [phases](docs/PHASES.md), [requirements](docs/REQUIREMENTS.md),
 [design](docs/DESIGN.md), and [threat model](docs/THREAT_MODEL.md).
 
 ## Python spike path intake
@@ -89,6 +107,8 @@ recovery gates are still tracked in [Status](docs/STATUS.md).
 
 An opt-in authenticated loopback board displays task state, checks and independent
 review results. See [Operator board](docs/OPERATOR_BOARD.md) for `--http`, credential
-handling and the read-only scope. The existing Unix-socket CLI remains available.
+handling and operator controls. The existing Unix-socket CLI remains available.
 
 Native plan submission and persistent execution: [Workflow dispatch](docs/WORKFLOW_DISPATCH.md).
+
+Opt-in repository change observation: [Repository hooks](docs/REPOSITORY_HOOKS.md).

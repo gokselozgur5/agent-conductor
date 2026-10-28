@@ -88,6 +88,10 @@ pub enum Request {
     ListTasks {
         project_id: Option<String>,
     },
+    TaskHistory {
+        task_id: String,
+        before: Option<String>,
+    },
     ApplyCommand {
         task_id: String,
         command: Command,
@@ -181,6 +185,10 @@ pub enum Response {
     Tasks {
         tasks: Vec<TaskResponse>,
     },
+    TaskHistory {
+        entries: Vec<TaskHistoryEntry>,
+        next_before: Option<String>,
+    },
     CommandApplied(CommandAppliedResponse),
     EventSubscribed {
         subscription_id: String,
@@ -270,6 +278,16 @@ pub struct SemanticEventResponse {
     pub created_at_ms: i64,
 }
 
+/// Metadata only; raw audit commands and payloads never cross this projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHistoryEntry {
+    pub sequence: String,
+    pub kind: String,
+    pub actor_id: String,
+    pub correlation_id: String,
+    pub occurred_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskResponse {
     pub project_id: String,
@@ -288,9 +306,23 @@ pub struct CommandAppliedResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
+    #[serde(default)]
+    pub repository_watcher: WatcherStatus,
     pub status: HealthStatus,
     pub boot_generation: u64,
     pub uptime_millis: u64,
+}
+
+/// Process-local observation health; disabled means observation was not requested.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatcherStatus {
+    #[default]
+    Disabled,
+    Starting,
+    Running,
+    Stopped,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +485,7 @@ mod tests {
         };
         let responses = vec![
             Response::Health(HealthResponse {
+                repository_watcher: WatcherStatus::Disabled,
                 status: HealthStatus::Ready,
                 boot_generation: 1,
                 uptime_millis: 2,

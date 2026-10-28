@@ -77,6 +77,7 @@ async fn serve() -> Result<(), ()> {
     {
         return Err(());
     }
+    conductor_runtime::read_pinned_instructions(&launch.packet).map_err(|_| ())?;
     let packet_hash = launch.packet.sha256().map_err(|_| ())?;
     let receipt_packet = launch.packet.clone();
     let acknowledgement = PacketAcknowledgement {
@@ -103,6 +104,7 @@ async fn serve() -> Result<(), ()> {
         }) if packet_sha256 == packet_hash => continuous_deadline_ms,
         _ => return Err(()),
     };
+    conductor_runtime::read_pinned_instructions(&launch.packet).map_err(|_| ())?;
     let started = continuous_millis().map_err(|_| ())?;
     if started >= lease_deadline {
         return Err(());
@@ -150,6 +152,7 @@ async fn serve() -> Result<(), ()> {
             message = &mut frame => {
                 match message.and_then(|bytes| serde_json::from_slice::<RunnerControl>(&bytes).map_err(|_| ())) {
                     Ok(RunnerControl::Renew { packet_sha256, continuous_deadline_ms }) if packet_sha256 == packet_hash => {
+                        if conductor_runtime::read_pinned_instructions(&receipt_packet).is_err() { break "instruction_changed_or_unavailable"; }
                         let Ok(now) = continuous_millis() else { break "clock_failed"; };
                         // A renewal received after expiry must not revive the worker.
                         if now < last_renewal || now - last_renewal >= launch.heartbeat_timeout_ms || now >= lease_deadline || now >= continuous_deadline_ms || now - started >= max_runtime_ms { break "late_renewal"; }

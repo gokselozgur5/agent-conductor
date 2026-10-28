@@ -4,7 +4,7 @@ mod workflows;
 use axum::{
     Router,
     body::Body,
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -91,6 +91,7 @@ impl OperatorBoard {
                 }),
             )
             .route("/api/tasks", get(tasks::<S>))
+            .route("/api/history", get(history::<S>))
             .route("/api/health", get(health::<S>))
             .route("/api/control", post(controls::apply::<S>))
             .route("/api/workflows/continue", post(workflows::resume::<S>))
@@ -165,6 +166,25 @@ async fn boundary<S: ControlService>(
 async fn tasks<S: ControlService>(State(state): State<BoardState<S>>) -> Response {
     query(&state, ControlRequest::ListTasks { project_id: None }).await
 }
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryQuery {
+    task_id: String,
+    before: Option<String>,
+}
+async fn history<S: ControlService>(
+    State(state): State<BoardState<S>>,
+    Query(params): Query<HistoryQuery>,
+) -> Response {
+    query(
+        &state,
+        ControlRequest::TaskHistory {
+            task_id: params.task_id,
+            before: params.before,
+        },
+    )
+    .await
+}
 async fn health<S: ControlService>(State(state): State<BoardState<S>>) -> Response {
     query(&state, ControlRequest::Health).await
 }
@@ -199,7 +219,12 @@ mod tests {
             Ok(conductor_protocol::Response::Tasks { tasks: vec![] })
         }
     }
-    async fn request(address: SocketAddr, host: &str, path: &str, extra: &str) -> String {
+    pub(super) async fn request(
+        address: SocketAddr,
+        host: &str,
+        path: &str,
+        extra: &str,
+    ) -> String {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream
             .write_all(

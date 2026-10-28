@@ -13,6 +13,7 @@ const text = (tag, value, className) => {
 };
 function disconnect() {
   token = '';
+  closeHistory();
   clearInterval(timer);
   el('token').value = '';
   el('tasks').replaceChildren();
@@ -44,6 +45,13 @@ async function refresh() {
     el('login').hidden = true;
     el('toolbar').hidden = false;
     el('dispatch').hidden = false;
+    const healthResponse = await fetch('/api/health', {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (currentToken !== token) return;
+    if (!healthResponse.ok) throw new Error('Service health unavailable.');
+    const health = await healthResponse.json();
+    if (currentToken !== token) return;
+    if (health.type !== 'health') throw new Error('Unexpected health response.');
+    el('connection').textContent = `${health.status === 'ready' ? 'Connected' : 'Degraded'} · Watcher: ${health.repository_watcher ?? 'unknown'} · ${new Date().toLocaleTimeString()}`;
     await refreshQueue(currentToken);
   } catch (error) {
     if (currentToken === token) { el('message').textContent = error.message; el('connection').textContent = 'Connection lost · displayed data may be stale'; }
@@ -57,6 +65,8 @@ function renderTask(item) {
   card.append(heading, text('p', item.objective));
   const details = text('dl', '', 'details');
   const field = (label, value) => { details.append(text('dt', label), text('dd', value ?? '—')); };
+  field('Project', item.project_id);
+  field('Priority', item.priority);
   field('Worker', task.attempt?.worker);
   field('Attempt', task.attempt?.id);
   field('Verifier', task.verification?.verdict?.verifier);
@@ -70,7 +80,10 @@ function renderTask(item) {
     checks.append(text('li', `${result ? (result.passed ? 'Passed' : 'Failed') : 'Pending'} · ${check.id}`));
   }
   card.append(checks);
-  if (task.blocker) card.append(text('p', task.blocker.detail, 'blocker'));
+  if (task.blocker) {
+    card.append(text('p', task.blocker.detail, 'blocker'));
+    card.append(text('p', `Resume when: ${task.blocker.resume_when}`, 'blocker'));
+  }
   const controls = text('div', '', 'controls');
   const actions = [];
   if (task.state === 'backlog') actions.push(['ready', 'Mark ready']);
@@ -82,6 +95,9 @@ function renderTask(item) {
     button.addEventListener('click', () => control(task, action));
     controls.append(button);
   }
+  const history = text('button', 'View history');
+  history.addEventListener('click', () => loadHistory(task.id));
+  controls.append(history);
   card.append(controls);
   return card;
 }
@@ -107,7 +123,7 @@ async function control(task, action) {
     if (response.status === 401) { disconnect(); message = 'Authentication failed.'; }
     else if (response.status === 409) message = 'Task changed or action is not allowed. Refreshed state; inspect it before retrying.';
     else if (!response.ok) message = 'Action was not confirmed. Inspect refreshed state before retrying.';
-    else message = ['ready', 'resume'].includes(action) ? 'Task is ready. Automatic native scheduling is not enabled yet.' : 'Action applied. Active execution stops after ownership revocation is observed.';
+    else message = ['ready', 'resume'].includes(action) ? 'Task is ready. Use the workflow queue to start or continue approved work.' : 'Action applied. Active execution stops after ownership revocation is observed.';
   } catch (_) {
     message = 'Action outcome unknown. Inspect refreshed state before retrying.';
   } finally {
@@ -127,7 +143,7 @@ async function refreshQueue(currentToken) {
   if (currentToken !== token) return;
   if (data.type !== 'workflows' || !Array.isArray(data.entries)) throw new Error('Invalid queue response.');
   el('queue').replaceChildren(...data.entries.map(item => {
-    const row=text('li', `${item.task_id} · ${item.status}${item.outcome_json ? ' · ' + item.outcome_json : ''}`);
+    const row=text('li', `${item.task_id} · ${item.waiting_for_event ? 'waiting for subscribed event' : item.status}${item.outcome_json ? ' · ' + item.outcome_json : ''}`);
     const task=taskVersions.get(item.task_id);
     if (task && !['completed','cancelled'].includes(task.state) && ['finished','needs_recovery'].includes(item.status)) {
       const button=text('button','Continue retained work');
@@ -149,6 +165,13 @@ el('submit-plan').addEventListener('click', async () => {
     if (currentToken !== token) return;
     el('message').textContent=response.ok ? 'Plan persisted. Queue execution requires an enabled dispatcher.' : 'Submission not confirmed. Inspect queue before retrying the same plan.';
     if(response.ok) el('plan').value='';
+    const healthResponse = await fetch('/api/health', {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (currentToken !== token) return;
+    if (!healthResponse.ok) throw new Error('Service health unavailable.');
+    const health = await healthResponse.json();
+    if (currentToken !== token) return;
+    if (health.type !== 'health') throw new Error('Unexpected health response.');
+    el('connection').textContent = `${health.status === 'ready' ? 'Connected' : 'Degraded'} · Watcher: ${health.repository_watcher ?? 'unknown'} · ${new Date().toLocaleTimeString()}`;
     await refreshQueue(currentToken);
   } catch (_) { if(currentToken===token) el('message').textContent='Submission outcome unknown. Inspect queue before retrying.'; }
   finally { el('submit-plan').disabled=false; }
@@ -165,3 +188,53 @@ async function continueWorkflow(task,button) {
   } catch(_) {if(currentToken===token)el('message').textContent='Continuation outcome unknown. Refresh before retrying.';}
   finally {button.disabled=false;}
 }
+
+
+let historyGeneration = 0;
+let historyTask = null;
+let historyBefore = null;
+function closeHistory() {
+  historyGeneration++;
+  historyTask = null;
+  historyBefore = null;
+  el('history').hidden = true;
+  el('history-entries').replaceChildren();
+  el('history-message').textContent = '';
+  el('history-title').textContent = 'Task history';
+}
+async function loadHistory(taskId, before = null) {
+  if (!token) return;
+  const generation = ++historyGeneration;
+  const currentToken = token;
+  historyTask = taskId;
+  historyBefore = null;
+  el('history').hidden = false;
+  el('history-title').textContent = `History · ${taskId}`;
+  el('history-entries').replaceChildren();
+  el('history-older').hidden = true;
+  el('history-message').textContent = 'Loading history…';
+  const params = new URLSearchParams({task_id: taskId});
+  if (before !== null) params.set('before', before);
+  try {
+    const response = await fetch(`/api/history?${params}`, {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (generation !== historyGeneration || currentToken !== token) return;
+    if (response.status === 401) { disconnect(); el('message').textContent = 'Authentication failed.'; return; }
+    if (!response.ok) throw new Error('History unavailable. Retry with Newest entries.');
+    const data = await response.json();
+    if (generation !== historyGeneration || currentToken !== token) return;
+    if (data.type !== 'task_history' || !Array.isArray(data.entries)) throw new Error('Invalid history response.');
+    el('history-entries').replaceChildren(...data.entries.map(entry => {
+      const row = text('li', '');
+      row.append(text('strong', entry.kind), text('p', `${new Date(entry.occurred_at_ms).toLocaleString()} · Actor: ${entry.actor_id}`), text('p', `Sequence: ${entry.sequence} · Correlation: ${entry.correlation_id}`, 'hint'));
+      return row;
+    }));
+    historyBefore = data.next_before;
+    el('history-older').hidden = !historyBefore;
+    el('history-message').textContent = data.entries.length ? `${data.entries.length} entries${historyBefore ? ' · older entries available' : ' · end of history'}` : 'No audit entries.';
+  } catch (error) {
+    if (generation === historyGeneration && currentToken === token) el('history-message').textContent = error.message;
+  }
+}
+el('history-refresh').addEventListener('click', () => { if (historyTask) loadHistory(historyTask); });
+el('history-older').addEventListener('click', () => { if (historyTask && historyBefore) loadHistory(historyTask, historyBefore); });
+el('history-close').addEventListener('click', closeHistory);

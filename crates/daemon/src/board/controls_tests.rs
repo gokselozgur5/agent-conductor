@@ -147,3 +147,94 @@ async fn fixture(path: &std::path::Path) -> PersistentControlService {
         .unwrap();
     service
 }
+
+#[tokio::test]
+async fn history_is_scoped_paginated_private_and_read_only() {
+    use sqlx::Connection;
+    let directory = tempfile::tempdir().unwrap();
+    let service = fixture(directory.path()).await;
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        directory.path().join("state.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    for n in 0..205 {
+        sqlx::query("INSERT INTO audit_events (id, task_id, actor_id, kind, correlation_id, payload_json, occurred_at_ms) VALUES (?, 'controlled', '<script>actor</script>', 'synthetic', 'correlation', '{\"private\":\"DO_NOT_PROJECT_PAYLOAD\"}', ?)")
+            .bind(format!("history-{n}")).bind(n % 3).execute(&mut db).await.unwrap();
+    }
+    sqlx::query("INSERT INTO audit_events (id, task_id, actor_id, kind, correlation_id, payload_json, occurred_at_ms) VALUES ('unrelated', NULL, 'operator', 'UNRELATED', 'other', '{}', 999)").execute(&mut db).await.unwrap();
+    let token = "synthetic-history-credential-00000000";
+    let board = OperatorBoard::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        token.into(),
+        service.clone(),
+    )
+    .await
+    .unwrap();
+    let address = board.address();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(board.run_until(async {
+        let _ = stopped.await;
+    }));
+    let auth = format!("Authorization: Bearer {token}\r\n");
+    let path = "/api/history?task_id=controlled";
+    assert!(
+        super::tests::request(address, &address.to_string(), path, "")
+            .await
+            .starts_with("HTTP/1.1 401")
+    );
+    let mut before = None;
+    let mut sequences = Vec::new();
+    for expected in [100, 100, 6] {
+        let page = format!(
+            "{path}{}",
+            before
+                .as_ref()
+                .map_or_else(String::new, |value| format!("&before={value}"))
+        );
+        let raw = super::tests::request(address, &address.to_string(), &page, &auth).await;
+        assert!(raw.starts_with("HTTP/1.1 200"));
+        assert!(!raw.contains("DO_NOT_PROJECT_PAYLOAD"));
+        assert!(!raw.contains("UNRELATED"));
+        let data: serde_json::Value =
+            serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let entries = data["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), expected);
+        sequences.extend(
+            entries
+                .iter()
+                .map(|entry| entry["sequence"].as_str().unwrap().parse::<i64>().unwrap()),
+        );
+        before = data["next_before"].as_str().map(str::to_owned);
+        if sequences.len() == 100 {
+            // New append must not shift an exclusive older-page cursor.
+            sqlx::query("INSERT INTO audit_events (id, task_id, actor_id, kind, correlation_id, payload_json, occurred_at_ms) VALUES ('newer', 'controlled', 'operator', 'newer', 'newer', '{}', 0)").execute(&mut db).await.unwrap();
+        }
+    }
+    assert!(before.is_none());
+    assert!(sequences.windows(2).all(|pair| pair[0] > pair[1]));
+    for cursor in ["0", "-1", "garbage", "9223372036854775808"] {
+        assert!(
+            service
+                .handle(ControlRequest::TaskHistory {
+                    task_id: "controlled".into(),
+                    before: Some(cursor.into())
+                })
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        service
+            .handle(ControlRequest::TaskHistory {
+                task_id: "missing".into(),
+                before: None
+            })
+            .await
+            .is_err()
+    );
+    assert_state(&service, "backlog", 0).await;
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}

@@ -435,6 +435,7 @@ mod tests {
         async fn handle(&self, request: Request) -> Result<Response, ErrorBody> {
             if matches!(request, Request::Health) {
                 return Ok(Response::Health(HealthResponse {
+                    repository_watcher: conductor_protocol::WatcherStatus::Disabled,
                     status: HealthStatus::Ready,
                     boot_generation: 1,
                     uptime_millis: 0,

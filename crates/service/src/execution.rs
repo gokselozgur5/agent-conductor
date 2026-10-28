@@ -98,6 +98,17 @@ impl<C: Clock> PersistentControlService<C> {
                 "execution already exists; reconcile before retry",
             ));
         }
+        if launch.packet.contract.adapter.kind != AdapterKind::Fake {
+            let root = launch.packet.contract.workspace.clone();
+            let manifest =
+                tokio::task::spawn_blocking(move || conductor_runtime::observe_attempt_tree(&root))
+                    .await
+                    .map_err(|_| runtime_error("owned baseline interrupted"))?
+                    .map_err(|_| runtime_error("owned baseline refused"))?;
+            self.publish_owned_scan(effect_token, &launch.packet, manifest, true)
+                .await?;
+            self.validate_runtime_owner(&launch.packet).await?;
+        }
         let wrapper_identity = Uuid::now_v7().to_string();
         let mut acknowledged = None;
         let connection = RunnerConnection::launch(wrapper, launch, |ack| async {
@@ -210,6 +221,8 @@ impl<C: Clock> PersistentControlService<C> {
                                 .await.ok().and_then(Result::ok);
                         }
                         let _ = self.stop_controlled_execution(token,wrapper_identity,connection).await;
+                        let _guard = self.mutations.lock().await;
+                        self.ensure_instruction_current_locked(packet).await?;
                         return Err(runtime_error("native execution lost current task ownership"));
                     }
                 }
@@ -220,7 +233,8 @@ impl<C: Clock> PersistentControlService<C> {
         let record = self
             .validate_execution_connection(token, wrapper_identity, &connection)
             .await?;
-        let current = self.validate_runtime_owner(packet).await.is_ok();
+        let instructions_current = self.ensure_instruction_current_locked(packet).await?;
+        let current = instructions_current && self.validate_runtime_owner(packet).await.is_ok();
         let stopped_fence = match &terminal {
             Some(RunnerEvent::Stopped { stdout, .. }) if settled => {
                 restricted_stop_fence(packet, stdout)
@@ -455,6 +469,8 @@ impl<C: Clock> PersistentControlService<C> {
         packet
             .validate()
             .map_err(|_| runtime_error("invalid runtime contract"))?;
+        conductor_runtime::read_pinned_instructions(packet)
+            .map_err(|_| runtime_error("approved instruction changed or unavailable"))?;
         let row = self
             .store
             .task(&packet.contract.task_id)

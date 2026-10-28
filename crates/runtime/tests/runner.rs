@@ -59,6 +59,35 @@ async fn exited(child: &mut Child) -> std::process::ExitStatus {
         .expect("wait")
 }
 
+// Readiness is not a missed-heartbeat test. Maintain the lease until the
+// descendant has demonstrably progressed, then deliberately exercise stop.
+async fn wait_for_progress(
+    writer: &mut ChildStdin,
+    hash: &str,
+    path: &std::path::Path,
+    prior: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            send(
+                writer,
+                &RunnerControl::Renew {
+                    packet_sha256: hash.into(),
+                    continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock")
+                        + 5000,
+                },
+            )
+            .await;
+            if std::fs::read(path).unwrap_or_default().len() > prior {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("worker progress while lease is renewed");
+}
+
 #[tokio::test]
 async fn no_worker_side_effect_before_matching_recorded_release() {
     let directory = tempfile::tempdir().expect("directory");
@@ -136,7 +165,7 @@ async fn parent_loss_and_missed_renewal_stop_the_worker_group() {
         let directory = tempfile::tempdir().expect("directory");
         let input = launch(
             directory.path(),
-            "( /bin/sleep 1; printf escaped > escaped ) & printf ready > running; wait",
+            "/bin/sleep 0.3; ( while [ ! -e probe ]; do /bin/sleep 0.02; done; printf escaped > escaped ) & printf ready > running; wait",
             150,
         );
         let hash = input.packet.sha256().expect("hash");
@@ -150,26 +179,28 @@ async fn parent_loss_and_missed_renewal_stop_the_worker_group() {
             &RunnerControl::Release {
                 continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock")
                     + 5000,
-                packet_sha256: hash,
+                packet_sha256: hash.clone(),
             },
         )
         .await;
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !directory.path().join("running").exists() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("worker started");
+        wait_for_progress(&mut writer, &hash, &directory.path().join("running"), 0).await;
         if parent_loss {
             drop(writer);
         }
-        assert!(matches!(
-            event(&mut reader).await,
-            RunnerEvent::Stopped { .. }
-        ));
+        let RunnerEvent::Stopped { reason, .. } = event(&mut reader).await else {
+            panic!("expected stop");
+        };
+        assert_eq!(
+            reason,
+            if parent_loss {
+                "parent_lost_or_invalid_control"
+            } else {
+                "lease_or_runtime_expired"
+            }
+        );
         assert!(exited(&mut child).await.success());
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        std::fs::write(directory.path().join("probe"), "probe").unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!directory.path().join("escaped").exists());
     }
 }
@@ -438,7 +469,7 @@ async fn stopped_observation_allows_prior_writes_but_no_later_writes() {
     let directory = tempfile::tempdir().expect("directory");
     let input = launch(
         directory.path(),
-        "( while :; do printf tick >> writes; /bin/sleep 0.02; done ) >/dev/null 2>&1 & /bin/sleep 5",
+        "/bin/sleep 0.3; ( while :; do printf tick >> writes; /bin/sleep 0.02; done ) >/dev/null 2>&1 & /bin/sleep 5",
         2000,
     );
     let (mut child, mut writer, mut reader) = wrapper(&input).await;
@@ -455,29 +486,113 @@ async fn stopped_observation_allows_prior_writes_but_no_later_writes() {
     )
     .await;
     let path = directory.path().join("writes");
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if std::fs::read(&path).unwrap_or_default().len() >= 8 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("descendant must have already written");
+    let hash = input.packet.sha256().expect("hash");
+    wait_for_progress(&mut writer, &hash, &path, 0).await;
     let before = std::fs::read(&path).unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        std::fs::read(&path).unwrap().len() > before.len(),
-        "live positive control"
-    );
+    wait_for_progress(&mut writer, &hash, &path, before.len()).await;
     send(&mut writer, &RunnerControl::Cancel).await;
-    assert!(matches!(
-        event(&mut reader).await,
-        RunnerEvent::Stopped { .. }
-    ));
+    let RunnerEvent::Stopped { reason, .. } = event(&mut reader).await else {
+        panic!("expected stop");
+    };
+    assert_eq!(reason, "cancelled");
     let stopped = std::fs::read(&path).unwrap();
     assert!(exited(&mut child).await.success());
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(std::fs::read(&path).unwrap(), stopped);
+}
+
+#[tokio::test]
+async fn instruction_change_before_ack_or_release_never_starts_worker() {
+    use conductor_runtime::InstructionPin;
+    use sha2::{Digest, Sha256};
+    for before_ack in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let instruction = root.join("policy.md");
+        std::fs::write(&instruction, "approved instruction").unwrap();
+        let mut input = launch(&root, "printf ran > worker-ran", 1000);
+        input.packet.contract.instructions = vec![InstructionPin {
+            path: instruction.clone(),
+            sha256: format!("{:x}", Sha256::digest(b"approved instruction")),
+        }];
+        if before_ack {
+            std::fs::write(&instruction, "changed instruction").unwrap();
+        }
+        let (mut child, mut writer, mut reader) = wrapper(&input).await;
+        if !before_ack {
+            assert!(matches!(
+                event(&mut reader).await,
+                RunnerEvent::Ready { .. }
+            ));
+            std::fs::write(&instruction, "changed instruction").unwrap();
+            send(
+                &mut writer,
+                &RunnerControl::Release {
+                    packet_sha256: input.packet.sha256().unwrap(),
+                    continuous_deadline_ms: conductor_runtime::continuous_millis().unwrap() + 5000,
+                },
+            )
+            .await;
+        }
+        assert!(!exited(&mut child).await.success());
+        let mut extra = Vec::new();
+        reader.read_until(b'\n', &mut extra).await.unwrap();
+        assert!(
+            extra.is_empty(),
+            "invalid instruction must not produce a ready or terminal-success frame"
+        );
+        assert!(!directory.path().join("worker-ran").exists());
+    }
+}
+
+#[tokio::test]
+async fn changed_instruction_refuses_renewal_and_stops_live_worker() {
+    use conductor_runtime::InstructionPin;
+    use sha2::{Digest, Sha256};
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let instruction = root.join("policy.md");
+    std::fs::write(&instruction, "approved").unwrap();
+    let mut input = launch(
+        &root,
+        "while :; do printf tick >> writes; /bin/sleep 0.02; done",
+        2000,
+    );
+    input.packet.contract.instructions = vec![InstructionPin {
+        path: instruction.clone(),
+        sha256: format!("{:x}", Sha256::digest(b"approved")),
+    }];
+    let hash = input.packet.sha256().unwrap();
+    let (mut child, mut writer, mut reader) = wrapper(&input).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Ready { .. }
+    ));
+    send(
+        &mut writer,
+        &RunnerControl::Release {
+            packet_sha256: hash.clone(),
+            continuous_deadline_ms: conductor_runtime::continuous_millis().unwrap() + 5000,
+        },
+    )
+    .await;
+    let output_path = directory.path().join("writes");
+    wait_for_progress(&mut writer, &hash, &output_path, 0).await;
+    std::fs::write(instruction, "changed").unwrap();
+    send(
+        &mut writer,
+        &RunnerControl::Renew {
+            packet_sha256: hash,
+            continuous_deadline_ms: conductor_runtime::continuous_millis().unwrap() + 5000,
+        },
+    )
+    .await;
+    let RunnerEvent::Stopped { reason, .. } = event(&mut reader).await else {
+        panic!("expected stop")
+    };
+    assert_eq!(reason, "instruction_changed_or_unavailable");
+    assert!(exited(&mut child).await.success());
+    let stopped = std::fs::read(&output_path).unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(std::fs::read(output_path).unwrap(), stopped);
 }

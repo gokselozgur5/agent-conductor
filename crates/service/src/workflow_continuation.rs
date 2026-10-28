@@ -106,6 +106,7 @@ impl<C: Clock> PersistentControlService<C> {
         worker: BTreeMap<String, String>,
         verifier: BTreeMap<String, String>,
     ) -> Result<WorkflowOutcome, StoreError> {
+        crate::workflow::validate_plan(plan)?;
         let packet = {
             let _guard = self.mutations.lock().await;
             let (task, packet) = self
@@ -148,6 +149,7 @@ impl<C: Clock> PersistentControlService<C> {
         if !source.starts_with(&root)
             || packet.objective != plan.objective
             || packet.contract.checks != plan.checks
+            || packet.contract.instructions != plan.instructions
         {
             return Err(invalid("retained workspace or plan binding mismatch"));
         }

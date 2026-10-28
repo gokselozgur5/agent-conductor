@@ -2,31 +2,31 @@
 
 ## Current result
 
-The opt-in native workflow now runs assignment → restricted Claude writer →
-source capture → isolated required checks → distinct read-only native verifier →
-domain-controlled completion. The first actual Claude/Codex synthetic run reached
-`completed` in 71.36 seconds; its source checkout stayed unchanged and SQLite
-confirmed distinct worker/verifier identities with matching source evidence. A
-second run reused the registered project and database and completed in 65.08
-seconds with the same source identity and unchanged original checkout.
+The local operator launcher (`tools/conductor`) runs the authenticated board,
+repository observation and opt-in durable workflow dispatcher. Accepted pinned
+Claude and Codex adapters have completed real writer → immutable capture → checks
+→ independent review workflows, including retained-work and fenced crash recovery.
+The original checkout remains unchanged; task completion belongs to the domain.
 
-This is a working vertical workflow, not full v1 acceptance. The daemon supports both one-shot `--run-plan` and an opt-in persistent
-`--dispatch` queue. CLI/board submission persists approved plans before execution. See
-[NATIVE_WORKFLOW.md](NATIVE_WORKFLOW.md) for the operator command and limitations.
-The native workflow shipped through PR #2 (issue #1 closed). The native
-terminal/renewal race fix shipped through PR #5 (issue #4 closed).
+Repository hooks now observe configured source repositories and owned attempt
+trees, debounce changes, flush normal accepted terminal captures and admit one
+approved subscribed workflow through atomic delivery acknowledgement. Advisory
+snapshot references and explicit original-file instruction pins reach native
+packets with separate trust boundaries. See [LOCAL_OPERATOR.md](LOCAL_OPERATOR.md),
+[REPOSITORY_HOOKS.md](REPOSITORY_HOOKS.md) and
+[NATIVE_WORKFLOW.md](NATIVE_WORKFLOW.md).
 
-An opt-in authenticated loopback operator board now displays authoritative task
-state, checks and independent acceptance. Two Chrome probes verified rendering,
-wrong-token refusal, injection-as-text, live refresh, stale-state indication and
-disconnect. The read-only board shipped through PR #6 after exact-head macOS/Linux CI.
-Version-bound ready/pause/resume/cancel controls are implemented under issue #7
-and shipped through PR #8 after macOS/Linux CI, real SQLite/HTTP tests and an
-isolated Chrome run. Atomic verification/source publication shipped through PR #10; its fault
-regression preserves task state after a late bind failure. Durable dispatch shipped through PR #12 after exact-head CI. Fenced-workspace
-continuation shipped through PR #14 after exact-head CI. Observed restricted
-writer stop evidence under issue #15 passed real writer-pause/restart/continuation
-acceptance and shipped through PR #16 after exact-head CI.
+The task-history branch adds paginated audit metadata in the board and CLI. See
+[TASK_HISTORY.md](TASK_HISTORY.md) for its read-only contract and validation.
+The working local workflow is not full v1 acceptance. Remaining work includes
+broader project/agent/event/checkpoint visibility, task dependencies, outer advisory
+discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,
+load/restore/redaction validation and seven-day soak. Issue #20 retains an
+unresolved historical supervision deadline; do not infer a cause from green tests.
+
+The sections below preserve earlier acceptance milestones. Their counts and
+then-pending items are historical; current hook coverage is maintained in
+REPOSITORY_HOOKS.md, and current product limits are listed above.
 
 ## Implemented
 
@@ -167,3 +167,52 @@ no-overwrite publication. Storage regression proves stale-boot refusal and the
 one-automatic-retry limit across another restart; explicit continuation remains
 available. This slice still requires exact-head CI. Generic hostile-process
 fencing, hooks, other-host isolation and full-product acceptance remain open.
+
+
+## Repository observation integration
+
+The current hooks branch provides opt-in daemon `--watch-config`, bounded
+read-only content observation, quiet/max-latency debounce and atomic publication
+of at most256 events plus the advanced baseline. A real daemon/CLI/Git probe passed
+burst coalescing, path routing, source-echo suppression, no raw-content payload,
+updates/deletion, ignore exclusion, changes across restart and HEAD events. See
+[REPOSITORY_HOOKS.md](REPOSITORY_HOOKS.md) for exact limits and current evidence.
+
+166 full workspace tests passed after a stop-fixture readiness correction; all
+prior failures remain recorded. The controlled delayed-start probe explains the
+fixture's missed-renewal assumption, not every historical timeout. The earlier
+socket-permit deadline remains unresolved under issue20. Issue19 remains open:
+owned-attempt attribution and eligible bounded wake are not yet implemented.
+No model calls were made for watcher acceptance.
+
+Explicit instruction integration now carries ordered approved original-file pins
+through native plans, including exact outer-workspace files without parent tool
+access. Active tasks are blocked on changed pins; pause/cancel and retained files
+are preserved, with block persistence across restart. Continuation revalidates
+original pins. All 174 workspace tests pass, including JSON prompt-expansion
+refusal and durable invalidation. This does not complete automatic discovery,
+attribution or wake. The synthetic native instruction workflow completed in
+301.89 seconds: queued submission survived restart, duplicate submission was
+idempotent, Claude produced the required file, checks passed and independent
+Codex review accepted. Original project and instruction content stayed unchanged;
+no policy copy appeared in work/source outputs. The persisted writer packet
+contains only workspace plus exact approved-file read roots. Reviewer pin
+construction was source-inspected; its packet is not separately persisted.
+Evidence: private `instruction-workflow-v1/receipt.json` and `packet-audit.json`.
+Exact integration commit CI 40693075343 passed on both supported CI hosts.
+
+
+## Watcher operational health
+
+The service health response and operator board now report observation state.
+A requested watcher starts degraded until its first successful scan round, and
+failure, task abort or unexpected drop cannot leave it reporting healthy.
+Graceful shutdown reports stopped. Disabled observation remains explicit.
+The daemon remains available for diagnosis and task control after watcher failure.
+
+The shared-service failure/abort/shutdown regression passed. The isolated real
+daemon and Chrome probe displayed `Degraded · Watcher: failed`, retained task
+rendering and live refresh, refused unauthenticated access and preserved injection,
+credential-storage and disconnect boundaries. Evidence: private
+`watcher-health-v1/receipt.json`. This reports watcher process state, not bounded
+scan freshness. Owned-attempt attribution and bounded wake remain outstanding.

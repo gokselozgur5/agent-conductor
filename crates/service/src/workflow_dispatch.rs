@@ -73,8 +73,8 @@ impl<C: Clock> PersistentControlService<C> {
                     Ok(outcome) => {
                         serde_json::json!({"completed":outcome.completed,"source":outcome.source})
                     }
-                    Err(_) => {
-                        serde_json::json!({"completed":false,"reason":"workflow stopped; inspect retained task and artifacts"})
+                    Err(error) => {
+                        serde_json::json!({"completed":false,"reason": public_failure(&error)})
                     }
                 }
             }
@@ -89,5 +89,39 @@ impl<C: Clock> PersistentControlService<C> {
             )
             .await?;
         Ok(true)
+    }
+}
+
+// Publish only fixed diagnostic codes, never arbitrary database or vendor text.
+fn public_failure(error: &StoreError) -> &'static str {
+    if let StoreError::Integrity(reason) = error {
+        match reason.as_str() {
+            "verifier deadline elapsed" => return "verifier deadline elapsed",
+            "verifier output limit exceeded" => return "verifier output limit exceeded",
+            "verifier execution failed" => return "verifier execution failed",
+            "verifier protocol failed" => return "verifier protocol failed",
+            "verifier decision is not strict JSON" => return "verifier decision is not strict JSON",
+            "verifier decision identity mismatch" => return "verifier decision identity mismatch",
+            _ => {}
+        }
+    }
+    "workflow stopped; inspect retained task and artifacts"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dispatch_diagnostics_expose_only_fixed_failure_codes() {
+        assert_eq!(
+            public_failure(&StoreError::Integrity("verifier deadline elapsed".into())),
+            "verifier deadline elapsed"
+        );
+        assert!(
+            !public_failure(&StoreError::Integrity(
+                "private arbitrary vendor output".into()
+            ))
+            .contains("private")
+        );
     }
 }
