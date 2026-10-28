@@ -98,6 +98,17 @@ impl<C: Clock> PersistentControlService<C> {
                 "execution already exists; reconcile before retry",
             ));
         }
+        if launch.packet.contract.adapter.kind != AdapterKind::Fake {
+            let root = launch.packet.contract.workspace.clone();
+            let manifest =
+                tokio::task::spawn_blocking(move || conductor_runtime::observe_attempt_tree(&root))
+                    .await
+                    .map_err(|_| runtime_error("owned baseline interrupted"))?
+                    .map_err(|_| runtime_error("owned baseline refused"))?;
+            self.publish_owned_scan(effect_token, &launch.packet, manifest, true)
+                .await?;
+            self.validate_runtime_owner(&launch.packet).await?;
+        }
         let wrapper_identity = Uuid::now_v7().to_string();
         let mut acknowledged = None;
         let connection = RunnerConnection::launch(wrapper, launch, |ack| async {

@@ -36,6 +36,7 @@ pub async fn serve(
         graceful: false,
     };
     let started = Instant::now();
+    let mut owned_states = std::collections::BTreeMap::new();
     let mut states: Vec<_> = configs
         .iter()
         .map(|_| RepositoryWatchState::default())
@@ -61,6 +62,20 @@ pub async fn serve(
                 eprintln!(
                     "repository watcher stopped: observation or publication refused; inspect configuration and retained baseline"
                 );
+                return;
+            }
+        }
+        for project in configs
+            .iter()
+            .map(|config| &config.project_id)
+            .collect::<BTreeSet<_>>()
+        {
+            if service
+                .poll_owned_workspaces(project, owned_states.entry(project.clone()).or_default())
+                .await
+                .is_err()
+            {
+                eprintln!("repository watcher stopped: owned observation refused");
                 return;
             }
         }

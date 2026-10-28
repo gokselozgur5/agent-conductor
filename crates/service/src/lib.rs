@@ -43,7 +43,7 @@ mod workflow_continuation;
 #[cfg(unix)]
 mod workflow_dispatch;
 #[cfg(unix)]
-pub use repository_watch::{RepositoryWatch, RepositoryWatchState};
+pub use repository_watch::{OwnedWatchState, RepositoryWatch, RepositoryWatchState};
 #[cfg(unix)]
 pub use workflow::{NativeWorkflowPlan, WorkflowOutcome};
 #[cfg(unix)]
@@ -2519,6 +2519,7 @@ mod effect_tests {
             let workspace = directory.path().join("work");
             fs::create_dir(&workspace).unwrap();
             fs::write(workspace.join("result.txt"), "candidate source").unwrap();
+            let workspace = workspace.canonicalize().unwrap();
             let mut input = runtime_launch(&workspace);
             input.packet.contract.authority.allow_workspace_commands = false;
             input.packet.contract.adapter.kind = AdapterKind::Claude;
@@ -2559,6 +2560,67 @@ mod effect_tests {
                 .launch_execution(&wrapper, &input, &token, "runner")
                 .await
                 .expect("release");
+            let project = store.task("task").await.unwrap().unwrap().project_id;
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                    .await
+                    .unwrap(),
+                0
+            );
+            store
+                .upsert_event_subscription(&EventSubscription {
+                    schema_version: 1,
+                    id: "owned-test".into(),
+                    agent_id: "worker".into(),
+                    topic_filter: "file.*".into(),
+                    project_id: Some(project.clone()),
+                    path_prefix: None,
+                    echo_source: true,
+                    created_at_ms: 100,
+                })
+                .await
+                .unwrap();
+            fs::write(workspace.join("observed.txt"), "private observed output").unwrap();
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                    .await
+                    .unwrap(),
+                0
+            );
+            let delivery = store
+                .claim_event_delivery("worker", 100, &EventLimits::default())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(delivery.event.source_agent_id, "worker");
+            assert_eq!(delivery.event.task_id.as_deref(), Some("task"));
+            assert_eq!(delivery.event.attempt_id.as_deref(), Some("attempt"));
+            assert_eq!(delivery.event.lease_epoch, Some(1));
+            assert_eq!(delivery.event.correlation_id, token);
+            assert_eq!(delivery.event.generation, 0);
+            assert!(
+                !delivery
+                    .event
+                    .payload_json
+                    .contains("private observed output")
+            );
+            fs::remove_file(workspace.join("observed.txt")).unwrap();
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                    .await
+                    .unwrap(),
+                1
+            );
             // Force a failed renewal while the matching terminal frame is still
             // in transit. Previously this discarded a successful native result.
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2588,6 +2650,15 @@ mod effect_tests {
             if replace_packet {
                 assert!(result.is_err());
                 assert_eq!(persisted.state, ExecutionState::Started);
+                service.clock.set(100_000);
+                fs::write(workspace.join("expired.txt"), "unowned after lease expiry").unwrap();
+                assert_eq!(
+                    service
+                        .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                        .await
+                        .unwrap(),
+                    0
+                );
             } else if stopped && valid {
                 assert!(result.is_err(), "stop is never a successful candidate");
                 assert_eq!(persisted.state, ExecutionState::Fenced);

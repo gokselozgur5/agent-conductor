@@ -164,3 +164,27 @@ fn attempt_capture_includes_new_files_and_baseline_deletions() {
     );
     assert!(!root.path().join("refused").exists());
 }
+
+#[test]
+fn attempt_observation_tracks_private_changes_without_copying_content() {
+    use conductor_runtime::observe_attempt_tree;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    fs::create_dir(root.join("nested")).unwrap();
+    fs::write(root.join("nested/output"), b"first").unwrap();
+    let first = observe_attempt_tree(&root).unwrap();
+    assert_eq!(first.entries.len(), 1);
+    assert_eq!(first.entries[0].path, "nested/output");
+    fs::write(root.join("nested/output"), b"other").unwrap();
+    let second = observe_attempt_tree(&root).unwrap();
+    assert_ne!(first.entries[0].sha256, second.entries[0].sha256);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    fs::remove_file(root.join("nested/output")).unwrap();
+    assert!(observe_attempt_tree(&root).unwrap().entries.is_empty());
+    symlink("/etc/passwd", root.join("link")).unwrap();
+    assert!(observe_attempt_tree(&root).is_err());
+    fs::remove_file(root.join("link")).unwrap();
+    fs::write(root.join("original"), b"private").unwrap();
+    fs::hard_link(root.join("original"), root.join("alias")).unwrap();
+    assert!(observe_attempt_tree(&root).is_err());
+}

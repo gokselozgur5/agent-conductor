@@ -22,6 +22,11 @@ pub struct RepositoryWatchState {
     pending_since: Option<std::time::Duration>,
     draining: bool,
 }
+/// Bounded round-robin cursor for active execution observation.
+#[derive(Default)]
+pub struct OwnedWatchState {
+    cursor: String,
+}
 impl RepositoryWatchState {
     fn ready(&mut self, fingerprint: String, now: std::time::Duration) -> bool {
         let initial = self.last.is_none();
@@ -110,6 +115,159 @@ impl<C: Clock> PersistentControlService<C> {
         let count = self.publish_repository_scan(config, observed).await?;
         state.published(count);
         Ok(count)
+    }
+
+    /// Observes live private attempt trees for a configured project. Ownership is
+    /// revalidated after filesystem reads and serialized with lifecycle mutations.
+    /// # Errors
+    /// Refuses invalid retained contracts, unsafe trees and publication conflicts.
+    pub async fn poll_owned_workspaces(
+        &self,
+        project_id: &str,
+        state: &mut OwnedWatchState,
+    ) -> Result<usize, StoreError> {
+        let mut count = 0;
+        let records = self
+            .store
+            .started_execution_page(project_id, &state.cursor)
+            .await?;
+        let next = if records.len() == 16 {
+            records
+                .last()
+                .map(|r| r.preparation.effect_token.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        for record in records {
+            if record.state != agent_conductor_store::ExecutionState::Started {
+                continue;
+            }
+            let packet: conductor_runtime::ResumePacket =
+                serde_json::from_str(&record.preparation.packet_json)
+                    .map_err(|_| invalid("invalid owned observation packet"))?;
+            if packet.contract.adapter.kind == conductor_runtime::AdapterKind::Fake {
+                continue;
+            }
+            let task = self
+                .store
+                .task(&packet.contract.task_id)
+                .await?
+                .ok_or_else(|| invalid("owned observation task absent"))?;
+            if task.project_id != project_id {
+                continue;
+            }
+            if self.validate_runtime_owner(&packet).await.is_err() {
+                continue;
+            }
+            let root = packet.contract.workspace.clone();
+            let observed =
+                tokio::task::spawn_blocking(move || conductor_runtime::observe_attempt_tree(&root))
+                    .await
+                    .map_err(|_| invalid("owned observation interrupted"))?;
+            let manifest = match observed {
+                Ok(value) => value,
+                Err(conductor_runtime::SnapshotError::Changed) => continue,
+                Err(_) => return Err(invalid("owned observation refused")),
+            };
+            let _guard = self.mutations.lock().await;
+            if self.validate_runtime_owner(&packet).await.is_err() {
+                continue;
+            }
+            let current = self
+                .store
+                .execution(&record.preparation.effect_token)
+                .await?;
+            if current.as_ref() != Some(&record) {
+                continue;
+            }
+            count += self
+                .publish_owned_scan(&record.preparation.effect_token, &packet, manifest, false)
+                .await?;
+        }
+        state.cursor = next;
+        Ok(count)
+    }
+
+    pub(super) async fn publish_owned_scan(
+        &self,
+        token: &str,
+        packet: &conductor_runtime::ResumePacket,
+        manifest: conductor_runtime::SnapshotManifest,
+        initialize: bool,
+    ) -> Result<usize, StoreError> {
+        let task = self
+            .store
+            .task(&packet.contract.task_id)
+            .await?
+            .ok_or_else(|| invalid("owned observation task absent"))?;
+        let config = RepositoryWatch {
+            id: format!("owned:{:x}", Sha256::digest(token.as_bytes())),
+            project_id: task.project_id,
+            source_agent_id: packet.contract.worker_id.clone(),
+            root: packet.contract.workspace.clone(),
+        };
+        let config_json = serde_json::to_string(&(
+            token,
+            packet.sha256().map_err(|_| invalid("owned packet hash"))?,
+        ))
+        .map_err(|_| invalid("owned configuration encoding"))?;
+        let current = GitSnapshot {
+            starting_head: packet.contract.starting_head.clone(),
+            status_sha256: manifest
+                .sha256()
+                .map_err(|_| invalid("owned manifest hash"))?,
+            manifest,
+        };
+        let stored = self
+            .store
+            .repository_observation(&config.id)
+            .await
+            .map_err(|_| invalid("owned baseline read"))?;
+        let now = self.clock.read(self.boot_generation).wall_unix_ms;
+        let (version, next, mut events) = match stored {
+            None if initialize => (None, current, Vec::new()),
+            Some((prior, version, bytes)) if prior == config_json && !initialize => {
+                let old =
+                    serde_json::from_str(&bytes).map_err(|_| invalid("owned baseline decoding"))?;
+                let (next, events) = changes(&config, version, &old, &current, now)?;
+                if next == old {
+                    return Ok(0);
+                }
+                (Some(version), next, events)
+            }
+            _ => return Err(invalid("owned baseline identity mismatch or missing")),
+        };
+        for event in &mut events {
+            event
+                .source_session_id
+                .clone_from(&packet.contract.attempt_id);
+            event.correlation_id = token.into();
+            event.task_id = Some(packet.contract.task_id.clone());
+            event.attempt_id = Some(packet.contract.attempt_id.clone());
+            event.lease_epoch = Some(packet.contract.lease_epoch);
+            let mut payload: serde_json::Value =
+                serde_json::from_str(&event.payload_json).map_err(|_| invalid("owned payload"))?;
+            payload["attribution"] = "owned_workspace".into();
+            event.payload_json = payload.to_string();
+        }
+        let snapshot_json =
+            serde_json::to_string(&next).map_err(|_| invalid("owned snapshot encoding"))?;
+        self.store
+            .publish_repository_observation(
+                &RepositoryObservation {
+                    id: &config.id,
+                    config_json: &config_json,
+                    expected_version: version,
+                    snapshot_json: &snapshot_json,
+                    now_ms: now,
+                },
+                &events,
+                &EventLimits::default(),
+            )
+            .await
+            .map_err(|_| invalid("owned publication refused"))?;
+        Ok(events.len())
     }
 
     async fn publish_repository_scan(

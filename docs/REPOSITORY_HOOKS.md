@@ -113,3 +113,21 @@ Continuation revalidates the original pins; approving new hashes requires a new
 plan. See [native workflow instructions](NATIVE_WORKFLOW.md#explicit-approved-instructions).
 Automatic advisory discovery, owned attribution and eligible wake remain open;
 these changes do not complete the full repository-hook requirement.
+
+## Owned workspace integration under validation
+
+Native launch persists a private-tree baseline before wrapper release. Configured
+project watchers sample started native execution trees and revalidate the durable
+execution and monotonic task lease under lifecycle serialization before atomic
+publication. Events carry worker, task, attempt, epoch and spawn-effect correlation
+at generation zero for these operator-launched workflows. Attribution describes
+workspace ownership, not proof of the OS process responsible for each write.
+Fake executions are excluded; missing baselines fail closed.
+
+The full workspace suite and strict lint pass. The strengthened lifecycle test
+separately verifies creation/deletion, repeat-scan deduplication, actual delivery
+identity and raw-content exclusion. Real daemon acceptance, owned-tree debounce,
+terminal-scan coverage and expanded stale-owner negatives remain pending.
+Expired ownership is tested to publish no event. Started executions are selected
+in ordered pages of at most 16 per configured project per round, with a wrapping
+cursor so a busy early execution does not permanently hide later records. FR-7 and FR-8 are not complete.

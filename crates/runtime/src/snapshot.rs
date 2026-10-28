@@ -297,6 +297,23 @@ pub fn snapshot_attempt_tree(
     }
     Ok(manifest)
 }
+/// Observes a private non-Git attempt tree without creating a snapshot copy.
+/// Missing paths are represented by absence; callers compare their durable baseline.
+/// This is sampled observation, not proof of writer quiescence or attribution.
+/// # Errors
+/// Refuses noncanonical roots, unsupported objects, bounds and observed changes.
+pub fn observe_attempt_tree(source: &Path) -> Result<SnapshotManifest, SnapshotError> {
+    if !source.is_absolute() || source.canonicalize().map_err(|_| SnapshotError::Io)? != source {
+        return Err(SnapshotError::Invalid);
+    }
+    let before = tree_inventory(source)?;
+    let manifest = observe_paths(source, &before.iter().cloned().collect::<Vec<_>>())?;
+    if tree_inventory(source)? != before || manifest.entries.iter().any(|e| e.sha256.is_none()) {
+        return Err(SnapshotError::Changed);
+    }
+    Ok(manifest)
+}
+
 fn tree_inventory(root: &Path) -> Result<BTreeSet<String>, SnapshotError> {
     let mut pending = vec![root.to_path_buf()];
     let mut paths = BTreeSet::new();
