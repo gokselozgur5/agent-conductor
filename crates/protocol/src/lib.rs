@@ -324,6 +324,9 @@ pub struct TaskResponse {
     pub priority: i64,
     pub authority: Value,
     pub aggregate: Box<Task>,
+    /// Present only on fresh task reads with an attempt, never historical outcomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_observation: Option<LeaseObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -488,6 +491,7 @@ mod tests {
             priority: 7,
             authority: serde_json::json!({"mode": "test"}),
             aggregate: Box::new(Task::new("task-1".into(), vec![])),
+            lease_observation: None,
         }
     }
 
@@ -575,4 +579,15 @@ pub enum InventoryResource {
     Events,
     Subscriptions,
     Deliveries,
+}
+
+/// A read-time domain lease observation, not OS process liveness or permission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseObservation {
+    pub observed_at_ms: i64,
+    pub daemon_boot_generation: u64,
+    pub boot_matches: bool,
+    pub accepts_worker_mutation: bool,
+    pub worker_remaining_ms: Option<u64>,
+    pub owner_remaining_ms: Option<u64>,
 }

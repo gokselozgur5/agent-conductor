@@ -82,15 +82,35 @@ function renderTask(item) {
   field('Priority', item.priority);
   field('Worker', task.attempt?.worker);
   field('Attempt', task.attempt?.id);
+  if (task.attempt) {
+    const lease = task.attempt.lease;
+    const observation = item.lease_observation;
+    let label = 'Observation unavailable · refresh required';
+    if (observation) {
+      if (lease.status === 'ended') label = 'Ended';
+      else if (!observation.boot_matches) label = 'Prior daemon boot · worker mutation refused';
+      else if (lease.status === 'recovery_pending') label = 'Recovery pending · worker mutation refused';
+      else label = observation.accepts_worker_mutation ? 'Worker lease valid at observation' : 'Worker lease expired';
+    }
+    field('Lease', label);
+    field('Lease epoch', lease.epoch);
+    field('Lease / daemon boot', `${lease.boot_generation} / ${observation?.daemon_boot_generation ?? 'unknown'}`);
+    field('Worker / owner remaining at observation', observation ? `${observation.worker_remaining_ms ?? 'n/a'} / ${observation.owner_remaining_ms ?? 'n/a'} ms` : 'Unavailable');
+    field('Lease observed', observation ? new Date(observation.observed_at_ms).toISOString() : 'Unavailable');
+  }
   field('Verifier', task.verification?.verdict?.verifier);
   field('Review verdict', task.verification?.verdict ? (task.verification.verdict.accepted ? 'Accepted' : 'Rejected') : 'Pending');
   field('Source', task.verification?.source);
+  field('Review source', task.verification?.verdict?.source);
   card.append(details);
+  if (task.attempt) card.append(text('p', 'Lease validity is sampled by the daemon; it does not prove the process is live or authorize an action. Refresh after connection loss.', 'hint'));
   const results = new Map((task.verification?.checks || []).map(check => [check.check_id, check]));
   const checks = text('ul', '', 'checks');
   for (const check of task.required_checks || []) {
     const result = results.get(check.id);
-    checks.append(text('li', `${result ? (result.passed ? 'Passed' : 'Failed') : 'Pending'} · ${check.id}`));
+    const row = text('li', `${result ? (result.passed ? 'Passed' : 'Failed') : 'Pending'} · ${check.id}`);
+    if (result) row.append(text('p', `Recorded by ${result.recorded_by} · Source ${result.source}`, 'hint'));
+    checks.append(row);
   }
   card.append(checks);
   if (task.blocker) {
