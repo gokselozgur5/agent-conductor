@@ -3,8 +3,8 @@
 ## Scope and gate
 
 Phase 1 is the durable control core, not the full agent-management product.
-Implementation baseline: `5d26e14`. Local acceptance: formatting, strict Clippy,
-and three full workspace runs of 96 tests passed on macOS. A fresh independent
+Implementation baseline: `751ba5b`. Local acceptance: formatting, strict Clippy,
+and three full workspace runs of 97 tests passed on macOS. A fresh independent
 review at `5d26e14` accepted every historical reproducer family and the additional
 effect-directive retry fix; its separate build also passed 96 tests, formatting
 and strict Clippy. No reproduced findings remain open. Exact-published-SHA
@@ -37,7 +37,7 @@ final filter. Tests use temporary databases and fake resources, not user project
 | Reachable completion | `privileged_source_binding_completes_a_real_daemon_task`, `source_binding_cli_maps_to_privileged_request` | Fake/operator source label through privileged socket; external System commands remain denied |
 | Actor binding | `external_actor_roles_are_bound_to_registered_access` | Registered roles, not authenticated principals; socket access is privileged |
 | Invariant failures | `invariant_scan_reports_projection_ownership_boot_and_completion_contradictions` | Injected corrupt fixtures expose projection, lease, and self-verification contradictions |
-| Transport resource limits | `oversized_responses_become_bounded_structured_errors`, `unread_responses_time_out_and_release_connection_permits`, `completed_connection_tasks_are_reaped_during_operation` | Bounded frames/connections/timeouts; no load/SLA claim |
+| Transport resource limits | `oversized_responses_become_bounded_structured_errors`, `unread_responses_time_out_and_release_connection_permits`, `completed_connection_tasks_are_reaped_during_operation`, `stalled_overload_handler_is_bounded_and_cancelled_on_shutdown` | Normal connection pool plus one bounded rejection handler; further excess closes immediately; no load/SLA claim |
 | CLI error behavior | `json_error_uses_the_structured_nonzero_exit_status`, `structured_errors_have_stable_distinct_exit_codes` | JSON and human modes retain failure exit codes |
 | Runtime ownership/shutdown | `runtime_lock_fences_second_owner_and_recovers_a_stale_socket`, `runtime_lock_never_removes_a_non_socket_path`, `stalled_client_does_not_block_shutdown` | Cooperating daemon owners must share the lock path |
 
@@ -58,6 +58,19 @@ passes; changed-reason collision, restart replay and exactly one blocked
 transition are verified. External lifecycle commands still hash their complete
 versioned command payload. Review acceptance is targeted Phase 1 evidence, not a
 comprehensive security audit or full v1 acceptance.
+
+## Cross-platform correction
+
+Initial publication `5770ea7` passed macOS CI but failed two Linux overload tests
+in run `40645977411`: closing with unread request bytes produced ConnectionReset.
+`751ba5b` replaces immediate best-effort writes with one bounded rejection handler:
+limited request draining, awaited timed response writing, and shutdown tracking.
+Additional excess connections close immediately; malformed or stalled peers are
+not promised a structured response. The regression verifies the extra handler
+cannot create an unbounded pool or delay shutdown. Final cross-platform CI remains
+a required gate after this correction. Independent source review accepted the
+fix at `751ba5b`; a fresh daemon build passed all 17 daemon tests, including
+separate reruns of both initially failing tests.
 
 ## Requirement-by-requirement boundary audit
 

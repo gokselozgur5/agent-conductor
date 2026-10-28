@@ -3,7 +3,9 @@
 ## Current gate
 
 Phase 1 implementation and final independent reproducer review are accepted at
-`5d26e14`. No reproduced review findings remain open. The exact published
+`5d26e14`, with a separately reviewed transport correction at `751ba5b`.
+The initial Linux CI failure and its regression are recorded in the acceptance
+matrix. No reproduced review findings remain open locally. The exact published
 commit's macOS/Linux CI is the remaining acceptance gate.
 The implementation has passed local formatting, strict Clippy and repeated full
 workspace tests. See [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md) for exact evidence
@@ -15,7 +17,7 @@ and the distinction between core tests and deferred end-to-end v1 behavior.
 - Local Unix socket, exclusive runtime lock, bounded requests/responses, connection
   timeouts, completed-handler draining, orderly shutdown, human and JSON CLI.
 - Transactional lifecycle/audit/idempotency; frozen attempt contracts and epochs.
-- Restart boot generation and recovery heartbeat; automatic bounded periodic
+- Restart boot generation and recovery heartbeat; automatic periodic
   expiry reconciliation preserving durable task state.
 - Semantic event deduplication, source attribution, bounded delivery, expiring
   claim tokens and atomic consumer-state/ack transactions.
