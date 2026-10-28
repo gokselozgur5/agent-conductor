@@ -18,6 +18,11 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 mod effects;
 pub use effects::{EffectAudit, EffectRecord, EffectStatus};
+mod events;
+pub use events::{
+    ConsumerStateEffect, EVENT_SCHEMA_VERSION, EventDelivery, EventLimits, EventSourceIdentity,
+    EventStoreError, EventSubscription, PublishResult, SemanticEvent,
+};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
