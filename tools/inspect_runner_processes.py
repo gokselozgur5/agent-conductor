@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 
+from process_birth import observe as process_birth
+
 TAG = re.compile(r'--conductor-owner=v1:([0-9a-f]{64}):([0-9a-f]{64}):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\Z')
 
 
@@ -97,19 +99,30 @@ def inspect(database):
     observations = []
     unscoped = 0
     vanished = 0
+    changed = 0
+    births = {}
     for pid in runner_pids(inventory):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ValueError('inventory_deadline')
+        before = process_birth(pid)
+        if before is None:
+            vanished += 1
+            continue
         code, command = ps(['-ww', '-p', str(pid), '-o', 'args='], min(5, remaining))
         if code:
             vanished += 1
+            continue
+        after = process_birth(pid)
+        if after != before:
+            changed += 1
             continue
         tag = parse_tag(command)
         if tag is None:
             unscoped += 1
         else:
             observations.append((pid, tag))
+            births[pid] = before
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise ValueError('inventory_deadline')
@@ -122,10 +135,21 @@ def inspect(database):
         matches = correlate(db, row[0], observations)
     if time.monotonic() > deadline:
         raise ValueError('inventory_deadline')
-    return dict(version=1, authority_id=row[0], boot_generation=str(row[1]), observations=matches,
+    stable = []
+    for item in matches:
+        if process_birth(item['pid']) != births[item['pid']]:
+            changed += 1
+            continue
+        item['process_start_observation'] = births[item['pid']]
+        item['start_observation_unchanged'] = True
+        stable.append(item)
+    if time.monotonic() > deadline:
+        raise ValueError('inventory_deadline')
+    return dict(version=2, authority_id=row[0], boot_generation=str(row[1]), observations=stable,
+                changed_process_observations=changed,
                 unscoped_runners_on_host=unscoped, unavailable_process_observations=vanished,
                 process_liveness_proven=False, fencing_proven=False,
-                trust='Forgeable command-line metadata and a later SQLite snapshot. Races and PID reuse are possible. Reobserve contradictions; never signal a PID or grant lifecycle authority from this report.')
+                trust='Forgeable command-line metadata and a later SQLite snapshot. Kernel start markers were equal across reads, but timestamps have finite resolution. Races, exec changes and PID reuse are still possible. Reobserve contradictions; never signal a PID or grant lifecycle authority from this report.')
 
 
 def main():

@@ -3,7 +3,9 @@
 ## Current result
 
 Authority-bound native wrappers now expose scoped packet/wrapper correlation
-tags, checked before Ready. A bounded read-only process diagnostic reports
+tags, checked before Ready. Kernel start-marker comparisons now discard observed
+PID changes around argument and database reads; this is not a pinned process
+handle. A bounded read-only process diagnostic reports
 correspondence with durable execution metadata.
 [RUNNER_PROCESS_IDENTITY.md](RUNNER_PROCESS_IDENTITY.md) explains the remaining
 process-identity/race limits; this observation is not fencing authority.
