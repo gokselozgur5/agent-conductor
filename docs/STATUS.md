@@ -61,6 +61,9 @@ See [STORE_TRANSACTIONS.md](STORE_TRANSACTIONS.md) for the audit and evidence.
 Opt-in outer-workspace discovery now freezes bounded untrusted advisory sources
 into native plans without adding agent filesystem capabilities. See
 [SCOPED_ADVISORY.md](SCOPED_ADVISORY.md) for selection and trust boundaries.
+Retained nonterminal workspaces now publish explicitly external observations after
+ownership loss, without granting the former worker a lease or changing recovery
+acceptance. See [RETAINED_OBSERVATION.md](RETAINED_OBSERVATION.md).
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, abnormal ownership recovery,
 host protocol/Thor/Linux isolation,

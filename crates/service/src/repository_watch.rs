@@ -1,6 +1,9 @@
 //! Repository observation is data publication, never direct model-launch authority.
 use crate::{Clock, PersistentControlService, trusted_project_registration};
-use agent_conductor_store::{EventLimits, RepositoryObservation, SemanticEvent, StoreError};
+use agent_conductor_domain::Task;
+use agent_conductor_store::{
+    EventLimits, ExecutionRecord, ExecutionState, RepositoryObservation, SemanticEvent, StoreError,
+};
 use conductor_runtime::{GitSnapshot, SnapshotEntry};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,6 +16,11 @@ pub struct RepositoryWatch {
     pub project_id: String,
     pub source_agent_id: String,
     pub root: PathBuf,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WorkspaceAttribution {
+    Owned,
+    External(String),
 }
 /// Per-watch monotonic debounce state; publication baseline remains in `SQLite`.
 #[derive(Default)]
@@ -94,10 +102,17 @@ impl<C: Clock> PersistentControlService<C> {
     /// Records the trusted host's configured observation scope before dispatch starts.
     pub fn configure_repository_observation(&self, configs: &[RepositoryWatch]) {
         if let Ok(mut projects) = self.observed_projects.write() {
-            *projects = configs
-                .iter()
-                .map(|config| config.project_id.clone())
-                .collect();
+            projects.clear();
+            for config in configs {
+                projects
+                    .entry(config.project_id.clone())
+                    .and_modify(|old| {
+                        if config.source_agent_id < *old {
+                            old.clone_from(&config.source_agent_id);
+                        }
+                    })
+                    .or_insert_with(|| config.source_agent_id.clone());
+            }
         }
     }
 
@@ -117,7 +132,7 @@ impl<C: Clock> PersistentControlService<C> {
             .observed_projects
             .read()
             .map_err(|_| invalid("observation scope unavailable"))?
-            .contains(&task.project_id);
+            .contains_key(&task.project_id);
         if !enabled {
             return Ok(());
         }
@@ -219,7 +234,7 @@ impl<C: Clock> PersistentControlService<C> {
         let mut count = 0;
         let records = self
             .store
-            .started_execution_page(project_id, &state.cursor)
+            .observable_execution_page(project_id, &state.cursor)
             .await?;
         let next = if records.len() == 16 {
             records
@@ -230,11 +245,8 @@ impl<C: Clock> PersistentControlService<C> {
             String::new()
         };
         for record in records {
-            if record.state != agent_conductor_store::ExecutionState::Started {
-                continue;
-            }
-            let packet: conductor_runtime::ResumePacket =
-                serde_json::from_str(&record.preparation.packet_json)
+            let packet =
+                conductor_runtime::ResumePacket::decode(record.preparation.packet_json.as_bytes())
                     .map_err(|_| invalid("invalid owned observation packet"))?;
             if packet.contract.adapter.kind == conductor_runtime::AdapterKind::Fake {
                 continue;
@@ -247,9 +259,9 @@ impl<C: Clock> PersistentControlService<C> {
             if task.project_id != project_id {
                 continue;
             }
-            if self.validate_runtime_owner(&packet).await.is_err() {
+            let Some(attribution) = self.workspace_attribution(&packet, &record).await? else {
                 continue;
-            }
+            };
             let root = packet.contract.workspace.clone();
             let observed =
                 tokio::task::spawn_blocking(move || conductor_runtime::observe_attempt_tree(&root))
@@ -270,7 +282,7 @@ impl<C: Clock> PersistentControlService<C> {
                 continue;
             }
             let _guard = self.mutations.lock().await;
-            if self.validate_runtime_owner(&packet).await.is_err() {
+            if self.workspace_attribution(&packet, &record).await?.as_ref() != Some(&attribution) {
                 continue;
             }
             let current = self
@@ -281,7 +293,13 @@ impl<C: Clock> PersistentControlService<C> {
                 continue;
             }
             let published = self
-                .publish_owned_scan(&record.preparation.effect_token, &packet, manifest, false)
+                .publish_workspace_scan(
+                    &record.preparation.effect_token,
+                    &packet,
+                    manifest,
+                    false,
+                    &attribution,
+                )
                 .await?;
             state
                 .observation(&record.preparation.effect_token)?
@@ -292,12 +310,91 @@ impl<C: Clock> PersistentControlService<C> {
         Ok(count)
     }
 
+    async fn workspace_attribution(
+        &self,
+        packet: &conductor_runtime::ResumePacket,
+        record: &ExecutionRecord,
+    ) -> Result<Option<WorkspaceAttribution>, StoreError> {
+        if packet
+            .sha256()
+            .map_err(|_| invalid("workspace packet hash"))?
+            != record.preparation.packet_sha256
+            || packet.contract.task_id != record.preparation.task_id
+            || packet.contract.attempt_id != record.preparation.attempt_id
+            || i64::try_from(packet.contract.lease_epoch).ok()
+                != Some(record.preparation.lease_epoch)
+        {
+            return Err(invalid("workspace execution identity mismatch"));
+        }
+        let row = self
+            .store
+            .task(&packet.contract.task_id)
+            .await?
+            .ok_or_else(|| invalid("workspace task absent"))?;
+        let task: Task = serde_json::from_str(&row.aggregate_json)
+            .map_err(|_| invalid("workspace task invalid"))?;
+        if task.state.is_terminal()
+            || !task.attempt.as_ref().is_some_and(|attempt| {
+                attempt.id.0 == packet.contract.attempt_id
+                    && attempt.worker.0 == packet.contract.worker_id
+                    && attempt.lease.epoch == packet.contract.lease_epoch
+            })
+        {
+            return Ok(None);
+        }
+        if matches!(
+            record.state,
+            ExecutionState::Started | ExecutionState::Exited
+        ) && self.validate_runtime_owner(packet).await.is_ok()
+        {
+            return Ok(Some(WorkspaceAttribution::Owned));
+        }
+        let observer = self
+            .observed_projects
+            .read()
+            .map_err(|_| invalid("observation scope unavailable"))?
+            .get(&row.project_id)
+            .cloned();
+        let Some(observer) = observer else {
+            return Ok(None);
+        };
+        if self
+            .store
+            .agent(&observer)
+            .await?
+            .is_none_or(|agent| agent.access_mode != "read_only")
+        {
+            return Err(invalid(
+                "external workspace observation requires a registered read-only observer",
+            ));
+        }
+        Ok(Some(WorkspaceAttribution::External(observer)))
+    }
+
     pub(super) async fn publish_owned_scan(
         &self,
         token: &str,
         packet: &conductor_runtime::ResumePacket,
         manifest: conductor_runtime::SnapshotManifest,
         initialize: bool,
+    ) -> Result<usize, StoreError> {
+        self.publish_workspace_scan(
+            token,
+            packet,
+            manifest,
+            initialize,
+            &WorkspaceAttribution::Owned,
+        )
+        .await
+    }
+
+    async fn publish_workspace_scan(
+        &self,
+        token: &str,
+        packet: &conductor_runtime::ResumePacket,
+        manifest: conductor_runtime::SnapshotManifest,
+        initialize: bool,
+        attribution: &WorkspaceAttribution,
     ) -> Result<usize, StoreError> {
         let task = self
             .store
@@ -307,7 +404,10 @@ impl<C: Clock> PersistentControlService<C> {
         let config = RepositoryWatch {
             id: format!("owned:{:x}", Sha256::digest(token.as_bytes())),
             project_id: task.project_id,
-            source_agent_id: packet.contract.worker_id.clone(),
+            source_agent_id: match attribution {
+                WorkspaceAttribution::Owned => packet.contract.worker_id.clone(),
+                WorkspaceAttribution::External(observer) => observer.clone(),
+            },
             root: packet.contract.workspace.clone(),
         };
         let config_json = serde_json::to_string(&(
@@ -349,18 +449,7 @@ impl<C: Clock> PersistentControlService<C> {
             .transpose()
             .map_err(|_| invalid("invalid workflow trigger"))?;
         for event in &mut events {
-            event
-                .source_session_id
-                .clone_from(&packet.contract.attempt_id);
-            event.correlation_id = token.into();
-            inherit_trigger(event, trigger.as_ref())?;
-            event.task_id = Some(packet.contract.task_id.clone());
-            event.attempt_id = Some(packet.contract.attempt_id.clone());
-            event.lease_epoch = Some(packet.contract.lease_epoch);
-            let mut payload: serde_json::Value =
-                serde_json::from_str(&event.payload_json).map_err(|_| invalid("owned payload"))?;
-            payload["attribution"] = "owned_workspace".into();
-            event.payload_json = payload.to_string();
+            attribute_workspace_event(event, packet, token, attribution, trigger.as_ref())?;
         }
         let snapshot_json =
             serde_json::to_string(&next).map_err(|_| invalid("owned snapshot encoding"))?;
@@ -430,6 +519,44 @@ impl<C: Clock> PersistentControlService<C> {
         Ok(events.len())
     }
 }
+fn attribute_workspace_event(
+    event: &mut SemanticEvent,
+    packet: &conductor_runtime::ResumePacket,
+    token: &str,
+    attribution: &WorkspaceAttribution,
+    trigger: Option<&serde_json::Value>,
+) -> Result<(), StoreError> {
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&event.payload_json).map_err(|_| invalid("owned payload"))?;
+    event.task_id = Some(packet.contract.task_id.clone());
+    match attribution {
+        WorkspaceAttribution::Owned => {
+            event
+                .source_session_id
+                .clone_from(&packet.contract.attempt_id);
+            event.correlation_id = token.into();
+            inherit_trigger(event, trigger)?;
+            event.attempt_id = Some(packet.contract.attempt_id.clone());
+            event.lease_epoch = Some(packet.contract.lease_epoch);
+            payload["attribution"] = "owned_workspace".into();
+        }
+        WorkspaceAttribution::External(_) => {
+            event.topic = format!(
+                "workspace.external.{}",
+                event
+                    .topic
+                    .strip_prefix("file.")
+                    .ok_or_else(|| invalid("unexpected workspace event"))?
+            );
+            event.correlation_id.clone_from(&event.id);
+            payload["attribution"] = "external_workspace".into();
+            payload["observed_attempt_id"] = packet.contract.attempt_id.clone().into();
+        }
+    }
+    event.payload_json = payload.to_string();
+    Ok(())
+}
+
 fn inherit_trigger(
     event: &mut SemanticEvent,
     trigger: Option<&serde_json::Value>,

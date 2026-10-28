@@ -81,7 +81,7 @@ pub struct PersistentControlService<C = SystemClock> {
     clock: Arc<C>,
     mutations: Arc<Mutex<()>>,
     watcher_status: Arc<RwLock<WatcherStatus>>,
-    observed_projects: Arc<RwLock<std::collections::BTreeSet<String>>>,
+    observed_projects: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
 }
 
 impl<C: Clock> Clone for PersistentControlService<C> {
@@ -136,7 +136,7 @@ impl<C: Clock> PersistentControlService<C> {
             clock: Arc::new(clock),
             mutations: Arc::new(Mutex::new(())),
             watcher_status: Arc::new(RwLock::new(WatcherStatus::Disabled)),
-            observed_projects: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
+            observed_projects: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         };
         for lease in startup.recovery_pending {
             let Some(row) = service.store.task(&lease.task_id).await? else {
@@ -1471,6 +1471,7 @@ fn hash(v: &str) -> String {
 mod effect_tests {
     include!("checkpoint_tests.rs");
     include!("reassignment_tests.rs");
+    include!("unowned_tests.rs");
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
     use agent_conductor_store::{NewAgent, NewProject, NewTask, Store};
@@ -2770,10 +2771,21 @@ mod effect_tests {
             );
             if valid && !replace_packet && !fail_publication && !stopped {
                 if watch_final {
+                    store
+                        .create_agent(agent_conductor_store::NewAgent {
+                            id: "fixture-observer",
+                            adapter_kind: "observer",
+                            protocol_fingerprint: "fixture",
+                            capability_hash: "fixture",
+                            access_mode: "read_only",
+                            created_at_ms: 100,
+                        })
+                        .await
+                        .unwrap();
                     service.configure_repository_observation(&[RepositoryWatch {
                         id: "terminal-watch".into(),
                         project_id: project.clone(),
-                        source_agent_id: "worker".into(),
+                        source_agent_id: "fixture-observer".into(),
                         root: workspace.clone(),
                     }]);
                 }
@@ -2828,6 +2840,90 @@ mod effect_tests {
                         .unwrap(),
                     0
                 );
+                store
+                    .create_agent(agent_conductor_store::NewAgent {
+                        id: "observer",
+                        adapter_kind: "observer",
+                        protocol_fingerprint: "fixture",
+                        capability_hash: "fixture",
+                        access_mode: "read_only",
+                        created_at_ms: 100,
+                    })
+                    .await
+                    .unwrap();
+                store
+                    .create_agent(agent_conductor_store::NewAgent {
+                        id: "external-consumer",
+                        adapter_kind: "observer",
+                        protocol_fingerprint: "fixture",
+                        capability_hash: "fixture",
+                        access_mode: "read_only",
+                        created_at_ms: 100,
+                    })
+                    .await
+                    .unwrap();
+                store
+                    .upsert_event_subscription(&EventSubscription {
+                        schema_version: 1,
+                        id: "unowned-test".into(),
+                        agent_id: "external-consumer".into(),
+                        topic_filter: "workspace.external.*".into(),
+                        project_id: Some(project.clone()),
+                        path_prefix: None,
+                        echo_source: false,
+                        created_at_ms: 100,
+                    })
+                    .await
+                    .unwrap();
+                service.configure_repository_observation(&[RepositoryWatch {
+                    id: "external-scope".into(),
+                    project_id: project.clone(),
+                    source_agent_id: "observer".into(),
+                    root: workspace.clone(),
+                }]);
+                assert_eq!(
+                    service
+                        .poll_owned_workspaces(
+                            &project,
+                            &mut owned_state,
+                            std::time::Duration::from_secs(15)
+                        )
+                        .await
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    service
+                        .poll_owned_workspaces(
+                            &project,
+                            &mut owned_state,
+                            std::time::Duration::from_secs(16)
+                        )
+                        .await
+                        .unwrap(),
+                    1,
+                    "expired ownership changes must be observable without claiming the old lease"
+                );
+                let external = store
+                    .claim_event_delivery("external-consumer", 100_000, &EventLimits::default())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(external.event.source_agent_id, "observer");
+                assert_eq!(external.event.topic, "workspace.external.created");
+                assert_eq!(external.event.path_scope.as_deref(), Some("expired.txt"));
+                assert!(
+                    external.event.attempt_id.is_none() && external.event.lease_epoch.is_none()
+                );
+                let payload: serde_json::Value =
+                    serde_json::from_str(&external.event.payload_json).unwrap();
+                assert_eq!(payload["attribution"], "external_workspace");
+                assert!(
+                    !external
+                        .event
+                        .payload_json
+                        .contains("unowned after lease expiry")
+                );
             } else if stopped && valid {
                 assert!(result.is_err(), "stop is never a successful candidate");
                 assert_eq!(persisted.state, ExecutionState::Fenced);
@@ -2841,6 +2937,7 @@ mod effect_tests {
                         .await
                         .is_ok()
                 );
+                exercise_retained_observation(&service, &store, &workspace, &project, &token).await;
             } else if valid {
                 let (observed, mut candidate) = result.expect("candidate");
                 assert_eq!(candidate.text, "candidate only");
@@ -2965,6 +3062,7 @@ mod effect_tests {
             } else {
                 assert!(result.is_err());
                 assert_eq!(persisted.state, ExecutionState::Blocked);
+                exercise_retained_observation(&service, &store, &workspace, &project, &token).await;
             }
             assert_eq!(
                 store.has_unfenced_execution("task").await.unwrap(),

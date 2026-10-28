@@ -229,3 +229,12 @@ root-loss degraded health. All 300 distinct burst paths drained in 1.63 seconds.
 These are filesystem-to-event checks, not new model execution or full wake-latency
 acceptance. Scheduler tests cover missed hints, late hints, settling and backend
 failure; native notifications are exercised on CI hosts.
+
+## Retained nonterminal workspaces
+
+Configured observers now monitor current retained attempts after ownership loss.
+Changes use a separate `workspace.external.*` topic with observer identity and no
+lease or causal claim; ordinary `file.*` subscriptions remain separate. See
+[RETAINED_OBSERVATION.md](RETAINED_OBSERVATION.md) for current boundaries, source
+validation and replay behavior. Scoped outer document discovery is documented in
+[SCOPED_ADVISORY.md](SCOPED_ADVISORY.md); earlier sections preserve historical gates.
