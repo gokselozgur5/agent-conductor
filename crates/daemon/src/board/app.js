@@ -3,6 +3,7 @@ let token = '';
 let timer;
 let active = false;
 let mutating = false;
+let taskVersions = new Map();
 const el = id => document.getElementById(id);
 const text = (tag, value, className) => {
   const node = document.createElement(tag);
@@ -15,6 +16,7 @@ function disconnect() {
   clearInterval(timer);
   el('token').value = '';
   el('tasks').replaceChildren();
+  taskVersions.clear();
   el('toolbar').hidden = true;
   el('dispatch').hidden = true;
   el('queue').replaceChildren();
@@ -34,6 +36,7 @@ async function refresh() {
     const data = await response.json();
     if (currentToken !== token) return;
     if (data.type !== 'tasks' || !Array.isArray(data.tasks)) throw new Error('Unexpected service response.');
+    taskVersions = new Map(data.tasks.map(item=>[item.aggregate.id,item.aggregate]));
     el('tasks').replaceChildren(...data.tasks.map(renderTask));
     el('summary').textContent = `${data.tasks.length} task${data.tasks.length === 1 ? '' : 's'}`;
     el('message').textContent = data.tasks.length ? '' : 'No tasks yet. Submit a native workflow from the operator CLI.';
@@ -123,7 +126,15 @@ async function refreshQueue(currentToken) {
   const data = await response.json();
   if (currentToken !== token) return;
   if (data.type !== 'workflows' || !Array.isArray(data.entries)) throw new Error('Invalid queue response.');
-  el('queue').replaceChildren(...data.entries.map(item => text('li', `${item.task_id} · ${item.status}${item.outcome_json ? ' · ' + item.outcome_json : ''}`)));
+  el('queue').replaceChildren(...data.entries.map(item => {
+    const row=text('li', `${item.task_id} · ${item.status}${item.outcome_json ? ' · ' + item.outcome_json : ''}`);
+    const task=taskVersions.get(item.task_id);
+    if (task && !['completed','cancelled'].includes(task.state) && ['finished','needs_recovery'].includes(item.status)) {
+      const button=text('button','Continue retained work');
+      button.addEventListener('click',()=>continueWorkflow(task,button)); row.append(button);
+    }
+    return row;
+  }));
 }
 el('submit-plan').addEventListener('click', async () => {
   const file = el('plan').files[0];
@@ -142,3 +153,15 @@ el('submit-plan').addEventListener('click', async () => {
   } catch (_) { if(currentToken===token) el('message').textContent='Submission outcome unknown. Inspect queue before retrying.'; }
   finally { el('submit-plan').disabled=false; }
 });
+
+async function continueWorkflow(task,button) {
+  if(!token || !window.confirm(`Continue retained work for ${task.id}? New model work may start. Unverified write fences will be refused.`))return;
+  const currentToken=token; button.disabled=true;
+  try {
+    const response=await fetch('/api/workflows/continue',{method:'POST',headers:{Authorization:`Bearer ${currentToken}`,'Content-Type':'application/json'},body:JSON.stringify({task_id:task.id,expected_version:task.version}),signal:AbortSignal.timeout(5000)});
+    if(currentToken!==token)return;
+    await refresh();
+    el('message').textContent=response.ok?'Continuation queued from retained work.':'Continuation refused or unconfirmed. Inspect task version and execution fence before retrying.';
+  } catch(_) {if(currentToken===token)el('message').textContent='Continuation outcome unknown. Refresh before retrying.';}
+  finally {button.disabled=false;}
+}

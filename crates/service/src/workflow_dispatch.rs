@@ -55,10 +55,21 @@ impl<C: Clock> PersistentControlService<C> {
                 } else {
                     codex_auth
                 };
-                match self
-                    .run_native_workflow(&plan, worker_auth, verifier_auth)
+                let execution = if let Some(version) = job.resume_version {
+                    self.continue_native_workflow(
+                        &plan,
+                        u64::try_from(version).map_err(|_| {
+                            StoreError::Integrity("invalid continuation version".into())
+                        })?,
+                        worker_auth,
+                        verifier_auth,
+                    )
                     .await
-                {
+                } else {
+                    self.run_native_workflow(&plan, worker_auth, verifier_auth)
+                        .await
+                };
+                match execution {
                     Ok(outcome) => {
                         serde_json::json!({"completed":outcome.completed,"source":outcome.source})
                     }

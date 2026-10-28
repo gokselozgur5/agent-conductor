@@ -114,6 +114,23 @@ impl Store {
         row.map(decode).transpose()
     }
 
+    /// Reads the unique execution associated with an attempt.
+    /// # Errors
+    /// Returns database/record errors; ambiguous attempts are refused.
+    pub async fn execution_for_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<ExecutionRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM executions WHERE attempt_id=?")
+            .bind(attempt_id)
+            .fetch_all(&self.inner.readers)
+            .await?;
+        if rows.len() > 1 {
+            return Err(StoreError::Integrity("ambiguous attempt execution".into()));
+        }
+        rows.into_iter().next().map(decode).transpose()
+    }
+
     /// Persists an immutable packet before any wrapper is launched. Duplicate
     /// preparation returns the current record, never a new permission to spawn.
     /// # Errors

@@ -35,6 +35,8 @@ mod clock;
 #[cfg(unix)]
 mod workflow;
 #[cfg(unix)]
+mod workflow_continuation;
+#[cfg(unix)]
 mod workflow_dispatch;
 #[cfg(unix)]
 pub use workflow::{NativeWorkflowPlan, WorkflowOutcome};
@@ -560,6 +562,15 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
     #[allow(clippy::too_many_lines)]
     async fn handle(&self, request: Request) -> Result<Response, ErrorBody> {
         match request.clone() {
+            Request::ContinueWorkflow {
+                task_id,
+                expected_version,
+            } => {
+                self.queue_continuation(&task_id, expected_version)
+                    .await
+                    .map_err(store_error)?;
+                Ok(Response::WorkflowQueued { task_id })
+            }
             Request::SubmitWorkflow { plan_json } => self.submit_workflow(&plan_json).await,
             Request::ListWorkflows => {
                 let entries = self
@@ -2437,6 +2448,17 @@ mod effect_tests {
                 );
                 assert!(!directory.path().join("refused").exists());
                 assert!(store.has_unfenced_execution("task").await.unwrap());
+                let current: Task = serde_json::from_str(
+                    &store.task("task").await.unwrap().unwrap().aggregate_json,
+                )
+                .unwrap();
+                assert!(
+                    service
+                        .continuation_packet("task", current.version)
+                        .await
+                        .is_err(),
+                    "unfenced execution cannot continue"
+                );
                 candidate.file_only_tools = true;
                 if fail_publication {
                     let mut connection = SqliteConnection::connect(&format!(
@@ -2493,6 +2515,18 @@ mod effect_tests {
                 let row = store.task("task").await.unwrap().unwrap();
                 let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
                 assert_eq!(task.state, TaskState::Verifying);
+                assert!(
+                    service
+                        .continuation_packet("task", task.version)
+                        .await
+                        .is_ok()
+                );
+                assert!(
+                    service
+                        .continuation_packet("task", task.version - 1)
+                        .await
+                        .is_err()
+                );
                 assert_eq!(
                     task.verification.unwrap().source.unwrap().0,
                     format!("snapshot:{}", captured.sha256().unwrap())

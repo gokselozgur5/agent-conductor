@@ -23,8 +23,9 @@ disconnect. The read-only board shipped through PR #6 after exact-head macOS/Lin
 Version-bound ready/pause/resume/cancel controls are implemented under issue #7
 and shipped through PR #8 after macOS/Linux CI, real SQLite/HTTP tests and an
 isolated Chrome run. Atomic verification/source publication shipped through PR #10; its fault
-regression preserves task state after a late bind failure. Durable dispatch under
-issue #11 has passed local acceptance and awaits exact-head CI.
+regression preserves task state after a late bind failure. Durable dispatch shipped through PR #12 after exact-head CI. Fenced-workspace
+continuation under issue #13 passed real interruption/restart acceptance and
+awaits exact-head CI.
 
 ## Implemented
 
@@ -48,7 +49,7 @@ issue #11 has passed local acceptance and awaits exact-head CI.
 
 The latest local workspace run passed 157 tests, formatting, strict Clippy and
 credential/media scans. Evidence is kept privately under
-`reviews/agent-conductor-runtime-20261028/workflow-dispatch-workspace.log` and
+`reviews/agent-conductor-runtime-20261028/workflow-continuation-workspace.log` and
 `native-workflow-v1/`. The model-call cap is not an actual spend measurement.
 
 Phase 1 has separate accepted evidence in [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md).
@@ -56,7 +57,8 @@ Native workflow head `5520583` and race-fix head `277d653` passed macOS/Linux CI
 before their respective merges. Board head `2937f43` also passed both hosts and merged at `3fc64c7`.
 Control head `02e6954` passed both hosts and merged at `a761d94`.
 Atomic-source head `f461560` passed both hosts and merged at `2eb1f61`.
-The durable-dispatch branch still requires its own exact-SHA CI. Local results do not substitute for that remote check.
+Durable-dispatch head `eede6c9` passed both hosts and merged at `82496d3`.
+The continuation branch still requires its own exact-SHA CI. Local results do not substitute for that remote check.
 
 ## Trust boundaries
 
@@ -72,9 +74,8 @@ See [ADAPTER_CONFORMANCE.md](ADAPTER_CONFORMANCE.md) and [SANDBOX.md](SANDBOX.md
 
 - Native interruption/recovery acceptance and automatic continuation from retained
   checkpoints; recovery of retained fenced captures and durable review recovery.
-- Connect paused/resumed retained attempts to safe continuation; the current
-  dispatcher processes newly submitted plans sequentially but will not relaunch
-  interrupted claims automatically.
+- Complete recovery for interrupted writers without verified fences; explicit
+  continuation from fenced retained attempts is available on the current branch.
 - Broader operator API and coalesced filesystem/Git hooks.
 - Host protocol, Thor acceptance and supported host isolation beyond macOS checks.
 - Remaining adapter negative tests, load/restore/redaction validation and soak.
@@ -98,4 +99,21 @@ and absence of the stored plan body from API output (`operator-queue-v1`).
 
 See [WORKFLOW_DISPATCH.md](WORKFLOW_DISPATCH.md). Dispatch `finished` is not task
 acceptance; interrupted claims become `needs_recovery`, retaining artifacts.
-Automatic continuation and a real interrupted-dirty-attempt acceptance remain open.
+Unfenced mid-writer crash recovery and automatic continuation remain open.
+
+## Retained-work continuation acceptance
+
+A synthetic native writer created answer.txt; the daemon was interrupted during
+verification after writer fencing, then restarted. An explicit version-bound
+continuation created a new attempt and higher epoch from a fresh copy of the
+retained workspace, reran checks and independent review, and completed in 113.73
+seconds from the continuation request. Old files remained unchanged; stale-version
+and terminal-task continuation requests were refused. Evidence:
+`workflow-continuation-v1/receipt.json`. The real probe preceded one additional
+retained-packet attempt-ID consistency guard; the final native lifecycle regression
+and strict Clippy passed with that guard included. Full workspace tests passed157.
+
+This proves fenced-workspace continuation through the CLI. The board action is
+implemented and JS syntax checked; its new continuation button has not yet had a
+separate real-browser acceptance run. Mid-writer termination without a confirmed
+fence remains refused, not silently treated as recoverable.

@@ -81,6 +81,26 @@ impl<C: Clock> PersistentControlService<C> {
         let baseline = snapshot_git(&plan.project, &artifacts.join("work"))
             .await
             .map_err(|_| invalid("project snapshot failed"))?;
+        self.run_prepared_workflow(
+            plan,
+            artifacts,
+            baseline,
+            false,
+            worker_authentication,
+            verifier_authentication,
+        )
+        .await
+    }
+
+    pub(super) async fn run_prepared_workflow(
+        &self,
+        plan: &NativeWorkflowPlan,
+        artifacts: PathBuf,
+        baseline: conductor_runtime::GitSnapshot,
+        continuing: bool,
+        worker_authentication: BTreeMap<String, String>,
+        verifier_authentication: BTreeMap<String, String>,
+    ) -> Result<WorkflowOutcome, StoreError> {
         let workspace = artifacts.join("work/tree");
         let Assignment {
             worker_id,
@@ -88,7 +108,7 @@ impl<C: Clock> PersistentControlService<C> {
             attempt_id,
             token,
             epoch,
-        } = self.assign_workflow(plan, &workspace).await?;
+        } = self.assign_workflow(plan, &workspace, continuing).await?;
         let packet = ResumePacket {
             contract: AttemptContract {
                 version: 1,
@@ -110,7 +130,7 @@ impl<C: Clock> PersistentControlService<C> {
                 max_runtime_ms: plan.model_timeout_ms,
             },
             objective: plan.objective.clone(),
-            checkpoint: None,
+            checkpoint: continuing.then(|| "Continue the retained unfinished workspace; preserve existing work and satisfy the original objective.".into()),
             untrusted_context: vec![],
         };
         let candidate = self
@@ -295,6 +315,7 @@ impl<C: Clock> PersistentControlService<C> {
         &self,
         plan: &NativeWorkflowPlan,
         workspace: &std::path::Path,
+        continuing: bool,
     ) -> Result<Assignment, StoreError> {
         let project_id = self.register_workflow_project(plan).await?;
         let worker_id = format!("{}:worker", plan.task_id);
@@ -314,32 +335,34 @@ impl<C: Clock> PersistentControlService<C> {
             })
             .await?;
         }
-        self.workflow_request(Request::CreateTask {
-            actor_id: "operator".into(),
-            idempotency_key: format!("{}:create", plan.task_id),
-            id: plan.task_id.clone(),
-            project_id,
-            objective: plan.objective.clone(),
-            priority: 0,
-            authority: serde_json::json!({"workspace":workspace,"mode":"native-isolated"}),
-            required_checks: plan
-                .checks
-                .iter()
-                .map(|c| RequiredCheck {
-                    id: c.id.as_str().into(),
-                    description: "operator-approved runtime check".into(),
-                })
-                .collect(),
-        })
-        .await?;
-        self.workflow_command(
-            &plan.task_id,
-            "operator",
-            ActorRole::Operator,
-            CommandKind::MarkReady,
-            "ready",
-        )
-        .await?;
+        if !continuing {
+            self.workflow_request(Request::CreateTask {
+                actor_id: "operator".into(),
+                idempotency_key: format!("{}:create", plan.task_id),
+                id: plan.task_id.clone(),
+                project_id,
+                objective: plan.objective.clone(),
+                priority: 0,
+                authority: serde_json::json!({"workspace":workspace,"mode":"native-isolated"}),
+                required_checks: plan
+                    .checks
+                    .iter()
+                    .map(|c| RequiredCheck {
+                        id: c.id.as_str().into(),
+                        description: "operator-approved runtime check".into(),
+                    })
+                    .collect(),
+            })
+            .await?;
+            self.workflow_command(
+                &plan.task_id,
+                "operator",
+                ActorRole::Operator,
+                CommandKind::MarkReady,
+                "ready",
+            )
+            .await?;
+        }
         let attempt_id = Uuid::now_v7().to_string();
         let claim = self
             .workflow_command(
@@ -476,7 +499,7 @@ impl<C: Clock> PersistentControlService<C> {
             .await
             .map_err(|_| invalid("workflow registration refused"))
     }
-    async fn workflow_task(&self, id: &str) -> Result<Task, StoreError> {
+    pub(super) async fn workflow_task(&self, id: &str) -> Result<Task, StoreError> {
         let row = self
             .store
             .task(id)
@@ -496,7 +519,7 @@ impl<C: Clock> PersistentControlService<C> {
         self.workflow_command_locked(id, actor, role, kind, reason)
             .await
     }
-    async fn workflow_command_locked(
+    pub(super) async fn workflow_command_locked(
         &self,
         id: &str,
         actor: &str,
