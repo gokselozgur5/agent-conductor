@@ -73,6 +73,7 @@ enum Command {
     AckEvent {
         delivery_id: String,
         consumer_agent_id: String,
+        claim_token: String,
         effect_json: String,
     },
 }
@@ -176,10 +177,12 @@ fn command_request(command: Command) -> Request {
         Command::AckEvent {
             delivery_id,
             consumer_agent_id,
+            claim_token,
             effect_json,
         } => Request::AcknowledgeEvent {
             delivery_id,
             consumer_agent_id,
+            claim_token,
             effect: parse_json::<ConsumerStateInput>(&effect_json, "consumer state effect"),
         },
     }

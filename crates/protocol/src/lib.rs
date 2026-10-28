@@ -96,6 +96,7 @@ pub enum Request {
     AcknowledgeEvent {
         delivery_id: String,
         consumer_agent_id: String,
+        claim_token: String,
         effect: ConsumerStateInput,
     },
 }
@@ -194,6 +195,8 @@ pub struct SemanticEventInput {
     pub topic: String,
     pub project_id: Option<String>,
     pub task_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub lease_epoch: Option<u64>,
     pub path_scope: Option<String>,
     pub payload: Value,
 }
@@ -219,6 +222,7 @@ pub struct EventDeliveryResponse {
     pub delivery_id: String,
     pub event: SemanticEventResponse,
     pub attempts: u32,
+    pub claim_token: String,
     pub lease_expires_at_ms: i64,
 }
 
@@ -235,6 +239,8 @@ pub struct SemanticEventResponse {
     pub topic: String,
     pub project_id: Option<String>,
     pub task_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub lease_epoch: Option<u64>,
     pub path_scope: Option<String>,
     pub payload: Value,
     pub created_at_ms: i64,

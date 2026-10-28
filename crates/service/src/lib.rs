@@ -495,6 +495,21 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     &event.topic,
                 ])?;
                 let payload_json = serde_json::to_string(&event.payload).map_err(json_error)?;
+                let clock = self.clock.read(self.boot_generation);
+                if let Some(task_id) = &event.task_id {
+                    let row = self
+                        .store
+                        .task(task_id)
+                        .await
+                        .map_err(store_error)?
+                        .ok_or_else(not_found)?;
+                    validate_task_event(&row, &event, clock)?;
+                } else if event.attempt_id.is_some() || event.lease_epoch.is_some() {
+                    return Err(ErrorBody::new(
+                        ErrorCode::Validation,
+                        "attempt identity requires a task-scoped event",
+                    ));
+                }
                 let idempotency_key = event.idempotency_key.unwrap_or_else(|| {
                     EventSourceIdentity {
                         source_agent_id: &event.source_agent_id,
@@ -518,9 +533,11 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                             topic: event.topic,
                             project_id: event.project_id,
                             task_id: event.task_id,
+                            attempt_id: event.attempt_id,
+                            lease_epoch: event.lease_epoch,
                             path_scope: event.path_scope,
                             payload_json,
-                            created_at_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+                            created_at_ms: clock.wall_unix_ms,
                         },
                         &EventLimits::default(),
                     )
@@ -556,11 +573,13 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
             Request::AcknowledgeEvent {
                 delivery_id,
                 consumer_agent_id,
+                claim_token,
                 effect,
             } => {
                 validate_text(&[
                     &delivery_id,
                     &consumer_agent_id,
+                    &claim_token,
                     &effect.namespace,
                     &effect.key,
                 ])?;
@@ -568,6 +587,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     .acknowledge_event_with_state(
                         &delivery_id,
                         &consumer_agent_id,
+                        &claim_token,
                         &ConsumerStateEffect {
                             namespace: effect.namespace,
                             key: effect.key,
@@ -802,6 +822,7 @@ fn event_delivery_response(delivery: EventDelivery) -> Result<EventDeliveryRespo
         schema_version: delivery.schema_version,
         delivery_id: delivery.delivery_id,
         attempts: delivery.attempts,
+        claim_token: delivery.claim_token,
         lease_expires_at_ms: delivery.lease_expires_at_ms,
         event: SemanticEventResponse {
             schema_version: delivery.event.schema_version,
@@ -815,11 +836,36 @@ fn event_delivery_response(delivery: EventDelivery) -> Result<EventDeliveryRespo
             topic: delivery.event.topic,
             project_id: delivery.event.project_id,
             task_id: delivery.event.task_id,
+            attempt_id: delivery.event.attempt_id,
+            lease_epoch: delivery.event.lease_epoch,
             path_scope: delivery.event.path_scope,
             payload: serde_json::from_str(&delivery.event.payload_json).map_err(json_error)?,
             created_at_ms: delivery.event.created_at_ms,
         },
     })
+}
+
+fn validate_task_event(
+    row: &PersistedTask,
+    event: &conductor_protocol::SemanticEventInput,
+    clock: ClockReading,
+) -> Result<(), ErrorBody> {
+    let task: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
+    let attempt = task.attempt.as_ref().ok_or_else(|| {
+        ErrorBody::new(ErrorCode::Conflict, "task has no active attempt")
+    })?;
+    if event.project_id.as_deref() != Some(row.project_id.as_str())
+        || event.attempt_id.as_deref() != Some(attempt.id.0.as_str())
+        || event.lease_epoch != Some(attempt.lease.epoch)
+        || event.source_agent_id != attempt.worker.0
+        || !attempt.lease.accepts_worker_mutation(clock)
+    {
+        return Err(ErrorBody::new(
+            ErrorCode::Conflict,
+            "task event lease identity is stale or mismatched",
+        ));
+    }
+    Ok(())
 }
 #[allow(clippy::needless_pass_by_value)]
 fn json_error(e: serde_json::Error) -> ErrorBody {

@@ -575,6 +575,8 @@ mod tests {
                 topic: "task.changed".into(),
                 project_id: None,
                 task_id: None,
+                attempt_id: None,
+                lease_epoch: None,
                 path_scope: Some("/workspace/src".into()),
                 payload: serde_json::json!({"state": "ready"}),
             },
@@ -632,6 +634,7 @@ mod tests {
         let invalid = RequestEnvelope::new(Request::AcknowledgeEvent {
             delivery_id: delivery.delivery_id.clone(),
             consumer_agent_id: "intruder".into(),
+            claim_token: delivery.claim_token.clone(),
             effect: effect.clone(),
         });
         let response = exchange(&path, &serde_json::to_vec(&invalid).expect("serialize")).await;
@@ -650,6 +653,7 @@ mod tests {
         let ack = RequestEnvelope::new(Request::AcknowledgeEvent {
             delivery_id: delivery.delivery_id.clone(),
             consumer_agent_id: "consumer".into(),
+            claim_token: delivery.claim_token.clone(),
             effect: effect.clone(),
         });
         assert!(matches!(
@@ -668,6 +672,7 @@ mod tests {
         let stale = RequestEnvelope::new(Request::AcknowledgeEvent {
             delivery_id: delivery.delivery_id,
             consumer_agent_id: "consumer".into(),
+            claim_token: delivery.claim_token,
             effect: ConsumerStateInput {
                 expected_version: Some(0),
                 ..effect
@@ -922,6 +927,34 @@ mod tests {
                 .status,
             LeaseStatus::RecoveryPending
         );
+        let stale_event = RequestEnvelope::new(Request::PublishEvent {
+            event: SemanticEventInput {
+                schema_version: 1,
+                id: "stale-event".into(),
+                idempotency_key: None,
+                source_agent_id: "worker-1".into(),
+                source_session_id: "stale-session".into(),
+                correlation_id: "stale-event-correlation".into(),
+                causation_id: None,
+                generation: 0,
+                topic: "task.changed".into(),
+                project_id: Some("project-1".into()),
+                task_id: Some("task-1".into()),
+                attempt_id: Some("attempt-1".into()),
+                lease_epoch: Some(1),
+                path_scope: None,
+                payload: serde_json::json!({"state": "running"}),
+            },
+        });
+        let response = exchange(
+            &path,
+            &serde_json::to_vec(&stale_event).expect("serialize stale event"),
+        )
+        .await;
+        let ResponseResult::Error(error) = response.result else {
+            panic!("recovery-pending worker published a task event")
+        };
+        assert_eq!(error.code, ErrorCode::Conflict);
         let stale = Command {
             actor: Actor {
                 id: ActorId("worker-1".into()),
