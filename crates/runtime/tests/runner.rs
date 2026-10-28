@@ -386,11 +386,11 @@ async fn valid_grant_extends_absolute_lease_before_it_expires() {
 
 #[tokio::test]
 async fn exit_cancel_race_never_claims_a_fence_for_a_surviving_descendant() {
-    for delay in [0, 1, 2, 5, 10] {
+    for delay in [0, 1, 2, 5, 10, 400] {
         let directory = tempfile::tempdir().expect("directory");
         let input = launch(
             directory.path(),
-            "( /bin/sleep 0.2; printf escaped > escaped ) >/dev/null 2>&1 & exit 0",
+            "( i=0; while [ \"$i\" -lt 40 ]; do printf tick >> escaped; i=$((i+1)); /bin/sleep 0.05; done ) >/dev/null 2>&1 & exit 0",
             1000,
         );
         let (mut child, mut writer, mut reader) = wrapper(&input).await;
@@ -418,15 +418,66 @@ async fn exit_cancel_race_never_claims_a_fence_for_a_surviving_descendant() {
             .expect("read");
         let status = exited(&mut child).await;
         let observation = serde_json::from_slice::<RunnerEvent>(&bytes).ok();
+        let at_observation = std::fs::read(directory.path().join("escaped")).unwrap_or_default();
         tokio::time::sleep(Duration::from_millis(350)).await;
         match observation {
-            Some(RunnerEvent::Stopped { .. }) => assert!(
-                !directory.path().join("escaped").exists(),
-                "a stop observation must not hide a surviving controlled descendant"
+            Some(RunnerEvent::Stopped { .. }) => assert_eq!(
+                std::fs::read(directory.path().join("escaped")).unwrap_or_default(),
+                at_observation,
+                "a stop observation must not hide continued descendant writes"
             ),
             Some(RunnerEvent::Finished { .. }) => {}
             None => assert!(!status.success(), "uncertain fencing must fail closed"),
             Some(RunnerEvent::Ready { .. }) => panic!("duplicate ready"),
         }
     }
+}
+
+#[tokio::test]
+async fn stopped_observation_allows_prior_writes_but_no_later_writes() {
+    let directory = tempfile::tempdir().expect("directory");
+    let input = launch(
+        directory.path(),
+        "( while :; do printf tick >> writes; /bin/sleep 0.02; done ) >/dev/null 2>&1 & /bin/sleep 5",
+        2000,
+    );
+    let (mut child, mut writer, mut reader) = wrapper(&input).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Ready { .. }
+    ));
+    send(
+        &mut writer,
+        &RunnerControl::Release {
+            packet_sha256: input.packet.sha256().expect("hash"),
+            continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock") + 2000,
+        },
+    )
+    .await;
+    let path = directory.path().join("writes");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if std::fs::read(&path).unwrap_or_default().len() >= 8 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("descendant must have already written");
+    let before = std::fs::read(&path).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        std::fs::read(&path).unwrap().len() > before.len(),
+        "live positive control"
+    );
+    send(&mut writer, &RunnerControl::Cancel).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Stopped { .. }
+    ));
+    let stopped = std::fs::read(&path).unwrap();
+    assert!(exited(&mut child).await.success());
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(std::fs::read(&path).unwrap(), stopped);
 }
