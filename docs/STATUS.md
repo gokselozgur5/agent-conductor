@@ -43,6 +43,10 @@ Task decisions now persist through the same versioned command/audit path and
 block completion until resolved. The board exposes operator actions; subsequent
 attempts receive labelled decision context. See [TASK_DECISIONS.md](TASK_DECISIONS.md)
 for authority, compatibility and remaining intake limits.
+Native worker checkpoint capture, continuation and read-only board/CLI visibility
+are validated locally: 215 tests, strict lint, real Chrome and a real Claude
+pause/restart/continuation followed by independent Codex acceptance.
+See [CHECKPOINTS.md](CHECKPOINTS.md) for claim and backpressure boundaries.
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, outer advisory
 discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,

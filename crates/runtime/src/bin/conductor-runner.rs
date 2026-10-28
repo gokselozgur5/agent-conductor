@@ -1,7 +1,7 @@
 //! Trusted wrapper: parse packet, acknowledge, wait for recorded release, supervise.
 use conductor_runtime::{
     MAX_PACKET_BYTES, PacketAcknowledgement, ProcessError, ProcessSpec, RunnerControl, RunnerEvent,
-    RunnerLaunch, continuous_millis, run_process_captured,
+    RunnerLaunch, continuous_millis, run_process_observed,
 };
 use std::time::Duration;
 use tokio::{
@@ -120,9 +120,24 @@ async fn serve() -> Result<(), ()> {
         output_limit: launch.output_limit,
     };
     let (cancel, receiver) = watch::channel(false);
+    // Progress output has its own bounded queue. A slow parent cannot stall the
+    // watchdog/control loop, and only this task writes progress frames.
+    let (progress, mut progress_events) = tokio::sync::mpsc::channel(8);
+    let progress_output = tokio::spawn(async move {
+        while let Some(claims) = progress_events.recv().await {
+            emit(&RunnerEvent::Checkpoint { claims }).await?;
+        }
+        Ok::<_, ()>(())
+    });
+    let mut parser = conductor_runtime::CheckpointStream::new(receipt_packet.clone());
     let mut process = tokio::spawn(async move {
         let mut captured = Vec::new();
-        let result = run_process_captured(&specification, receiver, &mut captured).await;
+        let result = run_process_observed(&specification, receiver, &mut captured, &mut |bytes| {
+            if let Some(claims) = parser.observe(bytes) {
+                let _ = progress.try_send(claims);
+            }
+        })
+        .await;
         (result, captured)
     });
     let mut timer = tokio::time::interval(Duration::from_millis(20));
@@ -134,6 +149,7 @@ async fn serve() -> Result<(), ()> {
         tokio::select! {
             result = &mut process => {
                 let (result, captured) = result.map_err(|_| ())?;
+                progress_output.await.map_err(|_| ())??;
                 return emit_terminal(&receipt_packet,&match result {
                     Ok(output) => RunnerEvent::Finished { exit_code: output.exit_code, stdout: output.stdout, stderr: output.stderr },
                     Err(ProcessError::Cancelled | ProcessError::Timeout | ProcessError::OutputLimit) => RunnerEvent::Stopped { reason: "process_stopped".into(), stdout: captured },
@@ -169,6 +185,7 @@ async fn serve() -> Result<(), ()> {
     };
     let _ = cancel.send(true);
     let (result, captured) = process.await.map_err(|_| ())?;
+    progress_output.await.map_err(|_| ())??;
     match result {
         // Cancellation can race a normal exit. Preserve the weaker observation:
         // normal exit did not fence descendants and must never become Stopped.

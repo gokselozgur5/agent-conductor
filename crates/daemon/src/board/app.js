@@ -16,6 +16,7 @@ const text = (tag, value, className) => {
 function disconnect() {
   token = '';
   closeHistory();
+  closeCheckpoint();
   clearInterval(timer);
   el('token').value = '';
   el('tasks').replaceChildren();
@@ -133,6 +134,9 @@ function renderTask(item) {
     controls.append(open);
   }
   if (decisions.length) card.append(decisionBox);
+  const checkpoint = text('button', 'View checkpoint');
+  checkpoint.addEventListener('click', () => loadCheckpoint(task.id));
+  controls.append(checkpoint);
   const history = text('button', 'View history');
   history.addEventListener('click', () => loadHistory(task.id));
   controls.append(history);
@@ -283,3 +287,52 @@ el('history-close').addEventListener('click', closeHistory);
 
 el('tasks-first').addEventListener('click', () => { if (!active && !mutating) { taskAfter = null; refresh(); } });
 el('tasks-next').addEventListener('click', () => { if (!active && !mutating && taskNext) { taskAfter = taskNext; refresh(); } });
+
+let checkpointTask = null;
+let checkpointRequest = 0;
+function closeCheckpoint() {
+  checkpointTask = null;
+  checkpointRequest++;
+  el('checkpoint').hidden = true;
+  el('checkpoint-body').replaceChildren();
+  el('checkpoint-message').textContent = '';
+}
+async function loadCheckpoint(taskId) {
+  if (!token) return;
+  checkpointTask = taskId;
+  const request = ++checkpointRequest;
+  const currentToken = token;
+  el('checkpoint').hidden = false;
+  el('checkpoint-title').textContent = `Checkpoint · ${taskId}`;
+  el('checkpoint-body').replaceChildren();
+  el('checkpoint-message').textContent = 'Loading recorded claims…';
+  try {
+    const response = await fetch('/api/checkpoint?' + new URLSearchParams({task_id: taskId}), {headers:{Authorization:`Bearer ${currentToken}`},cache:'no-store',signal:AbortSignal.timeout(5000)});
+    if (request !== checkpointRequest || currentToken !== token) return;
+    if (response.status === 401) { disconnect(); return; }
+    if (!response.ok) throw new Error('Checkpoint unavailable. Refresh after inspecting task state.');
+    const data = await response.json();
+    if (request !== checkpointRequest || currentToken !== token) return;
+    if (data.type !== 'task_checkpoint') throw new Error('Unexpected checkpoint response.');
+    const view = data.view, record = view.checkpoint;
+    el('checkpoint-message').textContent = record ? (view.inherited ? 'Inherited from an earlier fenced attempt; recheck against retained work.' : 'Last accepted observation; claims may be stale.') : 'No accepted structured checkpoint. The worker may not have published a valid checkpoint yet. Retained files are separate evidence.';
+    if (!record) return;
+    const claims = record.claims, body = el('checkpoint-body');
+    body.append(text('p', view.trust, 'hint'));
+    body.append(text('p', `Source attempt: ${claims.attempt_id} · Epoch ${claims.lease_epoch} · Sequence ${claims.sequence}`));
+    body.append(text('p', `Observed: ${new Date(record.observed_at_ms).toISOString()}`));
+    for (const [label, value] of [['Completed work (claim)',claims.completed_work],['Current state (claim)',claims.current_state],['Next action (claim)',claims.next_action]]) {
+      body.append(text('h3', label), text('p', value));
+    }
+    for (const [label, values] of [['Open decisions (claims)',claims.open_decisions],['Running commands (claims, not live process inventory)',claims.running_commands],['Changed artifacts (claims)',claims.changed_artifacts]]) {
+      body.append(text('h3',label)); const list=text('ul','');
+      for (const value of values) list.append(text('li',value));
+      if (!values.length) list.append(text('li','None claimed'));
+      body.append(list);
+    }
+  } catch (error) {
+    if (request === checkpointRequest && currentToken === token) el('checkpoint-message').textContent = error.message;
+  }
+}
+el('checkpoint-close').addEventListener('click',closeCheckpoint);
+el('checkpoint-refresh').addEventListener('click',()=>{if(checkpointTask)loadCheckpoint(checkpointTask);});

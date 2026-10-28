@@ -136,6 +136,11 @@ impl<C: Clock> PersistentControlService<C> {
         let original_baseline = self
             .review_baseline(plan, &baseline.manifest, continuing)
             .await?;
+        let checkpoint = if continuing {
+            self.retained_checkpoint(&plan.task_id).await?
+        } else {
+            None
+        };
         let workspace = artifacts.join("work/tree");
         let Assignment {
             worker_id,
@@ -166,7 +171,7 @@ impl<C: Clock> PersistentControlService<C> {
                 max_runtime_ms: plan.model_timeout_ms,
             },
             objective: plan.objective.clone(),
-            checkpoint: continuing.then(|| "Continue the retained unfinished workspace; preserve existing work and satisfy the original objective.".into()),
+            checkpoint: checkpoint.or_else(|| continuing.then(|| "No accepted structured checkpoint is available. Inspect retained unfinished work; preserve existing files and satisfy the original objective.".into())),
             untrusted_context,
         };
         let candidate = self

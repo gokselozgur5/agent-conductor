@@ -47,6 +47,9 @@ pub enum RunnerEvent {
     Ready {
         acknowledgement: PacketAcknowledgement,
     },
+    Checkpoint {
+        claims: crate::WorkerCheckpoint,
+    },
     Finished {
         exit_code: Option<i32>,
         stdout: Vec<u8>,

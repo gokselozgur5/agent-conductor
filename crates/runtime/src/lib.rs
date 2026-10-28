@@ -62,3 +62,8 @@ pub use instructions::*;
 mod advisory;
 #[cfg(unix)]
 pub use advisory::*;
+
+#[cfg(unix)]
+mod checkpoint;
+#[cfg(unix)]
+pub use checkpoint::*;

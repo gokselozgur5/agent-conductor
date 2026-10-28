@@ -460,6 +460,7 @@ async fn exit_cancel_race_never_claims_a_fence_for_a_surviving_descendant() {
             Some(RunnerEvent::Finished { .. }) => {}
             None => assert!(!status.success(), "uncertain fencing must fail closed"),
             Some(RunnerEvent::Ready { .. }) => panic!("duplicate ready"),
+            Some(RunnerEvent::Checkpoint { .. }) => panic!("unexpected fake-worker checkpoint"),
         }
     }
 }
@@ -595,4 +596,96 @@ async fn changed_instruction_refuses_renewal_and_stops_live_worker() {
     let stopped = std::fs::read(&output_path).unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(std::fs::read(output_path).unwrap(), stopped);
+}
+
+#[tokio::test]
+async fn wrapper_streams_claim_before_exit_without_creating_project_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let claims = serde_json::json!({"version":1,"task_id":"task","attempt_id":"attempt","lease_epoch":1,"sequence":1,"completed_work":"Nothing yet","current_state":"Planning","next_action":"Inspect source","open_decisions":[],"running_commands":[],"changed_artifacts":[]});
+    let text = serde_json::json!({"conductor_checkpoint":claims}).to_string();
+    let line=serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":text}]}}).to_string();
+    let mut input = launch(
+        directory.path(),
+        &format!("printf '%s\\n' '{line}'; sleep 3"),
+        4000,
+    );
+    // Controlled stream fixture, not an accepted native vendor pin.
+    input.packet.contract.adapter.kind = conductor_runtime::AdapterKind::Claude;
+    input.output_limit = 8192;
+    let (mut child, mut writer, mut reader) = wrapper(&input).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Ready { .. }
+    ));
+    send(
+        &mut writer,
+        &RunnerControl::Release {
+            packet_sha256: input.packet.sha256().unwrap(),
+            continuous_deadline_ms: conductor_runtime::continuous_millis().unwrap() + 5000,
+        },
+    )
+    .await;
+    let RunnerEvent::Checkpoint { claims } =
+        tokio::time::timeout(Duration::from_secs(2), event(&mut reader))
+            .await
+            .unwrap()
+    else {
+        panic!("checkpoint before terminal")
+    };
+    assert_eq!(claims.current_state, "Planning");
+    assert!(child.try_wait().unwrap().is_none());
+    send(&mut writer, &RunnerControl::Cancel).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Stopped { .. }
+    ));
+    assert!(exited(&mut child).await.success());
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn checkpoint_backpressure_does_not_delay_the_worker_watchdog() {
+    use std::fmt::Write as _;
+    let directory = tempfile::tempdir().unwrap();
+    let mut script = String::new();
+    for sequence in 1..=32 {
+        let claims = serde_json::json!({"version":1,"task_id":"task","attempt_id":"attempt","lease_epoch":1,"sequence":sequence,"completed_work":"x".repeat(500),"current_state":"x".repeat(500),"next_action":"x".repeat(500),"open_decisions":[],"running_commands":[],"changed_artifacts":[]});
+        let text = serde_json::json!({"conductor_checkpoint":claims}).to_string();
+        let line=serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}).to_string();
+        write!(script, "printf '%s\\n' '{line}'; ").unwrap();
+    }
+    script.push_str("while :; do printf x >> writes; sleep 0.02; done");
+    let mut input = launch(directory.path(), &script, 500);
+    input.packet.contract.adapter.kind = conductor_runtime::AdapterKind::Claude;
+    input.output_limit = 1024 * 1024;
+    let (mut child, mut writer, mut reader) = wrapper(&input).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Ready { .. }
+    ));
+    send(
+        &mut writer,
+        &RunnerControl::Release {
+            packet_sha256: input.packet.sha256().unwrap(),
+            continuous_deadline_ms: conductor_runtime::continuous_millis().unwrap() + 5000,
+        },
+    )
+    .await;
+    // Deliberately stop reading progress. The watchdog must still fence writes.
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let stopped = std::fs::read(directory.path().join("writes")).unwrap();
+    assert!(!stopped.is_empty());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        std::fs::read(directory.path().join("writes")).unwrap(),
+        stopped
+    );
+    loop {
+        match event(&mut reader).await {
+            RunnerEvent::Checkpoint { .. } => {}
+            RunnerEvent::Stopped { .. } => break,
+            _ => panic!("expected watchdog stop"),
+        }
+    }
+    assert!(exited(&mut child).await.success());
 }

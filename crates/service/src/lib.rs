@@ -31,6 +31,8 @@ use uuid::Uuid;
 
 #[cfg(unix)]
 mod check_execution;
+#[cfg(unix)]
+mod checkpoint;
 mod clock;
 #[cfg(unix)]
 mod instruction_policy;
@@ -771,6 +773,10 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Response::TaskPage { tasks, next_after })
             }
+            Request::TaskCheckpoint { task_id } => {
+                let view = self.checkpoint_view(&task_id).await.map_err(store_error)?;
+                Ok(Response::TaskCheckpoint { view })
+            }
             Request::TaskHistory { task_id, before } => {
                 let before = before
                     .map(|value| {
@@ -1442,6 +1448,7 @@ fn hash(v: &str) -> String {
 }
 #[cfg(test)]
 mod effect_tests {
+    include!("checkpoint_tests.rs");
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
     use agent_conductor_store::{NewAgent, NewProject, NewTask, Store};

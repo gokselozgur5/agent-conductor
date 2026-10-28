@@ -92,6 +92,7 @@ impl OperatorBoard {
             )
             .route("/api/tasks", get(tasks::<S>))
             .route("/api/history", get(history::<S>))
+            .route("/api/checkpoint", get(checkpoint::<S>))
             .route("/api/health", get(health::<S>))
             .route("/api/control", post(controls::apply::<S>))
             .route("/api/workflows/continue", post(workflows::resume::<S>))
@@ -197,6 +198,23 @@ async fn history<S: ControlService>(
         ControlRequest::TaskHistory {
             task_id: params.task_id,
             before: params.before,
+        },
+    )
+    .await
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointQuery {
+    task_id: String,
+}
+async fn checkpoint<S: ControlService>(
+    State(state): State<BoardState<S>>,
+    Query(params): Query<CheckpointQuery>,
+) -> Response {
+    query(
+        &state,
+        ControlRequest::TaskCheckpoint {
+            task_id: params.task_id,
         },
     )
     .await

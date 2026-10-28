@@ -67,6 +67,9 @@ enum Command {
         #[arg(long, default_value = "[]")]
         required_checks_json: String,
     },
+    TaskCheckpoint {
+        task_id: String,
+    },
     GetTask {
         task_id: String,
     },
@@ -232,6 +235,7 @@ fn command_request(command: Command) -> Request {
             authority: parse_json(&authority_json, "authority"),
             required_checks: parse_json(&required_checks_json, "required checks"),
         },
+        Command::TaskCheckpoint { task_id } => Request::TaskCheckpoint { task_id },
         Command::GetTask { task_id } => Request::GetTask { task_id },
         Command::ListTaskPage { project_id, after } => Request::ListTaskPage { project_id, after },
         Command::TaskHistory { task_id, before } => Request::TaskHistory { task_id, before },
