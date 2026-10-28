@@ -25,6 +25,11 @@ enum Command {
     RunCheck(check_command::CheckArgs),
     Health,
     CheckInvariants,
+    /// Persist an approved native plan for an explicitly enabled dispatcher.
+    SubmitWorkflow {
+        plan: PathBuf,
+    },
+    ListWorkflows,
     RegisterProject {
         actor_id: String,
         idempotency_key: String,
@@ -130,6 +135,8 @@ fn command_request(command: Command) -> Request {
         }
         Command::Health => Request::Health,
         Command::CheckInvariants => Request::CheckInvariants,
+        Command::ListWorkflows => Request::ListWorkflows,
+        Command::SubmitWorkflow { plan } => read_workflow_plan(plan),
         Command::RegisterProject {
             actor_id,
             idempotency_key,
@@ -249,6 +256,22 @@ fn parse_json<T: serde::de::DeserializeOwned>(input: &str, label: &str) -> T {
         eprintln!("invalid {label} JSON: {error}");
         std::process::exit(2)
     })
+}
+
+fn read_workflow_plan(plan: PathBuf) -> Request {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    let result =
+        std::fs::File::open(plan).and_then(|file| file.take(131_073).read_to_end(&mut bytes));
+    if result.is_err() || bytes.len() > 131_072 {
+        eprintln!("cannot read native plan within 128 KiB bound");
+        std::process::exit(2);
+    }
+    let Ok(plan_json) = String::from_utf8(bytes) else {
+        eprintln!("plan must be UTF-8");
+        std::process::exit(2);
+    };
+    Request::SubmitWorkflow { plan_json }
 }
 
 #[cfg(test)]

@@ -3,7 +3,8 @@
 The optional board displays authoritative task state, worker/verifier identities,
 required checks and source-bound acceptance evidence. Operators can mark tasks
 ready, pause, resume to ready and cancel through the existing service/domain.
-The board does not yet submit plans or automatically start model calls.
+The board submits explicitly approved native plans to the durable queue. A daemon
+started with `--dispatch` executes them sequentially; see [WORKFLOW_DISPATCH.md](WORKFLOW_DISPATCH.md).
 
 Set `CONDUCTOR_OPERATOR_TOKEN` in the launching environment without putting its
 value in command arguments or shell history. For an interactive shell:
@@ -51,7 +52,8 @@ a worker/system or publish checks, verdicts or completion. Stale state is refuse
 and refreshed. Cancellation asks for confirmation and retains artifacts. Pause
 and cancel revoke ownership; execution stop follows the runtime observing that
 revocation, rather than the HTTP response proving a completed process fence.
-Ready/resume only change lifecycle readiness until native scheduling is added.
+Ready/resume change task lifecycle readiness; they do not create a new dispatch
+for an existing interrupted task.
 
 POST `/api/control` requires the same bearer/Host/Origin boundary as reads, exact
 `application/json`, a body of at most 4096 bytes and a three-second read deadline.
@@ -76,7 +78,7 @@ the daemon stopped. Private screenshot/receipt evidence lives under
 in the workspace.
 
 This does not claim remote multi-user authentication, exhaustive HTTP load
-hardening, plan submission/automatic scheduling, pagination or mobile-browser
+hardening, automatic checkpoint continuation, pagination or mobile-browser
 acceptance.
 
 A real SQLite/HTTP regression verifies authorization, foreign-origin refusal,

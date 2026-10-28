@@ -16,6 +16,9 @@ function disconnect() {
   el('token').value = '';
   el('tasks').replaceChildren();
   el('toolbar').hidden = true;
+  el('dispatch').hidden = true;
+  el('queue').replaceChildren();
+  el('plan').value = '';
   el('login').hidden = false;
   el('connection').textContent = 'Disconnected';
 }
@@ -37,6 +40,8 @@ async function refresh() {
     el('connection').textContent = `Connected · ${new Date().toLocaleTimeString()}`;
     el('login').hidden = true;
     el('toolbar').hidden = false;
+    el('dispatch').hidden = false;
+    await refreshQueue(currentToken);
   } catch (error) {
     if (currentToken === token) { el('message').textContent = error.message; el('connection').textContent = 'Connection lost · displayed data may be stale'; }
   } finally { active = false; }
@@ -111,3 +116,29 @@ async function control(task, action) {
     }
   }
 }
+
+async function refreshQueue(currentToken) {
+  const response = await fetch('/api/workflows', {headers:{Authorization:`Bearer ${currentToken}`},cache:'no-store',signal:AbortSignal.timeout(5000)});
+  if (!response.ok) throw new Error('Workflow queue unavailable.');
+  const data = await response.json();
+  if (currentToken !== token) return;
+  if (data.type !== 'workflows' || !Array.isArray(data.entries)) throw new Error('Invalid queue response.');
+  el('queue').replaceChildren(...data.entries.map(item => text('li', `${item.task_id} · ${item.status}${item.outcome_json ? ' · ' + item.outcome_json : ''}`)));
+}
+el('submit-plan').addEventListener('click', async () => {
+  const file = el('plan').files[0];
+  if (!file || !token || file.size > 131072) { el('message').textContent='Select a plan JSON file up to 128 KiB.'; return; }
+  if (!window.confirm('Submit this approved plan? An enabled dispatcher can start model work immediately.')) return;
+  const currentToken = token;
+  el('submit-plan').disabled = true;
+  try {
+    const body = await file.text();
+    if (currentToken !== token) return;
+    const response = await fetch('/api/workflows', {method:'POST',headers:{Authorization:`Bearer ${currentToken}`,'Content-Type':'application/json'},body,signal:AbortSignal.timeout(5000)});
+    if (currentToken !== token) return;
+    el('message').textContent=response.ok ? 'Plan persisted. Queue execution requires an enabled dispatcher.' : 'Submission not confirmed. Inspect queue before retrying the same plan.';
+    if(response.ok) el('plan').value='';
+    await refreshQueue(currentToken);
+  } catch (_) { if(currentToken===token) el('message').textContent='Submission outcome unknown. Inspect queue before retrying.'; }
+  finally { el('submit-plan').disabled=false; }
+});

@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use tokio::sync::watch;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeWorkflowPlan {
     pub task_id: String,
@@ -537,7 +537,7 @@ fn identity(pin: &VendorPin) -> AdapterIdentity {
         conformance_sha256: pin.conformance_sha256.clone(),
     }
 }
-fn validate_plan(plan: &NativeWorkflowPlan) -> Result<(), StoreError> {
+pub(super) fn validate_plan(plan: &NativeWorkflowPlan) -> Result<(), StoreError> {
     let check_budget = plan
         .checks
         .iter()

@@ -90,3 +90,5 @@ recovery gates are still tracked in [Status](docs/STATUS.md).
 An opt-in authenticated loopback board displays task state, checks and independent
 review results. See [Operator board](docs/OPERATOR_BOARD.md) for `--http`, credential
 handling and the read-only scope. The existing Unix-socket CLI remains available.
+
+Native plan submission and persistent execution: [Workflow dispatch](docs/WORKFLOW_DISPATCH.md).

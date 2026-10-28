@@ -1,3 +1,4 @@
+mod dispatcher;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,7 +6,6 @@ use agent_conductor_store::Store;
 use clap::Parser;
 use conductor_daemon::{LocalServer, OperatorBoard, RuntimeLock};
 use conductor_service::{NativeWorkflowPlan, PersistentControlService};
-use std::collections::BTreeMap;
 use std::io::Read;
 use tracing_subscriber::EnvFilter;
 
@@ -21,6 +21,9 @@ struct Args {
     /// Run one explicitly authorized native workflow while serving status, then exit.
     #[arg(long)]
     run_plan: Option<PathBuf>,
+    /// Execute explicitly submitted native plans sequentially; credentials stay in process memory.
+    #[arg(long, conflicts_with = "run_plan")]
+    dispatch: bool,
     /// Optional authenticated loopback board; requires `CONDUCTOR_OPERATOR_TOKEN`.
     #[arg(long)]
     http: Option<std::net::SocketAddr>,
@@ -88,6 +91,10 @@ async fn main() {
         return;
     }
 
+    let (dispatch_stop, dispatch_rx) = tokio::sync::watch::channel(false);
+    let dispatch_task = args
+        .dispatch
+        .then(|| tokio::spawn(dispatcher::serve(workflow_service, dispatch_rx)));
     if let Err(error) = server
         .run_until(async {
             if let Err(error) = tokio::signal::ctrl_c().await {
@@ -98,6 +105,10 @@ async fn main() {
     {
         eprintln!("daemon failed: {error}");
         std::process::exit(1);
+    }
+    let _ = dispatch_stop.send(true);
+    if let Some(task) = dispatch_task {
+        let _ = task.await;
     }
     stop_board(board_stop, board_task).await;
 }
@@ -141,24 +152,15 @@ async fn run_plan_mode(
             std::process::exit(2);
         }
     };
-    let authentication = |kind: &str| {
-        let mut values = BTreeMap::new();
-        for key in ["HOME", "LANG", "TMPDIR", kind] {
-            if let Ok(value) = std::env::var(key) {
-                values.insert(key.into(), value);
-            }
-        }
-        values
-    };
-    let worker_auth = authentication("ANTHROPIC_API_KEY");
+    let worker_auth = dispatcher::authentication("ANTHROPIC_API_KEY");
     let verifier_auth = if serde_json::to_value(&plan.verifier)
         .ok()
         .and_then(|v| v.get("kind").cloned())
         == Some(serde_json::json!("claude"))
     {
-        authentication("ANTHROPIC_API_KEY")
+        dispatcher::authentication("ANTHROPIC_API_KEY")
     } else {
-        authentication("CODEX_HOME")
+        dispatcher::authentication("CODEX_HOME")
     };
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let serving = server.run_until(async move {
