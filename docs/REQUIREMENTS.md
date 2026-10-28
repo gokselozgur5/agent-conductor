@@ -155,6 +155,9 @@ The product exists to remove session babysitting without hiding authority, uncer
 ### FR-11 Adapters
 
 - Support Codex and Claude Code first; Thor is a host, not a model-specific lifecycle.
+- The first v1 adapters invoke the locally authenticated Codex CLI and Claude Code
+  CLI processes. Direct OpenAI or Anthropic model API billing is optional and is
+  not a v1 runtime dependency.
 - Adapter contracts are versioned and capability-discovered.
 - Vendor transcripts are diagnostic artifacts, not lifecycle truth.
 - Unsupported or changed vendor behavior fails closed and is reported.

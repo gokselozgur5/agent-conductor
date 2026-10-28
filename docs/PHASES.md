@@ -37,8 +37,9 @@ Exit gate: domain invariants and required failure tests for core transitions pas
 
 - Versioned adapter protocol
 - Fake-agent harness
-- Codex adapter
-- Claude Code adapter
+- Codex CLI adapter using the operator's local authenticated session
+- Claude Code CLI adapter using the operator's local authenticated session
+- No required direct model API integration or per-call API-key billing
 - Process inventory, heartbeat, interrupt, exit, and relaunch
 - Resume-packet acknowledgement
 - Isolated worktree ownership and lease-epoch fencing
