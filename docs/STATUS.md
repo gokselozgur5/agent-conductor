@@ -66,8 +66,19 @@ checkpoint; repeated restart does not spawn a replacement. A blocked execution
 may later accept explicit verified fencing evidence, but cannot restart itself.
 The real-wrapper exit/cancel regression checks that surviving descendants never
 produce a successful stop observation across five controlled race timings.
-Next: establish and verify the actual workspace/write-isolation boundary, then
-reconcile fence evidence and expose the operator launcher. OS scheduling is not
+Private Git snapshot construction now captures tracked and unignored untracked
+working-tree bytes, executable bits and explicit deletions into a new owner-only
+directory with ordered content hashes. Read-only Git inventory checks preserve
+HEAD/index; source reads reject ancestor/final symlinks, hardlinks, special files,
+path escapes and size overflow. Sparse checkouts, submodules and non-UTF8 paths
+are currently refused explicitly. Ignored files are excluded. The second source
+read/inventory detects observed changes, but is not an atomic filesystem freeze;
+this is a baseline work copy, not the final immutable verification source.
+Published runtime baseline `fe0aa69` passed both macOS and Linux CI in run
+[40663638336](https://github.com/gokselozgur5/agent-conductor/actions/runs/40663638336).
+Snapshot changes require their own exact-SHA CI after publication.
+Next: verify the actual workspace/write-isolation boundary, then reconcile fence
+evidence and expose the operator launcher. OS scheduling is not
 a hard real-time guarantee; reassignment still awaits confirmed fencing. Isolated
 source capture, vendor adapters and the operator workflow remain incomplete.
 Real agents have not been launched yet.
