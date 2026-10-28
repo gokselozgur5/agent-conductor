@@ -46,8 +46,8 @@ that sort before the current cursor require a first-page refresh. This is not a
 chronological event feed, total-count query, search interface, or retention policy.
 Rows are bounded in count; unusually large metadata can still hit the existing
 transport byte limit. Payload omission is not general redaction of user-supplied
-identifiers/paths. Task lease observations and reported usage are documented separately; deeper
-execution evidence remains product work.
+identifiers/paths. Task lease observations and reported usage are documented separately; task-scoped execution and verification evidence is available through
+[TASK_EVIDENCE.md](TASK_EVIDENCE.md).
 
 ## Validation
 

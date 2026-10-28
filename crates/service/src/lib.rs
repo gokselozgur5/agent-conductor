@@ -34,6 +34,7 @@ mod check_execution;
 #[cfg(unix)]
 mod checkpoint;
 mod clock;
+mod evidence;
 #[cfg(unix)]
 mod instruction_policy;
 mod inventory;
@@ -844,6 +845,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                 let view = self.checkpoint_view(&task_id).await.map_err(store_error)?;
                 Ok(Response::TaskCheckpoint { view })
             }
+            Request::TaskEvidence { task_id, before } => self.evidence(&task_id, before).await,
             Request::TaskHistory { task_id, before } => {
                 let before = before
                     .map(|value| {

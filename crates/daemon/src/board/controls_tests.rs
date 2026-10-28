@@ -116,7 +116,7 @@ async fn controls_preserve_auth_versions_idempotency_and_terminal_state() {
     server.await.unwrap().unwrap();
 }
 
-async fn fixture(path: &std::path::Path) -> PersistentControlService {
+pub(super) async fn fixture(path: &std::path::Path) -> PersistentControlService {
     let service = PersistentControlService::start(
         Store::open(path.join("state.sqlite3")).await.unwrap(),
         100,

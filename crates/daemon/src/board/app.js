@@ -17,6 +17,7 @@ function disconnect() {
   token = '';
   clearInventory();
   closeHistory();
+  closeEvidence();
   closeCheckpoint();
   closeReassignment();
   clearInterval(timer);
@@ -165,6 +166,9 @@ function renderTask(item) {
   const history = text('button', 'View history');
   history.addEventListener('click', () => loadHistory(task.id));
   controls.append(history);
+  const evidence = text('button', 'View evidence');
+  evidence.addEventListener('click', () => loadEvidence(task.id));
+  controls.append(evidence);
   card.append(controls);
   return card;
 }
@@ -446,3 +450,93 @@ async function loadInventory(after = null) {
 el('inventory-resource').addEventListener('change', () => loadInventory());
 el('inventory-first').addEventListener('click', () => loadInventory());
 el('inventory-next').addEventListener('click', () => { if (inventoryNext) loadInventory(inventoryNext); });
+
+let evidenceGeneration = 0;
+let evidenceTask = null;
+let evidenceBefore = null;
+function closeEvidence() {
+  evidenceGeneration++;
+  evidenceTask = null;
+  evidenceBefore = null;
+  el('evidence').hidden = true;
+  el('evidence-entries').replaceChildren();
+  el('evidence-message').textContent = '';
+  el('evidence-title').textContent = 'Task evidence';
+}
+async function loadEvidence(taskId, before = null) {
+  if (!token) return;
+  const generation = ++evidenceGeneration;
+  const currentToken = token;
+  evidenceTask = taskId;
+  evidenceBefore = null;
+  el('evidence').hidden = false;
+  el('evidence-title').textContent = `Evidence · ${taskId}`;
+  el('evidence-entries').replaceChildren();
+  el('evidence-older').hidden = true;
+  el('evidence-message').textContent = 'Loading evidence…';
+  const params = new URLSearchParams({task_id: taskId});
+  if (before !== null) params.set('before', before);
+  try {
+    const response = await fetch(`/api/evidence?${params}`, {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (generation !== evidenceGeneration || currentToken !== token) return;
+    if (response.status === 401) { disconnect(); el('message').textContent = 'Authentication failed.'; return; }
+    if (!response.ok) throw new Error('Evidence unavailable. Retry with Newest entries.');
+    const data = await response.json();
+    if (generation !== evidenceGeneration || currentToken !== token) return;
+    if (data.type !== 'task_evidence' || !Array.isArray(data.entries)) throw new Error('Invalid evidence response.');
+    el('evidence-entries').replaceChildren(...data.entries.map(renderEvidence));
+    evidenceBefore = data.next_before;
+    el('evidence-older').hidden = !evidenceBefore;
+    el('evidence-message').textContent = data.entries.length ? `${data.entries.length} entries${evidenceBefore ? ' · older entries available' : ' · end of evidence'}` : 'No audit entries.';
+  } catch (error) {
+    if (generation === evidenceGeneration && currentToken === token) el('evidence-message').textContent = error.message;
+  }
+}
+el('evidence-refresh').addEventListener('click', () => { if (evidenceTask) loadEvidence(evidenceTask); });
+el('evidence-older').addEventListener('click', () => { if (evidenceTask && evidenceBefore) loadEvidence(evidenceTask, evidenceBefore); });
+el('evidence-close').addEventListener('click', closeEvidence);
+function renderEvidence(entry) {
+  const row = text('li', '');
+  const labels = {'execution.prepared':'Execution prepared','execution.started':'Execution started','execution.exited':'Execution exit recorded','execution.fenced':'Writer fence recorded','execution.blocked':'Execution blocked',begin_verification:'Verification started',bind_verification_source:'Verification source',record_check:'Check result',record_verdict:'Review verdict',complete:'Completion recorded'};
+  row.append(text('strong', labels[entry.kind] ?? entry.kind), text('p', `${new Date(entry.occurred_at_ms).toLocaleString()} · Recorded by ${entry.actor_id} · Audit #${entry.sequence}`));
+  const d = entry.details;
+  if (d.availability !== 'recorded') {
+    row.append(text('p', 'Structured evidence unavailable: missing, oversized, malformed or inconsistent record.', 'hint'));
+    return row;
+  }
+  const fields = text('dl', '', 'details');
+  const field = (label, value) => { fields.append(text('dt', label), text('dd', value ?? 'Unavailable')); };
+  if (d.current_execution_snapshot) {
+    const e = d.current_execution_snapshot;
+    field('Attempt / lease epoch', `${e.attempt_id} / ${e.lease_epoch}`);
+    field('Packet SHA-256', e.packet_sha256);
+    field('Runner', e.runner_id);
+    field('Current recorded execution', `${e.current_recorded_state} · Revision ${e.current_revision}`);
+    field('Recorded exit code', e.recorded_exit_code);
+    field('Execution record updated', new Date(e.updated_at_ms).toLocaleString());
+    row.append(text('p', 'Execution fields describe the latest persisted record, which can be newer than this audit event. They do not prove current process liveness.', 'hint'));
+  }
+  if (d.source !== undefined) field('Recorded source', d.source);
+  if (d.task_version_before !== undefined) field('Task version before event', d.task_version_before);
+  if (d.attempt_id !== undefined) field('Attempt / lease epoch', `${d.attempt_id} / ${d.lease_epoch}`);
+  if (d.check_id !== undefined) {
+    field('Check', d.check_id);
+    field('Recorded check result', d.passed ? 'Passed' : 'Failed');
+    field('Structured runtime receipt', d.receipt_status === 'recorded_runtime_receipt' ? 'Recorded and internally source-bound' : 'Unavailable');
+  }
+  if (d.runtime_receipt) {
+    const r = d.runtime_receipt;
+    field('Check outcome / exit code', `${r.outcome} / ${r.exit_code ?? 'Unavailable'}`);
+    field('Source SHA-256', r.source_sha256);
+    field('Check definition SHA-256', r.definition_sha256);
+    field('Standard output SHA-256', r.stdout_sha256);
+    field('Standard error SHA-256', r.stderr_sha256);
+  }
+  if (d.accepted !== undefined) {
+    field('Recorded review verdict', d.accepted ? 'Accepted' : 'Rejected');
+    field('Review output SHA-256', d.review_output_sha256);
+  }
+  if (d.recorded_completion) field('Lifecycle result', 'Completion recorded');
+  row.append(fields);
+  return row;
+}

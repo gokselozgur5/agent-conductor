@@ -19,7 +19,9 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 mod inventory;
 mod usage;
 pub use inventory::{InventoryKind, InventoryRow};
+mod evidence;
 mod history;
+pub use evidence::EvidenceRow;
 #[cfg(test)]
 mod transaction_cancellation;
 pub use history::AuditMetadata;

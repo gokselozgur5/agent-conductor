@@ -431,3 +431,84 @@ async fn original_workspace_lookup_is_task_scoped_and_rejects_ambiguity() {
             .contains("ambiguous workspace execution")
     );
 }
+
+#[tokio::test]
+async fn evidence_links_execution_identity_without_packet_checkpoint_or_effect_token() {
+    let (_directory, store) = seed().await;
+    let mut preparation = input();
+    let mut packet: serde_json::Value = serde_json::from_str(&preparation.packet_json).unwrap();
+    packet["private"] = serde_json::json!("PRIVATE_PACKET_CONTENT");
+    preparation.packet_json = packet.to_string();
+    preparation.packet_sha256 = format!("{:x}", Sha256::digest(preparation.packet_json.as_bytes()));
+    let bound_audit = |id| EffectAudit {
+        id,
+        actor_id: "runtime",
+        correlation_id: "token",
+        now_ms: 100,
+    };
+    store
+        .prepare_execution(&preparation, bound_audit("prepare-evidence"))
+        .await
+        .unwrap();
+    store
+        .update_execution(
+            "token",
+            0,
+            "start-evidence",
+            &ExecutionUpdate::Acknowledge {
+                wrapper_identity: "PRIVATE_WRAPPER".into(),
+                packet_sha256: preparation.packet_sha256.clone(),
+            },
+            bound_audit("start-evidence"),
+        )
+        .await
+        .unwrap();
+    store
+        .update_execution(
+            "token",
+            1,
+            "checkpoint-evidence",
+            &ExecutionUpdate::Checkpoint {
+                wrapper_identity: "PRIVATE_WRAPPER".into(),
+                payload_json: "{\"private\":\"PRIVATE_CHECKPOINT\"}".into(),
+            },
+            bound_audit("checkpoint-evidence"),
+        )
+        .await
+        .unwrap();
+    store
+        .update_execution(
+            "token",
+            2,
+            "exit-evidence",
+            &ExecutionUpdate::Exited {
+                wrapper_identity: "PRIVATE_WRAPPER".into(),
+                exit_code: Some(7),
+            },
+            bound_audit("exit-evidence"),
+        )
+        .await
+        .unwrap();
+    assert!(store.has_unfenced_execution("task").await.unwrap());
+    let rows = store.task_evidence("task", None).await.unwrap();
+    assert_eq!(rows.len(), 3, "checkpoints are a separate view");
+    for row in &rows {
+        let raw = row.execution.as_deref().unwrap();
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(value["attempt_id"], "attempt");
+        assert_eq!(value["lease_epoch"], "7");
+        assert_eq!(value["current_recorded_state"], "exited");
+        assert_eq!(value["recorded_exit_code"], 7);
+        assert_eq!(value["packet_sha256"], preparation.packet_sha256);
+        for secret in [
+            "PRIVATE_PACKET_CONTENT",
+            "PRIVATE_WRAPPER",
+            "PRIVATE_CHECKPOINT",
+            "effect_token",
+        ] {
+            assert!(!raw.contains(secret));
+        }
+    }
+    assert_eq!(rows.last().unwrap().kind, "execution.prepared");
+    assert!(store.task_evidence("other", None).await.unwrap().is_empty());
+}
