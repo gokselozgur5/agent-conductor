@@ -52,7 +52,8 @@ See [CHECKPOINTS.md](CHECKPOINTS.md) for claim and backpressure boundaries.
 Explicit registered-worker reassignment now retains the immutable plan and prior
 evidence through an atomic successor/queue/audit record. A real interrupted local
 workflow completed under a distinct registered successor with independent review
-in 80.47 seconds; 221 tests and strict lint pass. See [WORKFLOW_REASSIGNMENT.md](WORKFLOW_REASSIGNMENT.md).
+in 80.47 seconds; 222 tests and strict lint pass. Cancellation during assignment
+also rolls back; issue #43 tracks the broader manual-transaction audit. See [WORKFLOW_REASSIGNMENT.md](WORKFLOW_REASSIGNMENT.md).
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, outer advisory
 discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,

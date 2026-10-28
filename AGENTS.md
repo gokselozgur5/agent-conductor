@@ -19,5 +19,9 @@ This repository is an English-only, local-first agent coordination control plane
 - Build the production core in Rust with the crate boundaries defined in the design.
 - Add a regression test for every lifecycle or recovery bug.
 - Do not weaken a refusal path to make a test pass.
+- Own async write transactions with SQLx `Transaction` so cancellation rolls back
+  on drop. A result-based rollback helper does not cover an aborted future.
+  Use a deterministic cancellation regression when changing transaction ownership;
+  issue #43 tracks the remaining manual-transaction audit.
 - Keep adapters outside the state machine. Vendor behavior must not define task truth.
 - Run formatting, lint, tests, and secret checks before each atomic commit.

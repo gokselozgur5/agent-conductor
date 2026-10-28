@@ -1,6 +1,6 @@
 //! Atomic successor selection and continuation admission; original plans stay immutable.
-use crate::{Store, StoreError, finish_transaction};
-use sqlx::Executor;
+use crate::{Store, StoreError};
+use sqlx::Connection;
 
 impl Store {
     /// # Errors
@@ -38,8 +38,8 @@ impl Store {
         {
             return Err(invalid("invalid successor bounds"));
         }
-        let mut writer = self.inner.writer.lock().await;
-        writer.execute("BEGIN IMMEDIATE").await?;
+        let mut connection = self.inner.writer.lock().await;
+        let mut writer = connection.begin_with("BEGIN IMMEDIATE").await?;
         let result = async {
             let current: Option<i64> = sqlx::query_scalar("SELECT version FROM tasks WHERE id=?").bind(task_id).fetch_optional(&mut *writer).await?;
             if current != Some(version) { return Err(invalid("successor task version changed")); }
@@ -56,9 +56,93 @@ impl Store {
                 .bind(uuid::Uuid::now_v7().to_string()).bind(task_id).bind(task_id).bind(payload).bind(now).execute(&mut *writer).await?;
             Ok(())
         }.await;
-        finish_transaction(&mut writer, result).await
+        result?;
+        writer.commit().await?;
+        Ok(())
     }
 }
 fn invalid(message: &str) -> StoreError {
     StoreError::Integrity(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::{Connection, Executor};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        time::Duration,
+    };
+
+    #[tokio::test]
+    async fn cancelling_after_assignment_write_rolls_back_and_releases_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        let written = Arc::new(AtomicBool::new(false));
+        let (release, wait) = mpsc::channel();
+        {
+            let mut connection = store.inner.writer.lock().await;
+            connection.execute("INSERT INTO projects(id,canonical_path,filesystem_identity,created_at_ms) VALUES('p','/fixture','fixture',0)").await.unwrap();
+            connection.execute("INSERT INTO agents VALUES('successor','claude','fixture','fixture','read_write',0)").await.unwrap();
+            connection.execute("INSERT INTO tasks(id,project_id,objective,state,authority_json,created_at_ms,updated_at_ms,aggregate_json) VALUES('task','p','fixture','paused','{}',0,0,'{}')").await.unwrap();
+            connection.execute("INSERT INTO workflow_dispatch(task_id,plan_json,status,created_at_ms,updated_at_ms) VALUES('task','{}','finished',0,0)").await.unwrap();
+            let observed = written.clone();
+            connection
+                .lock_handle()
+                .await
+                .unwrap()
+                .set_update_hook(move |update| {
+                    if update.table == "workflow_assignments" {
+                        observed.store(true, Ordering::SeqCst);
+                        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                    }
+                });
+        }
+        let owned = store.clone();
+        let request = tokio::spawn(async move {
+            owned
+                .reassign_workflow("task", 0, "successor", "{}", "old", 1)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !written.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        let mut connection = store.inner.writer.lock().await;
+        connection.lock_handle().await.unwrap().remove_update_hook();
+        // A queued rollback must run before the next statement on this connection.
+        connection.execute("SELECT 1").await.unwrap();
+        assert!(
+            !connection.is_in_transaction(),
+            "cancelled reassignment left a transaction open"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_assignments")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM workflow_dispatch WHERE task_id='task'")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+        assert_eq!(status, "finished");
+        drop(connection);
+        store
+            .reassign_workflow("task", 0, "successor", "{}", "old", 2)
+            .await
+            .unwrap();
+    }
 }

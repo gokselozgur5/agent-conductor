@@ -60,7 +60,7 @@ backup before upgrade; do not remove migration records to downgrade.
 
 ## Validation
 
-The candidate passes 221 workspace tests, strict Clippy, formatting and release
+The candidate passes 222 workspace tests, strict Clippy, formatting and release
 build. Added regressions cover SQLite audit rollback, replay, stale/conflicting
 selection, immutable original plans, restart, unfenced execution, same worker,
 unregistered targets, verifier identity and profile mismatch.
@@ -83,3 +83,11 @@ or remote isolation. Actual model spend was not returned.
 Private evidence: `reviews/agent-conductor-runtime-20261028/`, including
 `reassignment-native-v1/receipt.json`, `reassignment-browser-v1/receipt.json`,
 `reassignment-downgrade/receipt.json` and `reassignment-workspace-v2.log`.
+
+Cancellation correction: a SQLite update-hook barrier aborts the request after
+the assignment write. The original manual transaction failed this regression,
+leaving a selection on the shared writer connection; the owned SQLx transaction
+rolls back on drop and permits a subsequent clean reassignment. Both source
+variants were explicitly rebuilt after cleaning the store crate. Other manual
+transaction owners require a separate audit under issue #43; this test does not
+prove those paths safe.
