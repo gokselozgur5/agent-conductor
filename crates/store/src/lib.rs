@@ -16,6 +16,9 @@ use tokio::sync::Mutex;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+mod effects;
+pub use effects::{EffectAudit, EffectRecord, EffectStatus};
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
@@ -43,6 +46,10 @@ pub enum StoreError {
     Integrity(String),
     #[error("boot generation overflow")]
     BootGenerationOverflow,
+    #[error("effect intent not found: {0}")]
+    EffectNotFound(String),
+    #[error("illegal effect transition for {token}: {detail}")]
+    EffectTransition { token: String, detail: String },
 }
 
 #[derive(Clone)]

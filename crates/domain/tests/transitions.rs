@@ -1,7 +1,7 @@
 use agent_conductor_domain::{
     Actor, ActorId, ActorRole, AttemptId, Blocker, CheckId, ClockReading, Command, CommandKind,
-    CorrelationId, IdempotencyKey, LeaseStatus, Rejection, RequiredCheck, SourceIdentity, Task,
-    TaskId, TaskState, apply,
+    CorrelationId, EffectIntentSpec, EffectKind, IdempotencyKey, LeaseStatus, Rejection,
+    RequiredCheck, SourceIdentity, Task, TaskId, TaskState, apply,
 };
 
 const LEASE_MS: u64 = 1_000;
@@ -61,6 +61,37 @@ fn ready_task() -> Task {
     )
     .unwrap()
     .task
+}
+
+#[test]
+fn claim_declares_the_worker_spawn_effect_in_the_domain_outcome() {
+    let task = ready_task();
+    let outcome = apply(
+        &task,
+        &command(
+            &task,
+            actor("worker", ActorRole::Worker),
+            CommandKind::Claim {
+                attempt_id: AttemptId::from("attempt-1"),
+                worker: ActorId::from("worker"),
+                lease_duration_ms: LEASE_MS,
+                worker_margin_ms: MARGIN_MS,
+                recovery_grace_ms: 250,
+            },
+        ),
+        clock(10),
+    )
+    .expect("claim");
+
+    assert_eq!(
+        outcome.effects,
+        vec![EffectIntentSpec {
+            kind: EffectKind::WorkerSpawn,
+            attempt_id: AttemptId::from("attempt-1"),
+            lease_epoch: 1,
+            worker: ActorId::from("worker"),
+        }]
+    );
 }
 
 fn running_task() -> Task {

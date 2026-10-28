@@ -101,6 +101,20 @@ pub struct Attempt {
     pub lease: Lease,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectKind {
+    WorkerSpawn,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EffectIntentSpec {
+    pub kind: EffectKind,
+    pub attempt_id: AttemptId,
+    pub lease_epoch: u64,
+    pub worker: ActorId,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RequiredCheck {
     pub id: CheckId,

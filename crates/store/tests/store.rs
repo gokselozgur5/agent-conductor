@@ -1,6 +1,6 @@
 use agent_conductor_store::{
-    AgentRegistration, AuditAppend, CommitBatch, CommitResult, EffectIntentAppend, NewProject,
-    NewTask, Store, StoreError, TaskMutation, TaskTransitionAppend,
+    AgentRegistration, AuditAppend, CommitBatch, CommitResult, EffectAudit, EffectIntentAppend,
+    EffectStatus, NewProject, NewTask, Store, StoreError, TaskMutation, TaskTransitionAppend,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 use tempfile::TempDir;
@@ -267,6 +267,172 @@ async fn outcome_audit_effect_and_idempotency_commit_atomically() {
     assert_eq!(count(store.readers(), "task_transitions").await, 1);
     assert_eq!(count(store.readers(), "effect_intents").await, 1);
     assert_eq!(count(store.readers(), "command_idempotency").await, 1);
+}
+
+fn effect_audit<'a>(id: &'a str, now_ms: i64) -> EffectAudit<'a> {
+    EffectAudit {
+        id,
+        actor_id: "effect-runner",
+        correlation_id: "effect-correlation",
+        now_ms,
+    }
+}
+
+#[tokio::test]
+async fn effect_lifecycle_is_audited_and_requires_observation_before_completion() {
+    let (_directory, store) = seeded_store().await;
+    store
+        .persist(&batch(
+            "effect-lifecycle",
+            "hash-effect",
+            "audit-effect",
+            "effect-1",
+        ))
+        .await
+        .expect("persist intent");
+
+    assert!(matches!(
+        store
+            .complete_effect(
+                "effect-1",
+                "runner-1",
+                effect_audit("illegal-complete", 201)
+            )
+            .await,
+        Err(StoreError::EffectTransition { .. })
+    ));
+    let claimed = store
+        .claim_effect("effect-1", "runner-1", 300, effect_audit("claim", 210))
+        .await
+        .expect("claim effect");
+    assert_eq!(claimed.status, EffectStatus::Claimed);
+    assert!(matches!(
+        store
+            .complete_effect("effect-1", "runner-1", effect_audit("early-complete", 220))
+            .await,
+        Err(StoreError::EffectTransition { .. })
+    ));
+    assert!(matches!(
+        store
+            .observe_effect(
+                "effect-1",
+                "runner-2",
+                r#"{"external_id":"worker-1"}"#,
+                effect_audit("wrong-runner", 230),
+            )
+            .await,
+        Err(StoreError::EffectTransition { .. })
+    ));
+    let observed = store
+        .observe_effect(
+            "effect-1",
+            "runner-1",
+            r#"{"external_id":"worker-1"}"#,
+            effect_audit("observe", 240),
+        )
+        .await
+        .expect("observe effect");
+    assert_eq!(observed.status, EffectStatus::Observed);
+    let done = store
+        .complete_effect("effect-1", "runner-1", effect_audit("done", 250))
+        .await
+        .expect("complete effect");
+    assert_eq!(done.status, EffectStatus::Done);
+
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE kind LIKE 'effect.%' AND task_id = 'task-1'",
+    )
+    .fetch_one(store.readers())
+    .await
+    .expect("effect audit count");
+    assert_eq!(audit_count, 3);
+}
+
+#[tokio::test]
+async fn expired_claim_is_retried_with_the_same_effect_token() {
+    let (_directory, store) = seeded_store().await;
+    store
+        .persist(&batch(
+            "effect-retry",
+            "hash-retry",
+            "audit-retry",
+            "effect-retry",
+        ))
+        .await
+        .expect("persist intent");
+    store
+        .claim_effect(
+            "effect-retry",
+            "runner-1",
+            300,
+            effect_audit("claim-first", 210),
+        )
+        .await
+        .expect("first claim");
+
+    assert!(matches!(
+        store
+            .claim_effect(
+                "effect-retry",
+                "runner-2",
+                400,
+                effect_audit("claim-early", 299),
+            )
+            .await,
+        Err(StoreError::EffectTransition { .. })
+    ));
+    let reclaimed = store
+        .claim_effect(
+            "effect-retry",
+            "runner-2",
+            450,
+            effect_audit("claim-expired", 300),
+        )
+        .await
+        .expect("expired claim takeover");
+    assert_eq!(reclaimed.token, "effect-retry");
+    assert_eq!(reclaimed.runner_id.as_deref(), Some("runner-2"));
+
+    let reclaim_audit: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE kind = 'effect.reclaimed'")
+            .fetch_one(store.readers())
+            .await
+            .expect("reclaim audit count");
+    assert_eq!(reclaim_audit, 1);
+}
+
+#[tokio::test]
+async fn abandoning_an_effect_is_terminal() {
+    let (_directory, store) = seeded_store().await;
+    store
+        .persist(&batch(
+            "effect-abandon",
+            "hash-abandon",
+            "audit-abandon",
+            "effect-abandon",
+        ))
+        .await
+        .expect("persist intent");
+    let abandoned = store
+        .abandon_effect(
+            "effect-abandon",
+            r#"{"reason":"reconciliation could not prove absence"}"#,
+            effect_audit("abandon", 210),
+        )
+        .await
+        .expect("abandon effect");
+    assert_eq!(abandoned.status, EffectStatus::Abandoned);
+    assert!(matches!(
+        store
+            .claim_effect(
+                "effect-abandon",
+                "runner-1",
+                400,
+                effect_audit("claim-abandoned", 220),
+            )
+            .await,
+        Err(StoreError::EffectTransition { .. })
+    ));
 }
 
 #[tokio::test]

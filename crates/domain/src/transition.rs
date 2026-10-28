@@ -1,12 +1,14 @@
 use crate::{
-    ActorRole, Attempt, CheckResult, ClockReading, Command, CommandKind, Lease, LeaseStatus,
-    Rejection, Task, TaskState, TransitionRecord, Verdict, Verification,
+    ActorRole, Attempt, CheckResult, ClockReading, Command, CommandKind, EffectIntentSpec,
+    EffectKind, Lease, LeaseStatus, Rejection, Task, TaskState, TransitionRecord, Verdict,
+    Verification,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Outcome {
     pub task: Task,
     pub transition: TransitionRecord,
+    pub effects: Vec<EffectIntentSpec>,
 }
 
 /// Applies one command without reading a clock or persistence layer implicitly.
@@ -417,6 +419,17 @@ pub fn apply(task: &Task, command: &Command, clock: ClockReading) -> Result<Outc
         .version
         .checked_add(1)
         .ok_or(Rejection::InvalidCommand("task version overflow"))?;
+    let effects = match &command.kind {
+        CommandKind::Claim {
+            attempt_id, worker, ..
+        } => vec![EffectIntentSpec {
+            kind: EffectKind::WorkerSpawn,
+            attempt_id: attempt_id.clone(),
+            lease_epoch: next.last_lease_epoch,
+            worker: worker.clone(),
+        }],
+        _ => Vec::new(),
+    };
     Ok(Outcome {
         transition: TransitionRecord {
             actor: command.actor.clone(),
@@ -429,6 +442,7 @@ pub fn apply(task: &Task, command: &Command, clock: ClockReading) -> Result<Outc
             resulting_version: next.version,
         },
         task: next,
+        effects,
     })
 }
 

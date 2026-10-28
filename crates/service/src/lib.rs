@@ -5,8 +5,8 @@ use std::{
 };
 
 use agent_conductor_domain::{
-    Actor, ActorId, ActorRole, ClockReading, Command, CommandKind, CorrelationId, IdempotencyKey,
-    LeaseStatus, Rejection, Task, TaskId, TaskState, apply,
+    Actor, ActorId, ActorRole, ClockReading, Command, CommandKind, CorrelationId, EffectIntentSpec,
+    EffectKind, IdempotencyKey, LeaseStatus, Rejection, Task, TaskId, TaskState, apply,
 };
 use agent_conductor_store::{
     AgentRegistration, AttemptLeaseMutation, AuditAppend, CommitBatch, CommitResult,
@@ -227,7 +227,11 @@ impl<C: Clock> PersistentControlService<C> {
         let old: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
         let clock = self.clock.read(self.boot_generation);
         let applied = apply(&old, &command, clock).map_err(rejection_error)?;
-        let effects = effects(&applied.task, &command, clock);
+        let effects = applied
+            .effects
+            .iter()
+            .map(|effect| effect_append(&applied.task, &command, effect, clock))
+            .collect::<Result<Vec<_>, _>>()?;
         let response = CommandAppliedResponse {
             task: TaskResponse {
                 project_id: row.project_id,
@@ -554,24 +558,29 @@ fn attempt(task: &Task, clock: ClockReading) -> Result<Option<AttemptLeaseMutati
         })
         .transpose()
 }
-fn effects(task: &Task, command: &Command, clock: ClockReading) -> Vec<EffectIntentAppend> {
-    let CommandKind::Claim { attempt_id, .. } = &command.kind else {
-        return vec![];
+fn effect_append(
+    task: &Task,
+    command: &Command,
+    effect: &EffectIntentSpec,
+    clock: ClockReading,
+) -> Result<EffectIntentAppend, ErrorBody> {
+    let kind = match effect.kind {
+        EffectKind::WorkerSpawn => "worker.spawn",
     };
     let material = format!(
-        "v1\0{}\0{}\0{}\0{}\0worker.spawn",
-        task.id.0, attempt_id.0, task.last_lease_epoch, command.correlation_id.0
+        "v1\0{}\0{}\0{}\0{}\0{kind}",
+        task.id.0, effect.attempt_id.0, effect.lease_epoch, command.correlation_id.0
     );
-    vec![EffectIntentAppend {
+    Ok(EffectIntentAppend {
         token: format!("v1:{:x}", Sha256::digest(material.as_bytes())),
         task_id: Some(task.id.0.clone()),
-        attempt_id: Some(attempt_id.0.clone()),
-        lease_epoch: i64::try_from(task.last_lease_epoch).ok(),
+        attempt_id: Some(effect.attempt_id.0.clone()),
+        lease_epoch: Some(to_i64(effect.lease_epoch)?),
         correlation_id: command.correlation_id.0.clone(),
-        effect_kind: "worker.spawn".into(),
-        request_json: "{}".into(),
+        effect_kind: kind.into(),
+        request_json: serde_json::to_string(effect).map_err(json_error)?,
         created_at_ms: clock.wall_unix_ms,
-    }]
+    })
 }
 fn state(v: TaskState) -> Result<String, ErrorBody> {
     serde_json::to_value(v)
@@ -652,4 +661,57 @@ fn wall_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+    use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
+
+    fn command(correlation_id: &str) -> Command {
+        Command {
+            actor: Actor {
+                id: ActorId("worker-1".into()),
+                role: ActorRole::Worker,
+            },
+            expected_version: 1,
+            correlation_id: CorrelationId(correlation_id.into()),
+            idempotency_key: IdempotencyKey("claim-1".into()),
+            reason: "claim".into(),
+            kind: CommandKind::Cancel,
+        }
+    }
+
+    #[test]
+    fn effect_token_is_versioned_stable_and_changes_with_identity() {
+        let task = Task::new(TaskId("task-1".into()), vec![]);
+        let effect = EffectIntentSpec {
+            kind: EffectKind::WorkerSpawn,
+            attempt_id: AttemptId("attempt-1".into()),
+            lease_epoch: 1,
+            worker: ActorId("worker-1".into()),
+        };
+        let clock = ClockReading {
+            boot_generation: 7,
+            monotonic_ms: 10,
+            wall_unix_ms: 20,
+        };
+
+        let first = effect_append(&task, &command("corr-1"), &effect, clock).expect("effect");
+        let replay = effect_append(&task, &command("corr-1"), &effect, clock).expect("replay");
+        assert_eq!(first.token, replay.token);
+        assert_eq!(
+            first.token,
+            "v1:f77d90fe7237d7c900a18c2766422bca4ba18dc1183d1a4812e3a68307313eb6"
+        );
+
+        let changed =
+            effect_append(&task, &command("corr-2"), &effect, clock).expect("changed effect");
+        assert_ne!(first.token, changed.token);
+        assert_eq!(first.effect_kind, "worker.spawn");
+        assert_eq!(
+            serde_json::from_str::<EffectIntentSpec>(&first.request_json).expect("typed request"),
+            effect
+        );
+    }
 }
