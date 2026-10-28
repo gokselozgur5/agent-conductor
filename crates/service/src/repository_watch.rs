@@ -64,6 +64,12 @@ impl OwnedWatchState {
     }
 }
 impl RepositoryWatchState {
+    /// Continue observing until debounce or bounded publication draining settles.
+    #[must_use]
+    pub fn needs_settle(&self) -> bool {
+        self.pending_since.is_some() || self.draining
+    }
+
     fn ready(&mut self, fingerprint: String, now: std::time::Duration) -> bool {
         let initial = self.last.is_none();
         if self.last.as_ref() != Some(&fingerprint) {
@@ -600,13 +606,17 @@ mod tests {
         let mut state = RepositoryWatchState::default();
         assert!(state.ready("baseline".into(), Duration::ZERO));
         state.published(0);
+        assert!(!state.needs_settle());
         assert!(!state.ready("edit".into(), Duration::from_millis(100)));
+        assert!(state.needs_settle());
         assert!(!state.ready("more".into(), Duration::from_millis(600)));
         assert!(!state.ready("more".into(), Duration::from_millis(1000)));
         assert!(state.ready("more".into(), Duration::from_millis(1350)));
         state.published(256);
+        assert!(state.needs_settle());
         assert!(state.ready("more".into(), Duration::from_millis(1400)));
         state.published(1);
+        assert!(!state.needs_settle());
         assert!(!state.ready("more".into(), Duration::from_millis(1500)));
         for i in 2..7 {
             assert!(!state.ready(format!("edit-{i}"), Duration::from_secs(i)));

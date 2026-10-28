@@ -7,8 +7,8 @@ require macOS; this launcher does not add Linux isolation or remote-host support
 From the repository root, build and initialize once:
 
 ```sh
-cargo build --workspace
-./tools/conductor init --project /absolute/path/to/your/git-project
+cargo build --workspace --release
+./tools/conductor init --bin-dir "$PWD/target/release" --project /absolute/path/to/your/git-project
 ```
 
 The project must have an existing Git commit. Initialization creates private

@@ -84,6 +84,39 @@ pub async fn observe_git(source: &Path) -> Result<GitSnapshot, SnapshotError> {
     })
 }
 
+/// Resolves native notification roots for a project and its Git metadata.
+/// # Errors
+/// Refuses unresolved, non-UTF8 or ambiguous newline-delimited Git paths.
+pub async fn git_observation_roots(source: &Path) -> Result<Vec<PathBuf>, SnapshotError> {
+    let root = source.canonicalize().map_err(|_| SnapshotError::Io)?;
+    let bytes = git(
+        &root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+    )
+    .await?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| SnapshotError::Unsupported)?;
+    let paths = text.lines().collect::<Vec<_>>();
+    if paths.len() != 2 {
+        return Err(SnapshotError::Unsupported);
+    }
+    let mut roots = vec![root];
+    for path in paths {
+        let path = Path::new(path);
+        if !path.is_absolute() {
+            return Err(SnapshotError::Invalid);
+        }
+        roots.push(path.canonicalize().map_err(|_| SnapshotError::Io)?);
+    }
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
 async fn inventory(root: &Path) -> Result<Inventory, SnapshotError> {
     let toplevel = git(root, &["rev-parse", "--show-toplevel"]).await?;
     let top = PathBuf::from(

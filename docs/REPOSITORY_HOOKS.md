@@ -180,3 +180,52 @@ README reference. This integrated run does not distinguish periodic publication
 from final-capture publication; the300file controlled regression above specifically
 covers the latter. No additional model run was made for the subsequent board text
 clarification showing blocked resume conditions and the existing workflow queue.
+
+## Idle observation design
+
+Issue #33 measured non-negligible idle CPU. On the same project/database seed,
+30-second process-lifetime observations reported approximately 0.75% of one CPU
+with the debug watcher disabled, 45.19% with debug polling, and 28.99% with release
+polling. `wait4` includes waited child CPU here, confirmed by a separate nested-child
+control. Earlier `ps -S` samples did not expose that child cost on this host; retain
+them as raw process samples, not complete-tree accounting. Sampling also found
+unoptimized SHA-256 work. No universal CPU bound is inferred.
+
+Use native filesystem notifications only as a hint to perform the existing bounded
+Git/content observation. Keep 250 ms scheduling, 750 ms quiet debounce, 5 s observed
+burst eligibility and bounded draining. A pending debounce/drain continues polling;
+quiet watches reconcile fully every 5 s even without notification. Missed native
+notifications can therefore delay discovery up to that reconciliation interval
+plus observation I/O and debounce; this is an explicit fallback, not a claim that
+notifications are lossless. Active owned-attempt observation remains unchanged.
+
+Register the project, resolved Git directory/common directory, and nonrecursive
+parents before the first scan. Recheck roots after scans. Parent changes relevant
+to a moved/deleted root trigger validation; unrelated sibling paths do not. Use
+constant-size dirty/error flags instead of an unbounded event queue. Access-only
+notifications do not trigger self-scans. Backend creation/watch/error failures
+stop observation with degraded health; overflow/rescan hints force a full scan.
+Events never replace content hashes or project/lease validation and never grant
+worker launch authority.
+
+The implementation uses the native backend selected by
+[notify](https://docs.rs/notify/8.2.1/notify/) and its
+[watch modes](https://docs.rs/notify/8.2.1/notify/trait.Watcher.html). Network or other
+filesystems may omit native events; the periodic reconciliation remains necessary.
+
+Controlled before/after acceptance (`idle-controlled-v3/receipt.json`) used the
+same detached f83fbf7 project, SQLite seed and release configuration, with no
+HTTP, dispatcher or models. Over 30-second samples, waited lifetime CPU fell
+from 9.390903 seconds / 30.245466 seconds (31.05% of one CPU) to 0.872194 /
+30.286177 (2.88%), approximately 90.7% lower. Lifetime accounting includes startup
+and waited children. This is one host/workload, not a universal bound or soak.
+Earlier fixture attempts retained a conflicting old observation configuration and
+were refused; their incomplete measurements are not included.
+
+A native linked-worktree process probe passed burst coalescing before fallback,
+path routing, source echo suppression, content omission, update/delete, ignored
+paths, restart reconciliation exactly once, external Git HEAD notification and
+root-loss degraded health. All 300 distinct burst paths drained in 1.63 seconds.
+These are filesystem-to-event checks, not new model execution or full wake-latency
+acceptance. Scheduler tests cover missed hints, late hints, settling and backend
+failure; native notifications are exercised on CI hosts.
