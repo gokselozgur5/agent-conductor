@@ -66,17 +66,21 @@ def runner_pids(inventory):
 
 def correlate(db, authority, observations):
     result = []
+    columns = {row[1] for row in db.execute('pragma table_info(executions)')}
+    process_column = ',process_json' if 'process_json' in columns else ''
     for pid, tag in observations:
         if tag[0] != authority:
             continue
-        rows = db.execute('select task_id,attempt_id,lease_epoch,state,wrapper_identity from executions where packet_sha256=? limit 2', (tag[1],)).fetchall()
+        rows = db.execute('select task_id,attempt_id,lease_epoch,state,wrapper_identity' + process_column + ' from executions where packet_sha256=? limit 2', (tag[1],)).fetchall()
         item = dict(pid=pid, packet_sha256=tag[1], wrapper_identity=tag[2])
         if not rows:
             item['classification'] = 'no_matching_record'
         elif len(rows) != 1:
             item['classification'] = 'ambiguous_records'
         else:
-            task, attempt, epoch, state, wrapper = rows[0]
+            task, attempt, epoch, state, wrapper = rows[0][:5]
+            if process_column:
+                item['_recorded_process'] = rows[0][5]
             item.update(task_id=task, attempt_id=attempt, lease_epoch=str(epoch), execution_state=state)
             if wrapper is None and state == 'prepared':
                 item['classification'] = 'prepared_not_acknowledged'
@@ -90,7 +94,33 @@ def correlate(db, authority, observations):
     return result
 
 
-def inspect(database):
+def process_binding(raw, pid, start, host):
+    if raw is None:
+        return 'legacy_unavailable'
+    try:
+        if not isinstance(raw, str) or len(raw) > 1024:
+            return 'invalid_recorded_process'
+        value = json.loads(raw)
+        if not isinstance(value, dict) or set(value) != {'platform', 'host_id', 'boot_id', 'pid', 'start_marker'}:
+            return 'invalid_recorded_process'
+        if type(value['pid']) is not int or not 0 < value['pid'] <= 2**31 - 1 or value['platform'] not in ('linux', 'macos'):
+            return 'invalid_recorded_process'
+        if any(not isinstance(value[k], str) or not re.fullmatch('[0-9a-f]{64}', value[k]) for k in ('host_id', 'boot_id')):
+            return 'invalid_recorded_process'
+        if value['pid'] != pid:
+            return 'pid_mismatch'
+        if value['start_marker'] != start:
+            return 'kernel_marker_mismatch'
+        if host is None:
+            return 'host_boot_unchecked'
+        if any(value[k] != host[k] for k in ('platform', 'host_id', 'boot_id')):
+            return 'host_boot_mismatch'
+        return 'matching_observation'
+    except (ValueError, TypeError, KeyError):
+        return 'invalid_recorded_process'
+
+
+def inspect(database, host=None):
     database = database.resolve(strict=True)
     deadline = time.monotonic() + 10
     code, inventory = ps(['-axo', 'pid=,comm='])
@@ -142,6 +172,7 @@ def inspect(database):
             continue
         item['process_start_observation'] = births[item['pid']]
         item['start_observation_unchanged'] = True
+        item['recorded_process_binding'] = process_binding(item.pop('_recorded_process', None), item['pid'], births[item['pid']], host)
         stable.append(item)
     if time.monotonic() > deadline:
         raise ValueError('inventory_deadline')
@@ -155,9 +186,14 @@ def inspect(database):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('database', type=Path)
+    parser.add_argument('--host-reader', type=Path, help='Explicit trusted conductor-daemon executable for native host/boot comparison')
     args = parser.parse_args()
     try:
-        print(json.dumps(inspect(args.database), indent=2))
+        host = None
+        if args.host_reader is not None:
+            from disaster_recovery import host_epoch
+            host = host_epoch(args.host_reader.resolve(strict=True))
+        print(json.dumps(inspect(args.database, host), indent=2))
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
         # Only fixed local diagnostics; SQLite and process text can contain private data.
         message = str(error) if type(error) is ValueError else type(error).__name__

@@ -39,6 +39,7 @@ async fn checkpoint_seed_execution(
             prepared.revision,
             "checkpoint-ack",
             &ExecutionUpdate::Acknowledge {
+            process: None,
                 wrapper_identity: "wrapper".into(),
                 packet_sha256: packet.sha256().unwrap(),
             },

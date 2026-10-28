@@ -296,7 +296,7 @@ async fn controller_persists_ack_before_release_and_refusal_has_no_side_effect()
             std::path::Path::new(env!("CARGO_BIN_EXE_conductor-runner")),
             &input,
             None,
-            |_| async {
+            |_, _| async {
                 assert!(!path.exists(), "persistence precedes worker execution");
                 if accept {
                     Ok(conductor_runtime::continuous_millis().expect("clock") + 1000)
@@ -756,4 +756,32 @@ async fn observable_process_identity_rejects_wrong_packet_before_release() {
             assert!(!directory.path().join("tagged-result").exists());
         }
     }
+}
+
+#[tokio::test]
+async fn child_exit_after_acknowledgement_refuses_release() {
+    use conductor_runtime::RunnerConnection;
+    let directory = tempfile::tempdir().unwrap();
+    let input = launch(directory.path(), "printf result > changed", 1000);
+    let result = RunnerConnection::launch(
+        std::path::Path::new(env!("CARGO_BIN_EXE_conductor-runner")),
+        &input,
+        None,
+        |_, birth| async move {
+            birth.host.validate().unwrap();
+            birth.revalidate().await.unwrap();
+            // This is the parent's still-owned fixture child, before any worker release.
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(i32::try_from(birth.pid).unwrap()),
+                nix::sys::signal::Signal::SIGKILL,
+            )
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(conductor_runtime::continuous_millis().unwrap() + 1000)
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!directory.path().join("changed").exists());
 }

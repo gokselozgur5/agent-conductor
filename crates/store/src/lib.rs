@@ -32,7 +32,9 @@ mod workflows;
 pub use workflows::WorkflowDispatch;
 
 mod executions;
-pub use executions::{ExecutionPreparation, ExecutionRecord, ExecutionState, ExecutionUpdate};
+pub use executions::{
+    ExecutionPreparation, ExecutionProcess, ExecutionRecord, ExecutionState, ExecutionUpdate,
+};
 
 mod effects;
 pub use effects::{EffectAudit, EffectRecord, EffectStatus};

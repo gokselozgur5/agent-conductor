@@ -169,6 +169,7 @@ mod tests {
             "untrusted_context":[serde_json::to_string(&conductor_runtime::discover_advisory(&baseline).unwrap()).unwrap()]
         })).unwrap();
         let record = ExecutionRecord {
+            process: None,
             preparation: ExecutionPreparation {
                 effect_token: "token".into(),
                 task_id: "task".into(),

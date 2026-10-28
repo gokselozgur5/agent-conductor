@@ -47,12 +47,67 @@ impl ExecutionState {
     }
 }
 
+/// Parent-observed metadata bound to an acknowledged execution, not a process handle.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionProcess {
+    pub platform: String,
+    pub host_id: String,
+    pub boot_id: String,
+    pub pid: u32,
+    pub start_marker: String,
+}
+impl ExecutionProcess {
+    fn validate(&self) -> Result<(), StoreError> {
+        if self.pid == 0
+            || self.pid > i32::MAX.unsigned_abs()
+            || [&self.host_id, &self.boot_id].iter().any(|id| {
+                id.len() != 64
+                    || !id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        {
+            return Err(invalid());
+        }
+        let valid_number = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 20
+                && value.bytes().all(|b| b.is_ascii_digit())
+                && value.parse::<u64>().is_ok()
+        };
+        let valid = match self.platform.as_str() {
+            "linux" => self
+                .start_marker
+                .strip_prefix("linux-start-ticks:")
+                .is_some_and(valid_number),
+            "macos" => self
+                .start_marker
+                .strip_prefix("macos-start-us:")
+                .and_then(|v| v.split_once(':'))
+                .is_some_and(|(sec, usec)| {
+                    valid_number(sec)
+                        && sec.parse::<u64>().is_ok_and(|v| v > 0)
+                        && valid_number(usec)
+                        && usec.parse::<u64>().is_ok_and(|v| v < 1_000_000)
+                }),
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionRecord {
     pub preparation: ExecutionPreparation,
     pub revision: i64,
     pub state: ExecutionState,
     pub wrapper_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ExecutionProcess>,
     pub checkpoint_json: Option<String>,
     pub exit_code: Option<i32>,
 }
@@ -63,6 +118,8 @@ pub enum ExecutionUpdate {
     Acknowledge {
         wrapper_identity: String,
         packet_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process: Option<ExecutionProcess>,
     },
     Checkpoint {
         wrapper_identity: String,
@@ -226,6 +283,7 @@ impl Store {
                 revision: 0,
                 state: ExecutionState::Prepared,
                 wrapper_identity: None,
+                process: None,
                 checkpoint_json: None,
                 exit_code: None,
             },
@@ -280,10 +338,20 @@ impl Store {
         ) {
             require_live(&mut tx, &record.preparation, audit.now_ms).await?;
         }
+        if matches!(update, ExecutionUpdate::Acknowledge { process: None, .. }) {
+            let authority: Option<String> =
+                sqlx::query_scalar("SELECT authority_id FROM recovery_authority WHERE singleton=1")
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if authority.is_some() {
+                return Err(invalid());
+            }
+        }
         let kind = apply_update(&mut record, update)?;
         record.revision = record.revision.checked_add(1).ok_or_else(invalid)?;
-        sqlx::query("UPDATE executions SET revision = ?, state = ?, wrapper_identity = ?, checkpoint_json = ?, exit_code = ?, updated_at_ms = ? WHERE effect_token = ?")
+        sqlx::query("UPDATE executions SET revision = ?, state = ?, wrapper_identity = ?, process_json = ?, checkpoint_json = ?, exit_code = ?, updated_at_ms = ? WHERE effect_token = ?")
             .bind(record.revision).bind(record.state.as_str()).bind(&record.wrapper_identity)
+            .bind(record.process.as_ref().map(serde_json::to_string).transpose().map_err(|_| invalid())?)
             .bind(&record.checkpoint_json).bind(record.exit_code).bind(audit.now_ms).bind(token)
             .execute(&mut *tx).await?;
         append_audit(
@@ -310,6 +378,7 @@ fn apply_update(
         ExecutionUpdate::Acknowledge {
             wrapper_identity,
             packet_sha256,
+            process,
         } => {
             if record.state != ExecutionState::Prepared
                 || wrapper_identity.trim().is_empty()
@@ -318,6 +387,10 @@ fn apply_update(
             {
                 return Err(invalid());
             }
+            if let Some(process) = process {
+                process.validate()?;
+            }
+            record.process.clone_from(process);
             record.wrapper_identity = Some(wrapper_identity.clone());
             record.state = ExecutionState::Started;
             Ok("execution.started")
@@ -446,10 +519,23 @@ fn decode(row: sqlx::sqlite::SqliteRow) -> Result<ExecutionRecord, StoreError> {
         revision: row.try_get("revision")?,
         state: ExecutionState::parse(row.try_get("state")?)?,
         wrapper_identity: row.try_get("wrapper_identity")?,
+        process: decode_process(row.try_get("process_json")?)?,
         checkpoint_json: row.try_get("checkpoint_json")?,
         exit_code: row.try_get("exit_code")?,
     })
 }
 fn invalid() -> StoreError {
     StoreError::Integrity("execution identity, state or ownership mismatch".into())
+}
+
+fn decode_process(json: Option<String>) -> Result<Option<ExecutionProcess>, StoreError> {
+    json.map(|text| {
+        if text.len() > 1024 {
+            return Err(invalid());
+        }
+        let process: ExecutionProcess = serde_json::from_str(&text).map_err(|_| invalid())?;
+        process.validate()?;
+        Ok(process)
+    })
+    .transpose()
 }
