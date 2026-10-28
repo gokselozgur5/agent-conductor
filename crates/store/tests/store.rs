@@ -910,3 +910,63 @@ async fn count(pool: &sqlx::SqlitePool, table: &str) -> i64 {
         .await
         .expect("count rows")
 }
+
+#[tokio::test]
+async fn usage_observations_are_immutable_idempotent_and_survive_restart() {
+    let (directory, store) = seeded_store().await;
+    let original = store.task("task-1").await.unwrap().unwrap();
+    let metadata = r#"{"attempt_id":"attempt","report":{"status":"missing"}}"#;
+    store
+        .record_usage("usage-1", "task-1", "attempt", metadata, 100)
+        .await
+        .unwrap();
+    store
+        .record_usage("usage-1", "task-1", "attempt", metadata, 200)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .record_usage("usage-1", "task-1", "attempt", "{}", 200)
+            .await,
+        Err(StoreError::IdempotencyCollision)
+    ));
+    assert!(
+        store
+            .record_usage("usage-2", "task-1", "attempt", "[]", 200)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .record_usage("usage-2", "task-1", "attempt", &"x".repeat(16385), 200)
+            .await
+            .is_err()
+    );
+    let rows = store
+        .inventory_page(agent_conductor_store::InventoryKind::Usage, None)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(&rows[0].metadata).unwrap();
+    assert_eq!(value["observed_at_ms"], 100);
+    assert_eq!(value["report"]["status"], "missing");
+    let plan: Vec<(i64,i64,i64,String)> = sqlx::query_as("EXPLAIN QUERY PLAN SELECT id FROM audit_events WHERE kind='vendor.usage_reported' AND id>? ORDER BY id LIMIT 101").bind("").fetch_all(store.readers()).await.unwrap();
+    assert!(plan.iter().any(|row| row.3.contains("usage_audit_by_id")));
+    assert_eq!(store.task("task-1").await.unwrap().unwrap(), original);
+    drop(store);
+    let reopened = Store::open(directory.path().join("conductor.sqlite3"))
+        .await
+        .unwrap();
+    reopened
+        .record_usage("usage-1", "task-1", "attempt", metadata, 300)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .inventory_page(agent_conductor_store::InventoryKind::Usage, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

@@ -1,7 +1,7 @@
 # Operator inventory
 
 The board's **Projects, agents and events** section reads the same versioned
-service as the CLI. Select Projects, Agents, Events, Subscriptions or Deliveries.
+service as the CLI. Select Projects, Agents, Events, Subscriptions, Deliveries or Reported usage.
 Refresh returns to the first page; Next page advances in ascending ID order.
 These are persisted metadata snapshots, not live process or ownership verdicts.
 Inventory refresh is explicit after the initial connection; task polling remains
@@ -21,7 +21,7 @@ contains `type: inventory`, `resource`, up to 100 `entries`, and nullable
 `GET /api/inventory?resource=events&after=CURSOR` with URL-encoded parameters.
 Unknown resource names, extra HTTP fields, empty/NUL/over-4096-byte cursors are
 refused. The existing loopback/Host/Origin/authentication and response-size
-boundaries apply. There is no new write operation or schema migration.
+boundaries apply. There is no operator write operation. Reported usage adds migration 16 for its partial audit index; see [REPORTED_USAGE.md](REPORTED_USAGE.md).
 
 ## Fields and interpretation
 
@@ -46,8 +46,8 @@ that sort before the current cursor require a first-page refresh. This is not a
 chronological event feed, total-count query, search interface, or retention policy.
 Rows are bounded in count; unusually large metadata can still hit the existing
 transport byte limit. Payload omission is not general redaction of user-supplied
-identifiers/paths. Task/process lease, evidence and reported usage visibility
-remain separate product work.
+identifiers/paths. Task lease observations and reported usage are documented separately; deeper
+execution evidence remains product work.
 
 ## Validation
 
@@ -65,3 +65,6 @@ Final local validation passes 247 workspace tests, strict Clippy, formatting,
 release build and credential checks. The final release Chrome probe repeats the
 acceptance after the last CLI help change and binds its binary hashes in
 `inventory-browser-v2/receipt.json`.
+
+Reported usage is the sixth collection; its invocation identity, missing-data and
+vendor-claim boundaries are documented in [REPORTED_USAGE.md](REPORTED_USAGE.md).

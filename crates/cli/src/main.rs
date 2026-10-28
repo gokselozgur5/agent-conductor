@@ -89,7 +89,7 @@ enum Command {
     },
     /// Read at most 100 metadata records in ID order.
     Inventory {
-        #[arg(value_parser = ["projects", "agents", "events", "subscriptions", "deliveries"])]
+        #[arg(value_parser = ["projects", "agents", "events", "subscriptions", "deliveries", "usage"])]
         resource: String,
         #[arg(long)]
         after: Option<String>,
