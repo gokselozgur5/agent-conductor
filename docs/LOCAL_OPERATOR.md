@@ -198,3 +198,10 @@ bounded source candidates. The same option on `plan` freezes untrusted data pins
 repeated `--document relative/path` selects repository-specific names. These are
 separate from authoritative `--instruction` pins and add no native read roots.
 See [SCOPED_ADVISORY.md](SCOPED_ADVISORY.md) for bounds and change handling.
+
+## Cold state snapshots
+
+After stopping and reconciling the runtime, `tools/conductor backup DESTINATION`
+exports private state and `tools/conductor verify-backup DESTINATION` checks it
+without starting workers. See [OPERATOR_BACKUP.md](OPERATOR_BACKUP.md) for the
+fencing requirements, external dependencies and pending restore limitations.
