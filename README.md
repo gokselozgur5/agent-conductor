@@ -76,3 +76,11 @@ phases. See [phases](docs/PHASES.md), [requirements](docs/REQUIREMENTS.md),
 ## Python spike path intake
 
 In the retained spike, the operator supplies an absolute project path. Conductor records its canonical path and produces a bounded resume packet containing applicable `AGENTS.md` files, known status/phase documents, current Git status, and the project's Kanban projection. Agents receive the packet and read the referenced files in order; Conductor does not dump an entire repository into model context.
+
+### Native task execution
+
+The opt-in plan-driven daemon mode now runs a native worker, isolated checks and
+a distinct read-only reviewer through the durable lifecycle. See
+[Native workflow](docs/NATIVE_WORKFLOW.md) for setup and the first real synthetic
+acceptance result. Original checkouts remain unchanged; broader product and
+recovery gates are still tracked in [Status](docs/STATUS.md).
