@@ -263,42 +263,33 @@ mod tests {
     use std::os::unix::fs::symlink;
     #[test]
     fn accepted_copy_preserves_deletions_and_refuses_tampering_and_links() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("original");
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let source = root.join("original");
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("answer.txt"), b"42\n").unwrap();
-        let capture = root.path().join("source");
+        let capture = root.join("source");
         let manifest = snapshot_attempt_tree(&source, &capture, &["deleted.txt".into()]).unwrap();
         let expected = format!("snapshot:{}", manifest.sha256().unwrap());
-        let input = copy_accepted_source(
-            &capture,
-            &root.path().join("work"),
-            &expected,
-            "head".into(),
-        )
-        .unwrap();
+        let input =
+            copy_accepted_source(&capture, &root.join("work"), &expected, "head".into()).unwrap();
         assert_eq!(input.manifest, manifest);
         assert_eq!(
-            std::fs::read(root.path().join("work/tree/answer.txt")).unwrap(),
+            std::fs::read(root.join("work/tree/answer.txt")).unwrap(),
             b"42\n"
         );
-        assert!(!root.path().join("work/tree/deleted.txt").exists());
+        assert!(!root.join("work/tree/deleted.txt").exists());
         std::fs::write(capture.join("tree/answer.txt"), b"changed").unwrap();
         assert!(
-            copy_accepted_source(
-                &capture,
-                &root.path().join("changed"),
-                &expected,
-                "head".into()
-            )
-            .is_err()
+            copy_accepted_source(&capture, &root.join("changed"), &expected, "head".into())
+                .is_err()
         );
         std::fs::write(capture.join("tree/answer.txt"), b"42\n").unwrap();
-        symlink(&capture, root.path().join("alias")).unwrap();
+        symlink(&capture, root.join("alias")).unwrap();
         assert!(
             copy_accepted_source(
-                &root.path().join("alias"),
-                &root.path().join("linked-root"),
+                &root.join("alias"),
+                &root.join("linked-root"),
                 &expected,
                 "head".into()
             )
@@ -317,7 +308,7 @@ mod tests {
         assert!(
             copy_accepted_source(
                 &capture,
-                &root.path().join("linked-manifest"),
+                &root.join("linked-manifest"),
                 &expected,
                 "head".into()
             )

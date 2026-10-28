@@ -107,3 +107,10 @@ Final local validation: 195 workspace tests, strict Clippy, formatting, build,
 Python/JavaScript syntax and credential/file-size checks passed. Source and binary
 hashes are recorded in private `dependency-validation-manifest.json`; original
 failures and all intermediate diagnostics remain retained.
+
+The first PR CI run passed Linux but found that the new positive copy fixture used
+macOS's noncanonical temporary-directory alias. A local workspace symlink reproduced
+the identical refusal. The fixture now resolves its initial root before constructing
+the canonical positive source; explicit linked-root/manifest negative controls are
+unchanged. Production path validation is unchanged. Before/after alias logs and the
+original CI failure are retained; a passing rerun alone was not treated as a fix.
