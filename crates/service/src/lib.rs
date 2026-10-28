@@ -49,6 +49,8 @@ mod workflow_dependencies;
 #[cfg(unix)]
 mod workflow_dispatch;
 #[cfg(unix)]
+mod workflow_reassignment;
+#[cfg(unix)]
 mod workflow_review;
 #[cfg(unix)]
 pub use repository_watch::{OwnedWatchState, RepositoryWatch, RepositoryWatchState};
@@ -589,6 +591,17 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
     #[allow(clippy::too_many_lines)]
     async fn handle(&self, request: Request) -> Result<Response, ErrorBody> {
         match request.clone() {
+            Request::ReassignWorkflow {
+                task_id,
+                expected_version,
+                worker_id,
+                pin_json,
+            } => {
+                self.queue_reassignment(&task_id, expected_version, &worker_id, &pin_json)
+                    .await
+                    .map_err(store_error)?;
+                Ok(Response::WorkflowQueued { task_id })
+            }
             Request::ContinueWorkflow {
                 task_id,
                 expected_version,
@@ -607,9 +620,17 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                         .workflow_dependencies(&row.task_id)
                         .await
                         .map_err(store_error)?;
-                    let mut value = serde_json::to_value(row).map_err(json_error)?;
+                    let mut value = serde_json::to_value(&row).map_err(json_error)?;
                     value["dependencies"] =
                         serde_json::to_value(dependencies).map_err(json_error)?;
+                    value["selected_worker"] = self
+                        .store
+                        .workflow_assignment(&row.task_id)
+                        .await
+                        .map_err(store_error)?
+                        .map_or(serde_json::Value::Null, |(id, _)| {
+                            serde_json::Value::String(id)
+                        });
                     entries.push(value);
                 }
                 Ok(Response::Workflows { entries })
@@ -1449,6 +1470,7 @@ fn hash(v: &str) -> String {
 #[cfg(test)]
 mod effect_tests {
     include!("checkpoint_tests.rs");
+    include!("reassignment_tests.rs");
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
     use agent_conductor_store::{NewAgent, NewProject, NewTask, Store};

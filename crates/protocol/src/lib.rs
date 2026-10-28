@@ -53,6 +53,12 @@ pub enum Request {
         plan_json: String,
     },
     ListWorkflows,
+    ReassignWorkflow {
+        task_id: String,
+        expected_version: u64,
+        worker_id: String,
+        pin_json: String,
+    },
     ContinueWorkflow {
         task_id: String,
         expected_version: u64,

@@ -187,3 +187,6 @@ Initial decisions can be supplied with `plan --decisions-file /absolute/decision
 The file is an array of objects with `id`, `question` and optional `rationale`.
 See [TASK_DECISIONS.md](TASK_DECISIONS.md) for limits, attribution and pause/resolve
 behavior; an open question blocks completion, not initial execution.
+
+For explicit successor selection after a verified stop, see
+[WORKFLOW_REASSIGNMENT.md](WORKFLOW_REASSIGNMENT.md).

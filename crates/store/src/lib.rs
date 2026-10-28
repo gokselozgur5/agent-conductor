@@ -20,6 +20,7 @@ mod history;
 pub use history::AuditMetadata;
 mod workflow_dependencies;
 pub use workflow_dependencies::WorkflowDependency;
+mod workflow_assignments;
 mod workflows;
 pub use workflows::WorkflowDispatch;
 
@@ -122,6 +123,8 @@ pub struct AgentRegistration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedAgent {
     pub id: String,
+    pub adapter_kind: String,
+    pub protocol_fingerprint: String,
     pub capability_hash: String,
     pub access_mode: String,
 }
@@ -358,15 +361,17 @@ impl Store {
     /// # Errors
     /// Returns a database error when the agent record cannot be read.
     pub async fn agent(&self, agent_id: &str) -> Result<Option<PersistedAgent>, StoreError> {
-        sqlx::query_as::<_, (String, String, String)>(
-            "SELECT id, capability_hash, access_mode FROM agents WHERE id = ?",
+        sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT id, capability_hash, access_mode, adapter_kind, protocol_fingerprint FROM agents WHERE id = ?",
         )
         .bind(agent_id)
         .fetch_optional(&self.inner.readers)
         .await
         .map(|row| {
-            row.map(|(id, capability_hash, access_mode)| PersistedAgent {
+            row.map(|(id, capability_hash, access_mode, adapter_kind, protocol_fingerprint)| PersistedAgent {
                 id,
+                adapter_kind,
+                protocol_fingerprint,
                 capability_hash,
                 access_mode,
             })

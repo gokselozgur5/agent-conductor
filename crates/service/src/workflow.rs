@@ -74,6 +74,7 @@ struct ReviewDecision {
 
 struct Assignment {
     worker_id: String,
+    worker_pin: VendorPin,
     verifier_id: String,
     attempt_id: String,
     token: String,
@@ -155,6 +156,7 @@ impl<C: Clock> PersistentControlService<C> {
         let workspace = artifacts.join("work/tree");
         let Assignment {
             worker_id,
+            worker_pin,
             verifier_id,
             attempt_id,
             token,
@@ -168,7 +170,7 @@ impl<C: Clock> PersistentControlService<C> {
                 attempt_id: attempt_id.clone(),
                 lease_epoch: epoch,
                 worker_id: worker_id.clone(),
-                adapter: identity(&plan.worker),
+                adapter: identity(&worker_pin),
                 workspace: workspace.clone(),
                 starting_head: baseline.starting_head,
                 authority: CapabilityEnvelope {
@@ -186,7 +188,7 @@ impl<C: Clock> PersistentControlService<C> {
             untrusted_context,
         };
         let candidate = self
-            .execute_workflow_writer(plan, &packet, &token, worker_authentication)
+            .execute_workflow_writer(plan, &worker_pin, &packet, &token, worker_authentication)
             .await?;
         let baseline_paths = manifest_inventory(&baseline.manifest);
         let captured = self
@@ -302,17 +304,14 @@ impl<C: Clock> PersistentControlService<C> {
     async fn execute_workflow_writer(
         &self,
         plan: &NativeWorkflowPlan,
+        worker_pin: &VendorPin,
         packet: &ResumePacket,
         token: &str,
         worker_authentication: BTreeMap<String, String>,
     ) -> Result<conductor_runtime::VendorCandidate, StoreError> {
         // Validate before claiming the external effect; launch revalidates the pin.
-        conductor_runtime::native_writer_launch(
-            &plan.worker,
-            packet,
-            worker_authentication.clone(),
-        )
-        .map_err(|_| invalid("worker adapter refused plan"))?;
+        conductor_runtime::native_writer_launch(worker_pin, packet, worker_authentication.clone())
+            .map_err(|_| invalid("worker adapter refused plan"))?;
         let now = self.clock.read(self.boot_generation).wall_unix_ms;
         let audit_id = Uuid::now_v7().to_string();
         self.store
@@ -342,7 +341,7 @@ impl<C: Clock> PersistentControlService<C> {
         let (record, connection) = self
             .launch_native_execution(
                 &plan.wrapper,
-                &plan.worker,
+                worker_pin,
                 packet,
                 worker_authentication,
                 token,
@@ -431,12 +430,22 @@ impl<C: Clock> PersistentControlService<C> {
         continuing: bool,
     ) -> Result<Assignment, StoreError> {
         let project_id = self.register_workflow_project(plan).await?;
-        let worker_id = format!("{}:worker", plan.task_id);
+        let (worker_id, worker_pin) = self.selected_worker(plan).await?;
         let verifier_id = format!("{}:verifier", plan.task_id);
         for (id, pin, access) in [
-            (&worker_id, &plan.worker, "read_write"),
+            (&worker_id, &worker_pin, "read_write"),
             (&verifier_id, &plan.verifier, "read_only"),
         ] {
+            if let Some(existing) = self.store.agent(id).await? {
+                if existing.adapter_kind != format!("{:?}", pin.kind).to_lowercase()
+                    || existing.protocol_fingerprint != pin.conformance_sha256
+                    || existing.capability_hash != pin.executable_sha256
+                    || existing.access_mode != access
+                {
+                    return Err(invalid("workflow agent registration mismatch"));
+                }
+                continue;
+            }
             self.workflow_request(Request::RegisterAgent {
                 actor_id: "operator".into(),
                 idempotency_key: format!("{id}:register"),
@@ -508,6 +517,7 @@ impl<C: Clock> PersistentControlService<C> {
             .epoch;
         Ok(Assignment {
             worker_id,
+            worker_pin,
             verifier_id,
             attempt_id,
             token,

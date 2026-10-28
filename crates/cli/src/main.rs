@@ -35,6 +35,12 @@ enum Command {
     },
     ListWorkflows,
     /// Continue an unfinished task only after prior write fencing is verified.
+    ReassignWorkflow {
+        task_id: String,
+        expected_version: u64,
+        worker_id: String,
+        pin: PathBuf,
+    },
     ContinueWorkflow {
         task_id: String,
         expected_version: u64,
@@ -180,6 +186,17 @@ fn command_request(command: Command) -> Request {
         Command::Health => Request::Health,
         Command::CheckInvariants => Request::CheckInvariants,
         Command::ListWorkflows => Request::ListWorkflows,
+        Command::ReassignWorkflow {
+            task_id,
+            expected_version,
+            worker_id,
+            pin,
+        } => Request::ReassignWorkflow {
+            task_id,
+            expected_version,
+            worker_id,
+            pin_json: read_successor_pin(pin),
+        },
         Command::ContinueWorkflow {
             task_id,
             expected_version,
@@ -308,6 +325,20 @@ fn print_human(result: ResponseResult) {
 fn parse_json<T: serde::de::DeserializeOwned>(input: &str, label: &str) -> T {
     serde_json::from_str(input).unwrap_or_else(|error| {
         eprintln!("invalid {label} JSON: {error}");
+        std::process::exit(2)
+    })
+}
+
+fn read_successor_pin(path: PathBuf) -> String {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    let result = std::fs::File::open(path).and_then(|file| file.take(4097).read_to_end(&mut bytes));
+    if result.is_err() || bytes.len() > 4096 {
+        eprintln!("cannot read successor pin within 4 KiB bound");
+        std::process::exit(2);
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| {
+        eprintln!("successor pin must be UTF-8");
         std::process::exit(2)
     })
 }
