@@ -43,6 +43,7 @@ impl RunnerConnection {
     pub async fn launch<F, Fut>(
         executable: &Path,
         launch: &RunnerLaunch,
+        identity: Option<&crate::RunnerProcessIdentity>,
         record_acknowledgement: F,
     ) -> Result<Self, RunnerConnectionError>
     where
@@ -60,7 +61,18 @@ impl RunnerConnection {
             .packet
             .sha256()
             .map_err(|_| RunnerConnectionError::Protocol)?;
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        if let Some(identity) = identity {
+            if identity.packet_sha256 != packet_sha256 {
+                return Err(RunnerConnectionError::Protocol);
+            }
+            command.arg(
+                identity
+                    .argument()
+                    .map_err(|_| RunnerConnectionError::Protocol)?,
+            );
+        }
+        let mut child = command
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

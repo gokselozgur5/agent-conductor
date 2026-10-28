@@ -78,3 +78,8 @@ pub use checkpoint::*;
 mod scoped_advisory;
 #[cfg(unix)]
 pub use scoped_advisory::*;
+
+#[cfg(unix)]
+mod process_identity;
+#[cfg(unix)]
+pub use process_identity::RunnerProcessIdentity;

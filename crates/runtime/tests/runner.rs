@@ -26,7 +26,14 @@ fn launch(directory: &std::path::Path, script: &str, heartbeat: u64) -> RunnerLa
     }
 }
 async fn wrapper(input: &RunnerLaunch) -> (Child, ChildStdin, BufReader<ChildStdout>) {
+    tagged_wrapper(input, &[]).await
+}
+async fn tagged_wrapper(
+    input: &RunnerLaunch,
+    arguments: &[String],
+) -> (Child, ChildStdin, BufReader<ChildStdout>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_conductor-runner"))
+        .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -288,6 +295,7 @@ async fn controller_persists_ack_before_release_and_refusal_has_no_side_effect()
         let result = RunnerConnection::launch(
             std::path::Path::new(env!("CARGO_BIN_EXE_conductor-runner")),
             &input,
+            None,
             |_| async {
                 assert!(!path.exists(), "persistence precedes worker execution");
                 if accept {
@@ -688,4 +696,64 @@ async fn checkpoint_backpressure_does_not_delay_the_worker_watchdog() {
         }
     }
     assert!(exited(&mut child).await.success());
+}
+
+#[tokio::test]
+async fn observable_process_identity_rejects_wrong_packet_before_release() {
+    for matches in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let input = launch(directory.path(), "printf result > tagged-result", 1000);
+        let hash = input.packet.sha256().unwrap();
+        let identity = conductor_runtime::RunnerProcessIdentity {
+            authority_id: "a".repeat(64),
+            packet_sha256: if matches {
+                hash.clone()
+            } else {
+                "0".repeat(64)
+            },
+            wrapper_identity: "12345678-1234-1234-1234-123456789abc".into(),
+        };
+        let arg = identity.argument().unwrap();
+        let (mut child, mut input_pipe, mut output) =
+            tagged_wrapper(&input, std::slice::from_ref(&arg)).await;
+        if matches {
+            assert!(matches!(
+                event(&mut output).await,
+                RunnerEvent::Ready { .. }
+            ));
+            let observed = Command::new("/bin/ps")
+                .arg("-ww")
+                .arg("-p")
+                .arg(child.id().unwrap().to_string())
+                .args(["-o", "command="])
+                .output()
+                .await
+                .unwrap();
+            assert!(observed.status.success());
+            assert!(String::from_utf8(observed.stdout).unwrap().contains(&arg));
+            assert!(!directory.path().join("tagged-result").exists());
+            send(
+                &mut input_pipe,
+                &RunnerControl::Release {
+                    packet_sha256: hash,
+                    continuous_deadline_ms: conductor_runtime::continuous_millis().unwrap() + 1000,
+                },
+            )
+            .await;
+            assert!(matches!(
+                event(&mut output).await,
+                RunnerEvent::Finished {
+                    exit_code: Some(0),
+                    ..
+                }
+            ));
+            assert!(exited(&mut child).await.success());
+            assert!(directory.path().join("tagged-result").exists());
+        } else {
+            assert!(!exited(&mut child).await.success());
+            let mut bytes = Vec::new();
+            assert_eq!(output.read_until(b'\n', &mut bytes).await.unwrap(), 0);
+            assert!(!directory.path().join("tagged-result").exists());
+        }
+    }
 }

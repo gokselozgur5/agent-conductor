@@ -52,6 +52,7 @@ jobs:
           python3 -m unittest discover -s tests -p test_disaster_recovery.py -v
           python3 -m unittest discover -s tests -p test_host_recovery_integration.py -v
           python3 -m unittest discover -s tests -p test_soak_control_plane.py -v
+          python3 -m unittest discover -s tests -p test_runner_process_inventory.py -v
 
       - name: Reject committed credential material
         shell: bash

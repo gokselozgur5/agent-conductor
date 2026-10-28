@@ -110,44 +110,54 @@ impl<C: Clock> PersistentControlService<C> {
             self.validate_runtime_owner(&launch.packet).await?;
         }
         let wrapper_identity = Uuid::now_v7().to_string();
+        let (authority, generation) = self.store.runtime_authority().await?;
+        if generation != self.boot_generation {
+            return Err(runtime_error("runner identity belongs to a stale boot"));
+        }
+        let identity = authority.map(|authority_id| conductor_runtime::RunnerProcessIdentity {
+            authority_id,
+            packet_sha256: record.preparation.packet_sha256.clone(),
+            wrapper_identity: wrapper_identity.clone(),
+        });
         let mut acknowledged = None;
-        let connection = RunnerConnection::launch(wrapper, launch, |ack| async {
-            // The wrapper may take time to start. Recheck the monotonic lease,
-            // not just the SQL active flag, immediately before recording its ACK.
-            self.validate_runtime_owner(&launch.packet)
-                .await
-                .map_err(|_| RunnerConnectionError::Persistence)?;
-            let audit_id = Uuid::now_v7().to_string();
-            let now = self.clock.read(self.boot_generation);
-            let result = self
-                .store
-                .update_execution(
-                    effect_token,
-                    record.revision,
-                    &wrapper_identity,
-                    &ExecutionUpdate::Acknowledge {
-                        wrapper_identity: wrapper_identity.clone(),
-                        packet_sha256: ack.packet_sha256,
-                    },
-                    EffectAudit {
-                        id: &audit_id,
-                        actor_id: "conductor-runtime",
-                        correlation_id: effect_token,
-                        now_ms: now.wall_unix_ms,
-                    },
-                )
-                .await
-                .map_err(|_| RunnerConnectionError::Persistence)?;
-            // A slow database acknowledgement must not revive an expired lease.
-            let deadline = self
-                .validate_runtime_owner(&launch.packet)
-                .await
-                .map_err(|_| RunnerConnectionError::Persistence)?;
-            acknowledged = Some(result);
-            Ok(deadline)
-        })
-        .await
-        .map_err(|_| runtime_error("wrapper release failed; reconcile durable execution"))?;
+        let connection =
+            RunnerConnection::launch(wrapper, launch, identity.as_ref(), |ack| async {
+                // The wrapper may take time to start. Recheck the monotonic lease,
+                // not just the SQL active flag, immediately before recording its ACK.
+                self.validate_runtime_owner(&launch.packet)
+                    .await
+                    .map_err(|_| RunnerConnectionError::Persistence)?;
+                let audit_id = Uuid::now_v7().to_string();
+                let now = self.clock.read(self.boot_generation);
+                let result = self
+                    .store
+                    .update_execution(
+                        effect_token,
+                        record.revision,
+                        &wrapper_identity,
+                        &ExecutionUpdate::Acknowledge {
+                            wrapper_identity: wrapper_identity.clone(),
+                            packet_sha256: ack.packet_sha256,
+                        },
+                        EffectAudit {
+                            id: &audit_id,
+                            actor_id: "conductor-runtime",
+                            correlation_id: effect_token,
+                            now_ms: now.wall_unix_ms,
+                        },
+                    )
+                    .await
+                    .map_err(|_| RunnerConnectionError::Persistence)?;
+                // A slow database acknowledgement must not revive an expired lease.
+                let deadline = self
+                    .validate_runtime_owner(&launch.packet)
+                    .await
+                    .map_err(|_| RunnerConnectionError::Persistence)?;
+                acknowledged = Some(result);
+                Ok(deadline)
+            })
+            .await
+            .map_err(|_| runtime_error("wrapper release failed; reconcile durable execution"))?;
         Ok((
             acknowledged.ok_or_else(|| runtime_error("acknowledgement missing"))?,
             connection,
