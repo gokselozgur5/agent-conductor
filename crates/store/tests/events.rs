@@ -729,3 +729,87 @@ async fn wake_generation_limit_and_failed_claim_preserve_pending_delivery() {
             .contains("eligible")
     );
 }
+
+#[tokio::test]
+async fn dependency_wait_does_not_consume_wake_and_late_failure_rolls_back_both() {
+    use sqlx::Connection;
+    let (root, store) = store_with_agents(&["source", "next:worker"]).await;
+    let boot = store.start_runtime(1).await.unwrap().boot_generation;
+    store
+        .upsert_event_subscription(&subscription("wake", "next:worker"))
+        .await
+        .unwrap();
+    store
+        .enqueue_workflow("first", r#"{"project":"/project"}"#, 2)
+        .await
+        .unwrap();
+    store
+        .enqueue_workflow(
+            "next",
+            r#"{"project":"/project","depends_on":["first"],"wake_subscription":"wake"}"#,
+            3,
+        )
+        .await
+        .unwrap();
+    store.claim_workflow(boot, 4).await.unwrap().unwrap();
+    store.finish_workflow("first", boot, "{}", 5).await.unwrap();
+    store
+        .publish_event(
+            &event("external", "source", 0, None),
+            &EventLimits::default(),
+        )
+        .await
+        .unwrap();
+    assert!(store.claim_workflow(boot, 101).await.unwrap().is_none());
+    assert!(store.workflow_trigger("next").await.unwrap().is_none());
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("events.sqlite").display()
+    ))
+    .await
+    .unwrap();
+    let pending: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM event_deliveries WHERE status='pending'")
+            .fetch_one(&mut db)
+            .await
+            .unwrap();
+    assert_eq!(pending, 1);
+    sqlx::query("INSERT INTO projects VALUES('project','/project','fixture',NULL,0)")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tasks(id,project_id,objective,state,authority_json,aggregate_json,created_at_ms,updated_at_ms) VALUES('first','project','fixture','completed','{}','{\"verification\":{\"source\":\"snapshot:accepted\",\"verdict\":{\"accepted\":true,\"source\":\"snapshot:accepted\"}}}',0,0)").execute(&mut db).await.unwrap();
+    sqlx::query("CREATE TRIGGER refuse_dependency_claim BEFORE UPDATE OF status ON workflow_dispatch WHEN NEW.status='running' BEGIN SELECT RAISE(ABORT,'injected'); END").execute(&mut db).await.unwrap();
+    assert!(store.claim_workflow(boot, 102).await.is_err());
+    assert!(store.workflow_trigger("next").await.unwrap().is_none());
+    assert!(
+        store.workflow_dependencies("next").await.unwrap()[0]
+            .accepted_source
+            .is_none()
+    );
+    let pending: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM event_deliveries WHERE status='pending'")
+            .fetch_one(&mut db)
+            .await
+            .unwrap();
+    assert_eq!(pending, 1);
+    sqlx::query("DROP TRIGGER refuse_dependency_claim")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_workflow(boot, 103)
+            .await
+            .unwrap()
+            .unwrap()
+            .task_id,
+        "next"
+    );
+    assert!(store.workflow_trigger("next").await.unwrap().is_some());
+    assert!(
+        store.workflow_dependencies("next").await.unwrap()[0]
+            .accepted_source
+            .is_some()
+    );
+}
