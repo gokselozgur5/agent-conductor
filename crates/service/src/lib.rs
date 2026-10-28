@@ -631,6 +631,7 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                 })
             }
             Request::PublishEvent { event } => {
+                let _guard = self.mutations.lock().await;
                 validate_text(&[
                     &event.id,
                     &event.source_agent_id,
@@ -1170,7 +1171,8 @@ mod effect_tests {
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
     use agent_conductor_store::{NewAgent, NewProject, NewTask, Store};
-    use sqlx::{Connection, SqliteConnection};
+    use conductor_protocol::{EventSubscriptionInput, SemanticEventInput};
+    use sqlx::{Connection, Executor, SqliteConnection};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[cfg(unix)]
@@ -1507,6 +1509,134 @@ mod effect_tests {
             store.effect(&token).await.expect("effect").unwrap().status,
             agent_conductor_store::EffectStatus::Abandoned
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Keep the ordered regression scenario together.
+    async fn cancellation_serializes_before_task_event_publication() {
+        let (directory, store) = lifecycle_store().await;
+        store
+            .create_agent(NewAgent {
+                id: "observer",
+                adapter_kind: "fake",
+                protocol_fingerprint: "v1",
+                capability_hash: "observer-capability",
+                access_mode: "read_only",
+                created_at_ms: 1,
+            })
+            .await
+            .expect("observer");
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .expect("service");
+        let (claimed, _) = claim_task(&service).await;
+        service
+            .handle(Request::SubscribeEvents {
+                subscription: EventSubscriptionInput {
+                    schema_version: 1,
+                    id: "observer-task-events".into(),
+                    agent_id: "observer".into(),
+                    topic_filter: "task.changed".into(),
+                    project_id: Some("project".into()),
+                    path_prefix: None,
+                    echo_source: false,
+                },
+            })
+            .await
+            .expect("subscription");
+
+        let database = directory.path().join("state.sqlite3");
+        let mut blocker = SqliteConnection::connect(&format!("sqlite://{}", database.display()))
+            .await
+            .expect("blocking writer connection");
+        blocker
+            .execute("BEGIN IMMEDIATE")
+            .await
+            .expect("hold SQLite writer");
+
+        let cancel_service = service.clone();
+        let cancel = tokio::spawn(async move {
+            cancel_service
+                .handle(Request::ApplyCommand {
+                    task_id: "task".into(),
+                    command: lifecycle_command(
+                        &claimed,
+                        Actor {
+                            id: ActorId("operator".into()),
+                            role: ActorRole::Operator,
+                        },
+                        CommandKind::Cancel,
+                        "cancel-before-event",
+                    ),
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if service.mutations.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancel holds mutation serialization");
+
+        let publish_service = service.clone();
+        let publish = tokio::spawn(async move {
+            publish_service
+                .handle(Request::PublishEvent {
+                    event: SemanticEventInput {
+                        schema_version: 1,
+                        id: "event-after-cancel".into(),
+                        idempotency_key: None,
+                        source_agent_id: "worker".into(),
+                        source_session_id: "session".into(),
+                        correlation_id: "event-after-cancel".into(),
+                        causation_id: None,
+                        generation: 0,
+                        topic: "task.changed".into(),
+                        project_id: Some("project".into()),
+                        task_id: Some("task".into()),
+                        attempt_id: Some("attempt".into()),
+                        lease_epoch: Some(1),
+                        path_scope: None,
+                        payload: serde_json::json!({"state": "running"}),
+                    },
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !publish.is_finished(),
+            "publish must wait behind cancellation"
+        );
+
+        blocker
+            .execute("COMMIT")
+            .await
+            .expect("release SQLite writer");
+        let Response::CommandApplied(cancelled) =
+            cancel.await.expect("cancel joins").expect("cancel")
+        else {
+            panic!("unexpected cancel response")
+        };
+        assert_eq!(cancelled.task.aggregate.state, TaskState::Cancelled);
+        let error = publish
+            .await
+            .expect("publish joins")
+            .expect_err("cancelled task rejects worker event");
+        assert_eq!(error.code, ErrorCode::Conflict);
+        let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM semantic_events")
+            .fetch_one(store.readers())
+            .await
+            .expect("event count");
+        let delivery_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event_deliveries")
+            .fetch_one(store.readers())
+            .await
+            .expect("delivery count");
+        assert_eq!((event_count, delivery_count), (0, 0));
     }
 
     #[tokio::test]
