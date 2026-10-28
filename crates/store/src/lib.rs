@@ -89,7 +89,9 @@ pub struct AttemptLeaseMutation {
     pub grace_ms: i64,
     pub display_expires_at_ms: i64,
     pub last_heartbeat_at_ms: i64,
+    pub instruction_hashes_json: String,
     pub required_checks_json: String,
+    pub capability_hash: String,
     pub ended_at_ms: Option<i64>,
 }
 
@@ -677,13 +679,15 @@ async fn persist_in_transaction(
 
     if let Some(attempt) = &batch.attempt {
         sqlx::query(
-            "INSERT INTO attempts (id, task_id, worker_id, lease_epoch, instruction_hashes_json, required_checks_json, capability_hash, started_at_ms, ended_at_ms) VALUES (?, ?, ?, ?, '[]', ?, 'phase1', ?, ?) ON CONFLICT(id) DO UPDATE SET ended_at_ms = excluded.ended_at_ms",
+            "INSERT INTO attempts (id, task_id, worker_id, lease_epoch, instruction_hashes_json, required_checks_json, capability_hash, started_at_ms, ended_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET ended_at_ms = excluded.ended_at_ms",
         )
         .bind(&attempt.attempt_id)
         .bind(&attempt.task_id)
         .bind(&attempt.worker_id)
         .bind(attempt.lease_epoch)
+        .bind(&attempt.instruction_hashes_json)
         .bind(&attempt.required_checks_json)
+        .bind(&attempt.capability_hash)
         .bind(attempt.last_heartbeat_at_ms)
         .bind(attempt.ended_at_ms)
         .execute(&mut *connection)

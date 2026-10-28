@@ -1,7 +1,7 @@
 use std::{
     future::Future,
     sync::{Arc, RwLock},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 
 use agent_conductor_domain::{
@@ -24,32 +24,14 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+mod clock;
+pub use clock::SystemClock;
+
 pub trait ControlService: Send + Sync + 'static {
     fn handle(&self, request: Request) -> impl Future<Output = Result<Response, ErrorBody>> + Send;
 }
 pub trait Clock: Send + Sync + 'static {
     fn read(&self, boot_generation: u64) -> ClockReading;
-}
-
-#[derive(Debug)]
-pub struct SystemClock {
-    origin: Instant,
-}
-impl Default for SystemClock {
-    fn default() -> Self {
-        Self {
-            origin: Instant::now(),
-        }
-    }
-}
-impl Clock for SystemClock {
-    fn read(&self, boot_generation: u64) -> ClockReading {
-        ClockReading {
-            boot_generation,
-            monotonic_ms: u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX),
-            wall_unix_ms: wall_ms(),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -66,7 +48,9 @@ impl PersistentControlService<SystemClock> {
     /// # Errors
     /// Returns an error when durable startup cannot complete.
     pub async fn start(store: Store, started_at_ms: i64) -> Result<Self, StoreError> {
-        Self::start_with_clock(store, started_at_ms, SystemClock::default()).await
+        let clock = SystemClock::try_new()
+            .map_err(|error| StoreError::Integrity(format!("host clock unavailable: {error}")))?;
+        Self::start_with_clock(store, started_at_ms, clock).await
     }
 }
 
@@ -129,6 +113,24 @@ impl<C: Clock> PersistentControlService<C> {
             authority: serde_json::from_str(&row.authority_json).map_err(json_error)?,
             aggregate: Box::new(serde_json::from_str(&row.aggregate_json).map_err(json_error)?),
         })
+    }
+
+    async fn attempt_capability_hash(&self, task: &Task) -> Result<Option<String>, ErrorBody> {
+        let Some(attempt) = &task.attempt else {
+            return Ok(None);
+        };
+        self.store
+            .agent(&attempt.worker.0)
+            .await
+            .map_err(store_error)?
+            .map(|agent| agent.capability_hash)
+            .ok_or_else(|| {
+                ErrorBody::new(
+                    ErrorCode::InvariantViolation,
+                    "attempt worker is not registered",
+                )
+            })
+            .map(Some)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -230,11 +232,8 @@ impl<C: Clock> PersistentControlService<C> {
         let old: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
         let clock = self.clock.read(self.boot_generation);
         let applied = apply(&old, &command, clock).map_err(rejection_error)?;
-        let effects = applied
-            .effects
-            .iter()
-            .map(|effect| effect_append(&applied.task, &command, effect, clock))
-            .collect::<Result<Vec<_>, _>>()?;
+        let capability_hash = self.attempt_capability_hash(&applied.task).await?;
+        let effects = effect_appends(&applied.task, &command, &applied.effects, clock)?;
         let response = CommandAppliedResponse {
             task: TaskResponse {
                 project_id: row.project_id,
@@ -261,7 +260,7 @@ impl<C: Clock> PersistentControlService<C> {
             project: None,
             agent: None,
             new_task: None,
-            attempt: attempt(&applied.task, clock)?,
+            attempt: attempt(&applied.task, clock, capability_hash.as_deref())?,
             transitions: vec![TaskTransitionAppend {
                 id: Uuid::now_v7().to_string(),
                 task_id: applied.task.id.0.clone(),
@@ -649,7 +648,11 @@ fn map_violation(v: RuntimeInvariantViolation) -> InvariantViolation {
             .unwrap_or(serde_json::Value::String(v.context_json)),
     }
 }
-fn attempt(task: &Task, clock: ClockReading) -> Result<Option<AttemptLeaseMutation>, ErrorBody> {
+fn attempt(
+    task: &Task,
+    clock: ClockReading,
+    capability_hash: Option<&str>,
+) -> Result<Option<AttemptLeaseMutation>, ErrorBody> {
     task.attempt
         .as_ref()
         .map(|a| {
@@ -673,8 +676,17 @@ fn attempt(task: &Task, clock: ClockReading) -> Result<Option<AttemptLeaseMutati
                 grace_ms: to_i64(a.lease.recovery_grace_ms)?,
                 display_expires_at_ms: clock.wall_unix_ms.saturating_add(to_i64(remaining)?),
                 last_heartbeat_at_ms: clock.wall_unix_ms,
+                instruction_hashes_json: "[]".into(),
                 required_checks_json: serde_json::to_string(&task.required_checks)
                     .map_err(json_error)?,
+                capability_hash: capability_hash
+                    .ok_or_else(|| {
+                        ErrorBody::new(
+                            ErrorCode::InvariantViolation,
+                            "attempt capability identity is unavailable",
+                        )
+                    })?
+                    .to_owned(),
                 ended_at_ms: (a.lease.status == LeaseStatus::Ended).then_some(clock.wall_unix_ms),
             })
         })
@@ -703,6 +715,18 @@ fn effect_append(
         request_json: serde_json::to_string(effect).map_err(json_error)?,
         created_at_ms: clock.wall_unix_ms,
     })
+}
+
+fn effect_appends(
+    task: &Task,
+    command: &Command,
+    effects: &[EffectIntentSpec],
+    clock: ClockReading,
+) -> Result<Vec<EffectIntentAppend>, ErrorBody> {
+    effects
+        .iter()
+        .map(|effect| effect_append(task, command, effect, clock))
+        .collect()
 }
 fn state(v: TaskState) -> Result<String, ErrorBody> {
     serde_json::to_value(v)
@@ -823,12 +847,6 @@ fn to_i64(v: u64) -> Result<i64, ErrorBody> {
 fn hash(v: &str) -> String {
     format!("{:x}", Sha256::digest(v.as_bytes()))
 }
-fn wall_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-}
-
 #[cfg(test)]
 mod effect_tests {
     use super::*;

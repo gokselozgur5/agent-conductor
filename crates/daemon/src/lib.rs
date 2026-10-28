@@ -865,6 +865,13 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         }).await.expect("committed effect becomes visible");
+        let frozen_identity: (String, String) = sqlx::query_as(
+            "SELECT capability_hash, instruction_hashes_json FROM attempts WHERE id = 'attempt-1'",
+        )
+        .fetch_one(observer.readers())
+        .await
+        .expect("attempt identity");
+        assert_eq!(frozen_identity, ("sha256:abc".into(), "[]".into()));
         shutdown_tx.send(()).expect("shutdown");
         task.await.expect("join").expect("clean exit");
 
