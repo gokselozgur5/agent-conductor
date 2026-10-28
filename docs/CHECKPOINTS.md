@@ -34,8 +34,9 @@ record. Stale ownership is refused and cannot extend the worker lease.
 
 Continuation retains the latest accepted record in the new resume packet, apart
 from retained files and the original task baseline. If a later attempt has no
-new claim, the inherited record remains available only when its exact bytes match
-the older fenced execution. Missing or corrupt bindings are refused. A legacy
+new claim, the inherited record remains available only when its validated,
+redacted record matches the older fenced execution (including observation and
+packet identity). Missing or corrupt bindings are refused. A legacy
 attempt without structured claims receives an explicit absence notice, not a
 fabricated progress summary. Workers must recheck claims against retained work.
 
@@ -77,3 +78,32 @@ Neither is counted as successful pause acceptance. Actual model spend was not
 returned. Private evidence: `reviews/agent-conductor-runtime-20261028/`, including
 `checkpoint-native-v3/receipt.json`, `checkpoint-browser-v1/receipt.json`,
 `checkpoint-workspace-final.log` and `checkpoint-stop-120.log`.
+
+## Credential-shaped claim redaction
+
+The stream boundary and direct service admission replace recognized credential
+spans with `[redacted]` in completed work, current state, next action, open
+decisions, running commands and changed artifacts. Original bounds and ownership
+are validated before normalization. Identity, epoch, sequence and packet hash
+are preserved; redaction grants no authority.
+
+The literal policy recognizes Anthropic/OpenAI key prefixes, GitHub classic and
+fine-grained prefixes, GitLab personal-token prefixes, and case-insensitive
+`Bearer ` values with at least eight token characters; AWS access IDs with their
+16-character uppercase/digit suffix; and generic, RSA, EC, OpenSSH or encrypted
+PEM private-key blocks. An unterminated recognized private-key block consumes the
+rest of that field. Token characters are ASCII letters, digits, underscore,
+hyphen, period, slash, plus and equals. Matches can remove credential-like benign
+text. Unknown formats, encoded values and secrets split across fields are not
+detected.
+
+Existing records are validated and redacted on projection and continuation.
+Historical database bytes and backups are not rewritten. Old binaries and direct
+access to old records can still expose their original content. This policy does
+not sanitize task identity, objectives, event payloads, source files, process
+logs or all resume-packet content. It is not a general secret-detection guarantee.
+
+Regression coverage includes a stream test that fails before this fix, all six
+free-text fields at direct admission, persisted receipt checks, legacy projection
+without database rewriting, inherited correspondence and ordinary-text tampering
+refusal. Independent task acceptance remains unchanged.

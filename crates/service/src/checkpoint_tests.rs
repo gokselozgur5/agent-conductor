@@ -196,6 +196,15 @@ async fn checkpoint_audit_failure_rolls_back_and_fenced_restart_preserves_claims
 
 #[tokio::test]
 async fn inherited_checkpoint_remains_bound_to_fenced_origin_when_new_attempt_has_no_claim() {
+    inherited_checkpoint_fixture(false).await;
+}
+
+#[tokio::test]
+async fn legacy_secret_checkpoint_is_redacted_without_losing_inherited_correspondence() {
+    inherited_checkpoint_fixture(true).await;
+}
+
+async fn inherited_checkpoint_fixture(legacy: bool) {
     let (directory, store) = lifecycle_store().await;
     let service =
         PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
@@ -209,6 +218,12 @@ async fn inherited_checkpoint_remains_bound_to_fenced_origin_when_new_attempt_ha
         .await
         .unwrap();
     let accepted = store.execution(&token).await.unwrap().unwrap();
+    let original = if legacy {
+        inject_legacy_checkpoint(directory.path(), &token, accepted.checkpoint_json.as_deref().unwrap()).await
+    } else { accepted.checkpoint_json.clone().unwrap() };
+    let normalized = service.retained_checkpoint("task").await.unwrap().unwrap();
+    assert!(!normalized.contains(&checkpoint_canary()));
+    assert_eq!(store.execution(&token).await.unwrap().unwrap().checkpoint_json.as_deref(), Some(original.as_str()));
     checkpoint_fence(&store, &token).await;
     for (key, kind) in [
         ("pause", CommandKind::Pause),
@@ -258,28 +273,17 @@ async fn inherited_checkpoint_remains_bound_to_fenced_origin_when_new_attempt_ha
     };
     packet.contract.attempt_id = "attempt-2".into();
     packet.contract.lease_epoch = 2;
-    packet.checkpoint = accepted.checkpoint_json.clone();
+    packet.checkpoint = Some(normalized.clone());
     checkpoint_seed_execution(&store, &response.effect_tokens[0], &packet).await;
     assert_eq!(
         service.retained_checkpoint("task").await.unwrap(),
-        accepted.checkpoint_json
+        Some(normalized)
     );
     let view = service.checkpoint_view("task").await.unwrap();
     assert_eq!(view["inherited"], true);
     assert_eq!(view["checkpoint"]["claims"]["attempt_id"], "attempt");
     assert_eq!(view["current_attempt_id"], "attempt-2");
-    let mut db = SqliteConnection::connect(&format!(
-        "sqlite:{}",
-        directory.path().join("state.sqlite3").display()
-    ))
-    .await
-    .unwrap();
-    sqlx::query("UPDATE executions SET checkpoint_json='{}' WHERE effect_token=?")
-        .bind(&token)
-        .execute(&mut db)
-        .await
-        .unwrap();
-    assert!(service.retained_checkpoint("task").await.is_err());
+    assert_inherited_tamper_rejected(&service, directory.path(), &token, &original).await;
 }
 
 async fn checkpoint_fence(store: &Store, token: &str) {
@@ -302,4 +306,56 @@ async fn checkpoint_fence(store: &Store, token: &str) {
         )
         .await
         .unwrap();
+}
+
+fn checkpoint_canary() -> String {
+    ["sk", "-ant-", "syntheticCheckpointCanary12345"].concat()
+}
+async fn inject_legacy_checkpoint(root: &std::path::Path, token: &str, original: &str) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(original).unwrap();
+    value["claims"]["current_state"] = serde_json::json!(format!("Legacy {} preserved context", checkpoint_canary()));
+    let bytes = value.to_string();
+    let mut db = SqliteConnection::connect(&format!("sqlite:{}", root.join("state.sqlite3").display())).await.unwrap();
+    sqlx::query("UPDATE executions SET checkpoint_json=? WHERE effect_token=?").bind(&bytes).bind(token).execute(&mut db).await.unwrap();
+    bytes
+}
+
+#[tokio::test]
+async fn direct_checkpoint_admission_redacts_every_free_text_field_before_persistence() {
+    let (directory, store) = lifecycle_store().await;
+    let service = PersistentControlService::start_with_clock(store.clone(),100,FixedClock::new(0)).await.unwrap();
+    let (_, token) = claim_task(&service).await;
+    let packet = runtime_launch(directory.path()).packet;
+    checkpoint_seed_execution(&store,&token,&packet).await;
+    let mut claim = checkpoint_claim();
+    let secret = checkpoint_canary();
+    let text = format!("Retain context {secret}");
+    claim.completed_work=text.clone();claim.current_state=text.clone();claim.next_action=text.clone();
+    claim.open_decisions=vec![text.clone()];claim.running_commands=vec![text.clone()];claim.changed_artifacts=vec![text];
+    assert!(service.capture_worker_checkpoint(&token,"wrapper",&claim).await.unwrap());
+    let record=store.execution(&token).await.unwrap().unwrap();
+    let encoded=record.checkpoint_json.as_deref().unwrap();
+    assert!(!encoded.contains(&secret));assert_eq!(encoded.matches("[redacted]").count(),6);
+    assert_eq!(record.preparation.packet_sha256,packet.sha256().unwrap());
+    let rows:Vec<String>=sqlx::query_scalar("SELECT outcome_json FROM execution_receipts WHERE effect_token=?").bind(&token).fetch_all(store.readers()).await.unwrap();
+    assert!(rows.iter().all(|row|!row.contains(&secret)));
+    let view=service.handle(Request::TaskCheckpoint{task_id:"task".into()}).await.unwrap();
+    assert!(!serde_json::to_string(&view).unwrap().contains(&secret));
+    assert!(!service.retained_checkpoint("task").await.unwrap().unwrap().contains(&secret));
+    assert!(!service.capture_worker_checkpoint(&token,"wrapper",&claim).await.unwrap());
+    claim.lease_epoch+=1;
+    assert!(service.capture_worker_checkpoint(&token,"wrapper",&claim).await.is_err());
+    assert_eq!(store.execution(&token).await.unwrap().unwrap(),record);
+}
+
+async fn assert_inherited_tamper_rejected(service: &PersistentControlService<FixedClock>, root: &std::path::Path, token: &str, original: &str) {
+    let mut db = SqliteConnection::connect(&format!("sqlite:{}",root.join("state.sqlite3").display())).await.unwrap();
+    let mut altered:serde_json::Value=serde_json::from_str(original).unwrap();
+    altered["claims"]["next_action"]=serde_json::json!("Forged ordinary next action");
+    sqlx::query("UPDATE executions SET checkpoint_json=? WHERE effect_token=?").bind(altered.to_string()).bind(token).execute(&mut db).await.unwrap();
+    assert!(service.retained_checkpoint("task").await.is_err());
+    sqlx::query("UPDATE executions SET checkpoint_json=? WHERE effect_token=?").bind(original).bind(token).execute(&mut db).await.unwrap();
+    assert!(service.retained_checkpoint("task").await.is_ok());
+    sqlx::query("UPDATE executions SET checkpoint_json='{}' WHERE effect_token=?").bind(token).execute(&mut db).await.unwrap();
+    assert!(service.retained_checkpoint("task").await.is_err());
 }

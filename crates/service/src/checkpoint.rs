@@ -7,7 +7,7 @@ use conductor_runtime::{ResumePacket, WorkerCheckpoint};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CapturedCheckpoint {
     version: u16,
@@ -20,7 +20,7 @@ impl CapturedCheckpoint {
         if bytes.len() > 8192 {
             return Err(invalid("checkpoint record too large"));
         }
-        let value: Self =
+        let mut value: Self =
             serde_json::from_str(bytes).map_err(|_| invalid("checkpoint record invalid"))?;
         let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
             .map_err(|_| invalid("checkpoint packet invalid"))?;
@@ -38,6 +38,7 @@ impl CapturedCheckpoint {
             return Err(invalid("checkpoint binding invalid"));
         }
         value.claims.validate(&packet).map_err(invalid)?;
+        value.claims = value.claims.redacted();
         Ok(value)
     }
 }
@@ -85,7 +86,7 @@ impl<C: Clock> PersistentControlService<C> {
             version: 1,
             packet_sha256: record.preparation.packet_sha256.clone(),
             observed_at_ms: self.clock.read(self.boot_generation).wall_unix_ms,
-            claims: claims.clone(),
+            claims: claims.redacted(),
         };
         let payload_json =
             serde_json::to_string(&captured).map_err(|_| invalid("checkpoint encoding"))?;
@@ -142,8 +143,8 @@ impl<C: Clock> PersistentControlService<C> {
             return Err(invalid("checkpoint task binding invalid"));
         }
         if let Some(bytes) = record.checkpoint_json.as_deref() {
-            CapturedCheckpoint::decode(bytes, &record)?;
-            return Ok(Some(bytes.into()));
+            let normalized = CapturedCheckpoint::decode(bytes, &record)?;
+            return encode_checkpoint(&normalized).map(Some);
         }
         // A later attempt can fail before its first publication. Keep the last
         // inherited accepted checkpoint instead of replacing it with generic text.
@@ -163,12 +164,21 @@ impl<C: Clock> PersistentControlService<C> {
             .execution_for_attempt(&inherited.claims.attempt_id)
             .await?
             .ok_or_else(|| invalid("inherited checkpoint execution missing"))?;
-        if prior.state != ExecutionState::Fenced || prior.checkpoint_json.as_deref() != Some(bytes)
-        {
+        if prior.state != ExecutionState::Fenced {
             return Err(invalid("inherited checkpoint record mismatch"));
         }
-        CapturedCheckpoint::decode(bytes, &prior)?;
-        Ok(Some(bytes.into()))
+        let inherited = CapturedCheckpoint::decode(bytes, &prior)?;
+        let saved = CapturedCheckpoint::decode(
+            prior
+                .checkpoint_json
+                .as_deref()
+                .ok_or_else(|| invalid("inherited checkpoint record missing"))?,
+            &prior,
+        )?;
+        if inherited != saved {
+            return Err(invalid("inherited checkpoint record mismatch"));
+        }
+        encode_checkpoint(&saved).map(Some)
     }
 
     pub(super) async fn checkpoint_view(
@@ -187,11 +197,15 @@ impl<C: Clock> PersistentControlService<C> {
         Ok(serde_json::json!({
             "task_id":task_id, "task_version":task.version, "current_attempt_id":current_attempt,
             "inherited":checkpoint.as_ref().is_some_and(|value|Some(value.claims.attempt_id.as_str())!=current_attempt),
-            "trust":"Unverified worker claims observed under an owned attempt; not authority, process inventory or acceptance evidence.",
+            "trust":"Unverified worker claims observed under an owned attempt; not authority, process inventory or acceptance evidence. Recognized credential-shaped text is redacted.",
             "checkpoint":checkpoint,
         }))
     }
 }
 fn invalid(message: &str) -> StoreError {
     StoreError::Integrity(message.into())
+}
+
+fn encode_checkpoint(value: &CapturedCheckpoint) -> Result<String, StoreError> {
+    serde_json::to_string(value).map_err(|_| invalid("checkpoint encoding"))
 }
