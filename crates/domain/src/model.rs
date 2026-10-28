@@ -150,6 +150,23 @@ pub struct Blocker {
     pub resume_when: String,
 }
 
+/// Operator-managed acceptance question. Text is context, never capability authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TaskDecision {
+    pub id: String,
+    pub question: String,
+    pub opened_by: ActorId,
+    pub opened_at_ms: i64,
+    pub resolution: Option<DecisionResolution>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DecisionResolution {
+    pub rationale: String,
+    pub resolved_by: ActorId,
+    pub resolved_at_ms: i64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
@@ -159,6 +176,8 @@ pub struct Task {
     pub attempt: Option<Attempt>,
     pub blocker: Option<Blocker>,
     pub required_checks: Vec<RequiredCheck>,
+    #[serde(default)]
+    pub decisions: Vec<TaskDecision>,
     pub verification: Option<Verification>,
 }
 
@@ -173,6 +192,7 @@ impl Task {
             attempt: None,
             blocker: None,
             required_checks,
+            decisions: Vec::new(),
             verification: None,
         }
     }

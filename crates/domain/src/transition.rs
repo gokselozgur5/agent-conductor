@@ -411,6 +411,48 @@ pub fn apply(task: &Task, command: &Command, clock: ClockReading) -> Result<Outc
             }
             next.required_checks.push(check.clone());
         }
+        CommandKind::OpenDecision { id, question } => {
+            require_decision_authority(task, command)?;
+            if id.trim().is_empty()
+                || id.len() > 128
+                || question.trim().is_empty()
+                || question.len() > 1024
+                || task.decisions.len() >= 32
+                || task.decisions.iter().any(|decision| decision.id == *id)
+            {
+                return Err(Rejection::InvalidCommand(
+                    "decision identity, text or capacity invalid",
+                ));
+            }
+            next.decisions.push(crate::TaskDecision {
+                id: id.clone(),
+                question: question.clone(),
+                opened_by: command.actor.id.clone(),
+                opened_at_ms: clock.wall_unix_ms,
+                resolution: None,
+            });
+        }
+        CommandKind::ResolveDecision { id, rationale } => {
+            require_decision_authority(task, command)?;
+            if rationale.trim().is_empty() || rationale.len() > 2048 {
+                return Err(Rejection::InvalidCommand(
+                    "decision rationale required and bounded",
+                ));
+            }
+            let decision = next
+                .decisions
+                .iter_mut()
+                .find(|decision| decision.id == *id)
+                .ok_or(Rejection::InvalidCommand("decision missing"))?;
+            if decision.resolution.is_some() {
+                return Err(Rejection::InvalidCommand("decision already resolved"));
+            }
+            decision.resolution = Some(crate::DecisionResolution {
+                rationale: rationale.clone(),
+                resolved_by: command.actor.id.clone(),
+                resolved_at_ms: clock.wall_unix_ms,
+            });
+        }
         CommandKind::Cancel => {
             require_role(command, &[ActorRole::Operator, ActorRole::System])?;
             end_lease(&mut next);
@@ -453,6 +495,15 @@ fn validate_completion(
     task: &Task,
     observed_source: &crate::SourceIdentity,
 ) -> Result<(), Rejection> {
+    if task
+        .decisions
+        .iter()
+        .any(|decision| decision.resolution.is_none())
+    {
+        return Err(Rejection::VerificationIncomplete(
+            "task has unresolved decisions",
+        ));
+    }
     let verification = task
         .verification
         .as_ref()
@@ -609,6 +660,23 @@ fn require_role(command: &Command, allowed: &[ActorRole]) -> Result<(), Rejectio
     }
 }
 
+fn require_decision_authority(task: &Task, command: &Command) -> Result<(), Rejection> {
+    require_role(command, &[ActorRole::Operator, ActorRole::Verifier])?;
+    reject_current_worker(task, command)?;
+    // Pause before changing acceptance context; a subsequent attempt receives the
+    // new decision snapshot and must obtain a fresh source-bound review.
+    require_state(
+        task,
+        command,
+        &[
+            TaskState::Backlog,
+            TaskState::Ready,
+            TaskState::Paused,
+            TaskState::Blocked,
+        ],
+    )
+}
+
 fn require_state(task: &Task, command: &Command, allowed: &[TaskState]) -> Result<(), Rejection> {
     if allowed.contains(&task.state) {
         Ok(())
@@ -643,6 +711,8 @@ const fn command_name(kind: &CommandKind) -> &'static str {
         CommandKind::RejectVerification => "reject_verification",
         CommandKind::Complete { .. } => "complete",
         CommandKind::AddRequiredCheck { .. } => "add_required_check",
+        CommandKind::OpenDecision { .. } => "open_decision",
+        CommandKind::ResolveDecision { .. } => "resolve_decision",
         CommandKind::Cancel => "cancel",
     }
 }
