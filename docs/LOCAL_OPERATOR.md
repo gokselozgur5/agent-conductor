@@ -106,3 +106,35 @@ running watcher, refused unauthenticated queue access, and kept the token out of
 browser storage, rendered text and daemon logs. Evidence:
 `operator-launcher-browser-v1/receipt.json`. Its dispatcher stayed disabled and
 its browser/daemon were stopped after the probe.
+
+## Inspect project context
+
+```sh
+./tools/conductor inspect
+```
+
+This read-only command reports conventional continuity/instruction document paths,
+digests, starting Git HEAD/status digest and a baseline manifest identity. It uses
+the same bounded Git inventory as runtime capture, excludes ignored files and
+refuses unsupported layouts/links. It does not alter HEAD, index or files, load
+whole documents into the prompt, or grant instruction authority from filenames.
+Direct CLI equivalent: `conductorctl inspect-project /absolute/project`.
+
+Native workflow packets now include the same advisory references from their
+already captured work copy, not a fresh read of the original checkout. The reviewer
+retains them as labelled starting-baseline data alongside check receipts. Up to64
+references and16KiB of encoded reference entries are included, with an explicit
+omitted count. Supported conventional names include README, STATUS, PHASES,
+TRACKING, ARCHITECTURE, REQUIREMENTS, DECISIONS, HANDOFF and TODO (Markdown, text or
+RST), plus scoped AGENTS.md and CLAUDE.md. Paths sort outer-to-inner then lexically.
+
+Outer-workspace files outside the captured project still require explicit
+`--instruction` selection and pins. This does not implement arbitrary filename
+configuration or full outer-workspace advisory discovery. A model must choose
+relevant references to read; listing a document is not proof it was read.
+
+Runtime tests cover count/encoded-byte bounds, escaped paths, deletion exclusion
+and unchanged authority. The real CLI probe found six actual documents in this
+repository with unchanged HEAD/index/worktree status and no ignored-state paths.
+Evidence: private `advisory-intake-v1/receipt.json`. Native packet integration is
+source-inspected/service-tested; no new model call was made for this change.

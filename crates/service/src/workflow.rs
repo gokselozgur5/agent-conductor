@@ -130,6 +130,7 @@ impl<C: Clock> PersistentControlService<C> {
             token,
             epoch,
         } = self.assign_workflow(plan, &workspace, continuing).await?;
+        let untrusted_context = self.workflow_context(plan, &baseline).await?;
         let packet = ResumePacket {
             contract: AttemptContract {
                 version: 1,
@@ -152,7 +153,7 @@ impl<C: Clock> PersistentControlService<C> {
             },
             objective: plan.objective.clone(),
             checkpoint: continuing.then(|| "Continue the retained unfinished workspace; preserve existing work and satisfy the original objective.".into()),
-            untrusted_context: self.store.workflow_trigger(&plan.task_id).await?.into_iter().collect(),
+            untrusted_context,
         };
         let candidate = self
             .execute_workflow_writer(plan, &packet, &token, worker_authentication)
@@ -235,6 +236,27 @@ impl<C: Clock> PersistentControlService<C> {
             );
         }
         Ok(receipts)
+    }
+
+    async fn workflow_context(
+        &self,
+        plan: &NativeWorkflowPlan,
+        baseline: &conductor_runtime::GitSnapshot,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut untrusted_context: Vec<String> = self
+            .store
+            .workflow_trigger(&plan.task_id)
+            .await?
+            .into_iter()
+            .collect();
+        untrusted_context.push(
+            serde_json::to_string(
+                &conductor_runtime::discover_advisory(baseline)
+                    .map_err(|_| invalid("advisory inventory failed"))?,
+            )
+            .map_err(|_| invalid("advisory inventory encoding failed"))?,
+        );
+        Ok(untrusted_context)
     }
 
     async fn execute_workflow_writer(
@@ -704,6 +726,40 @@ mod tests {
         std::fs::write(source, "changed").unwrap();
         assert!(validate_plan(&plan).is_err());
     }
+    #[tokio::test]
+    async fn workflow_context_discovers_references_without_approving_instructions() {
+        let root = tempfile::tempdir().unwrap();
+        let store = agent_conductor_store::Store::open(root.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        let service = PersistentControlService::start(store, 1).await.unwrap();
+        let plan = plan(root.path().join("project"), root.path().join("artifacts"));
+        let baseline = conductor_runtime::GitSnapshot {
+            starting_head: "a".repeat(40),
+            status_sha256: "b".repeat(64),
+            manifest: conductor_runtime::SnapshotManifest {
+                version: 1,
+                entries: vec![conductor_runtime::SnapshotEntry {
+                    path: "AGENTS.md".into(),
+                    sha256: Some("c".repeat(64)),
+                    bytes: 100,
+                    executable: false,
+                }],
+            },
+        };
+        let context = service.workflow_context(&plan, &baseline).await.unwrap();
+        assert_eq!(context.len(), 1);
+        let value: conductor_runtime::AdvisoryInventory =
+            serde_json::from_str(&context[0]).unwrap();
+        assert_eq!(value.documents[0].path, "AGENTS.md");
+        assert!(value.trust.contains("Untrusted"));
+        assert!(plan.instructions.is_empty());
+        assert!(
+            !plan.project.exists(),
+            "discovery must use captured inventory, not read live files"
+        );
+    }
+
     #[tokio::test]
     async fn gated_plan_cannot_bypass_durable_wake_via_direct_launch() {
         let root = tempfile::tempdir().unwrap();

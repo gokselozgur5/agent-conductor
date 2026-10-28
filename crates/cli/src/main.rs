@@ -23,6 +23,10 @@ struct Cli {
 enum Command {
     /// Run an approved check in a disposable source copy (does not complete a task).
     RunCheck(check_command::CheckArgs),
+    /// Read-only bounded advisory references from the current Git inventory.
+    InspectProject {
+        project: PathBuf,
+    },
     Health,
     CheckInvariants,
     /// Persist an approved native plan for an explicitly enabled dispatcher.
@@ -105,6 +109,25 @@ async fn main() {
         let status = check_command::run(args).await;
         std::process::exit(status);
     }
+    if let Command::InspectProject { project } = &cli.command {
+        if !project.is_absolute() {
+            eprintln!("project path must be absolute");
+            std::process::exit(2);
+        }
+        let result = match conductor_runtime::observe_git(project).await {
+            Ok(snapshot) => conductor_runtime::discover_advisory(&snapshot),
+            Err(error) => Err(error),
+        };
+        let Ok(inventory) = result else {
+            eprintln!("project observation refused; inspect path, Git layout and file bounds");
+            std::process::exit(2);
+        };
+        let Ok(json) = serde_json::to_string_pretty(&inventory) else {
+            std::process::exit(5);
+        };
+        println!("{json}");
+        return;
+    }
     let request = RequestEnvelope::new(command_request(cli.command));
 
     let response = match send(&cli.socket, &request).await {
@@ -135,8 +158,8 @@ async fn main() {
 #[allow(clippy::too_many_lines)] // Keep the declarative CLI-to-protocol mapping together.
 fn command_request(command: Command) -> Request {
     match command {
-        Command::RunCheck(_) => {
-            eprintln!("run-check is a local executor, not a daemon request");
+        Command::RunCheck(_) | Command::InspectProject { .. } => {
+            eprintln!("local inspection/check execution is not a daemon request");
             std::process::exit(2);
         }
         Command::Health => Request::Health,

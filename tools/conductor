@@ -60,6 +60,7 @@ def main():
     run.add_argument('--dispatch', action='store_true', help='execute explicitly submitted plans')
     run.add_argument('--recover-fenced', action='store_true')
     sub.add_parser('status')
+    sub.add_parser('inspect', help='show bounded advisory document references without model calls')
     sub.add_parser('token', help='print the private board token for operator login')
     ctl = sub.add_parser('ctl', help='forward a command to the existing Rust CLI')
     ctl.add_argument('--json', action='store_true')
@@ -109,6 +110,8 @@ def main():
     elif args.command == 'ctl':
         forwarded = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
         os.execv(str(Path(config['bin_dir']) / 'conductorctl'), ['conductorctl', '--socket', str(state / 'control.sock'), *(['--json'] if args.json else []), *forwarded])
+    elif args.command == 'inspect':
+        os.execv(str(Path(config['bin_dir']) / 'conductorctl'), ['conductorctl', 'inspect-project', config['project']])
     elif args.command == 'status':
         print(json.dumps(dict(health=call(config, state, 'health'), tasks=call(config, state, 'list-tasks'), workflows=call(config, state, 'list-workflows')), indent=2))
     elif args.command == 'plan':
