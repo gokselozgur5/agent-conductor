@@ -89,15 +89,15 @@ impl Store {
             .fetch_all(&self.inner.readers).await?.into_iter().map(decode).collect()
     }
 
-    /// Reads one bounded page of started executions for a registered project.
+    /// Reads current retained executions of nonterminal tasks in bounded pages.
     /// # Errors
     /// Returns database or record decoding errors.
-    pub async fn started_execution_page(
+    pub async fn observable_execution_page(
         &self,
         project_id: &str,
         after: &str,
     ) -> Result<Vec<ExecutionRecord>, StoreError> {
-        sqlx::query("SELECT e.* FROM executions e JOIN tasks t ON t.id=e.task_id WHERE t.project_id=? AND e.state='started' AND e.effect_token>? ORDER BY e.effect_token LIMIT 16")
+        sqlx::query("SELECT e.* FROM executions e JOIN tasks t ON t.id=e.task_id WHERE t.project_id=? AND t.state NOT IN ('completed','cancelled') AND json_extract(t.aggregate_json,'$.attempt.id')=e.attempt_id AND e.wrapper_identity IS NOT NULL AND e.state IN ('started','exited','blocked','fenced') AND e.effect_token>? ORDER BY e.effect_token LIMIT 16")
             .bind(project_id).bind(after).fetch_all(&self.inner.readers).await?
             .into_iter().map(decode).collect()
     }
