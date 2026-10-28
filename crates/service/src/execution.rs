@@ -221,6 +221,12 @@ impl<C: Clock> PersistentControlService<C> {
             .validate_execution_connection(token, wrapper_identity, &connection)
             .await?;
         let current = self.validate_runtime_owner(packet).await.is_ok();
+        let stopped_fence = match &terminal {
+            Some(RunnerEvent::Stopped { stdout, .. }) if settled => {
+                restricted_stop_fence(packet, stdout)
+            }
+            _ => None,
+        };
         let candidate = match terminal {
             Some(RunnerEvent::Finished {
                 exit_code,
@@ -237,7 +243,9 @@ impl<C: Clock> PersistentControlService<C> {
             .ok(),
             _ => None,
         };
-        let update = if candidate.is_some() {
+        let update = if let Some(update) = stopped_fence {
+            update
+        } else if candidate.is_some() {
             ExecutionUpdate::Exited {
                 wrapper_identity: wrapper_identity.into(),
                 exit_code: Some(0),
@@ -301,13 +309,15 @@ impl<C: Clock> PersistentControlService<C> {
         let record = self
             .validate_execution_connection(token, wrapper_identity, &connection)
             .await?;
+        let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
+            .map_err(|_| runtime_error("stored packet invalid"))?;
         let update = match observation.as_ref() {
             Some(RunnerEvent::Finished { exit_code, .. }) => ExecutionUpdate::Exited {
                 wrapper_identity: wrapper_identity.into(), exit_code: *exit_code,
             },
-            Some(RunnerEvent::Stopped { .. }) => ExecutionUpdate::Blocked {
-                reason: "controlled group stopped; complete write fence is not yet verified".into(),
-            },
+            Some(RunnerEvent::Stopped { stdout, .. }) => restricted_stop_fence(&packet,stdout).unwrap_or_else(|| ExecutionUpdate::Blocked {
+                reason: "controlled group stopped; restricted writer fence was not established".into(),
+            }),
             _ => ExecutionUpdate::Blocked {
                 reason: "wrapper terminal observation unavailable; reconcile without PID-only signalling".into(),
             },
@@ -446,4 +456,17 @@ impl<C: Clock> PersistentControlService<C> {
 }
 fn runtime_error(reason: &str) -> StoreError {
     StoreError::Integrity(reason.into())
+}
+
+fn restricted_stop_fence(packet: &ResumePacket, stdout: &[u8]) -> Option<ExecutionUpdate> {
+    use sha2::{Digest, Sha256};
+    conductor_runtime::accepts_file_writer_stop(packet, stdout).then(|| ExecutionUpdate::Fenced {
+        reason: serde_json::json!({
+            "basis":"settled controlled group stop with accepted pinned file-only CLI envelope; no command tools",
+            "packet_sha256":packet.sha256().ok(),
+            "output_sha256":format!("{:x}",Sha256::digest(stdout)),
+            "adapter_sha256":packet.contract.adapter.executable_sha256,
+            "conformance_sha256":packet.contract.adapter.conformance_sha256,
+        }).to_string(),
+    })
 }

@@ -54,6 +54,8 @@ pub enum RunnerEvent {
     },
     Stopped {
         reason: String,
+        #[serde(default)]
+        stdout: Vec<u8>,
     },
 }
 

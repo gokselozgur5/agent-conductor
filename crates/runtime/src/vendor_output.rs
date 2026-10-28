@@ -212,3 +212,35 @@ impl StreamState {
 fn file_tool(name: Option<&str>) -> bool {
     matches!(name, Some("Read" | "Write" | "Edit" | "Glob" | "Grep"))
 }
+
+/// Recognizes a complete observed prefix from the accepted restricted writer.
+/// The caller must separately prove wrapper settlement and the matching stored
+/// launch identity. Tool text alone never establishes a process fence.
+#[must_use]
+pub fn accepts_file_writer_stop(packet: &ResumePacket, stdout: &[u8]) -> bool {
+    if packet.validate().is_err()
+        || packet.contract.adapter.kind != AdapterKind::Claude
+        || packet.contract.authority.allow_workspace_commands
+        || stdout.len() > 1024 * 1024
+        || stdout.last() != Some(&b'\n')
+    {
+        return false;
+    }
+    let mut state = StreamState::default();
+    for line in stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        if line.len() > 512 * 1024 || state.events >= 10000 || state.terminal {
+            return false;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            return false;
+        };
+        if !event.is_object() || state.claude(&event).is_err() {
+            return false;
+        }
+        state.events += 1;
+    }
+    state.tool_init == Some(true) && !state.non_file_tool
+}

@@ -1,7 +1,7 @@
 //! Trusted wrapper: parse packet, acknowledge, wait for recorded release, supervise.
 use conductor_runtime::{
     MAX_PACKET_BYTES, PacketAcknowledgement, ProcessError, ProcessSpec, RunnerControl, RunnerEvent,
-    RunnerLaunch, continuous_millis, run_process,
+    RunnerLaunch, continuous_millis, run_process_captured,
 };
 use std::time::Duration;
 use tokio::{
@@ -109,7 +109,11 @@ async fn serve() -> Result<(), ()> {
         output_limit: launch.output_limit,
     };
     let (cancel, receiver) = watch::channel(false);
-    let mut process = tokio::spawn(async move { run_process(&specification, receiver).await });
+    let mut process = tokio::spawn(async move {
+        let mut captured = Vec::new();
+        let result = run_process_captured(&specification, receiver, &mut captured).await;
+        (result, captured)
+    });
     let mut timer = tokio::time::interval(Duration::from_millis(20));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Keep this future alive across timer ticks: cancelling a partial read would
@@ -118,10 +122,10 @@ async fn serve() -> Result<(), ()> {
     let stopped = loop {
         tokio::select! {
             result = &mut process => {
-                let result = result.map_err(|_| ())?;
+                let (result, captured) = result.map_err(|_| ())?;
                 return emit(&match result {
                     Ok(output) => RunnerEvent::Finished { exit_code: output.exit_code, stdout: output.stdout, stderr: output.stderr },
-                    Err(ProcessError::Cancelled | ProcessError::Timeout | ProcessError::OutputLimit) => RunnerEvent::Stopped { reason: "process_stopped".into() },
+                    Err(ProcessError::Cancelled | ProcessError::Timeout | ProcessError::OutputLimit) => RunnerEvent::Stopped { reason: "process_stopped".into(), stdout: captured },
                     // Failed fencing or I/O is not evidence that the worker stopped.
                     Err(_) => return Err(()),
                 }).await;
@@ -152,7 +156,8 @@ async fn serve() -> Result<(), ()> {
         }
     };
     let _ = cancel.send(true);
-    match process.await.map_err(|_| ())? {
+    let (result, captured) = process.await.map_err(|_| ())?;
+    match result {
         // Cancellation can race a normal exit. Preserve the weaker observation:
         // normal exit did not fence descendants and must never become Stopped.
         Ok(output) => {
@@ -168,6 +173,7 @@ async fn serve() -> Result<(), ()> {
     }
     emit(&RunnerEvent::Stopped {
         reason: stopped.into(),
+        stdout: captured,
     })
     .await
 }

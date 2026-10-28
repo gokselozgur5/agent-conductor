@@ -121,3 +121,30 @@ async fn cancellation_before_spawn_has_no_side_effect() {
     ));
     assert!(!directory.path().join("should-not-exist").exists());
 }
+
+#[tokio::test]
+async fn stopped_process_retains_bounded_observation_without_becoming_success() {
+    let directory = tempfile::tempdir().unwrap();
+    let (cancel, receiver) = watch::channel(false);
+    let input = spec(
+        directory.path(),
+        "printf 'observed-envelope\\n'; : > ready; /bin/sleep 10",
+    );
+    let task = tokio::spawn(async move {
+        let mut captured = vec![99];
+        let result = conductor_runtime::run_process_captured(&input, receiver, &mut captured).await;
+        (result, captured)
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !directory.path().join("ready").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    cancel.send(true).unwrap();
+    let (result, captured) = task.await.unwrap();
+    assert!(matches!(result, Err(ProcessError::Cancelled)));
+    assert_eq!(captured, b"observed-envelope\n");
+}

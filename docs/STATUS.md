@@ -24,8 +24,9 @@ Version-bound ready/pause/resume/cancel controls are implemented under issue #7
 and shipped through PR #8 after macOS/Linux CI, real SQLite/HTTP tests and an
 isolated Chrome run. Atomic verification/source publication shipped through PR #10; its fault
 regression preserves task state after a late bind failure. Durable dispatch shipped through PR #12 after exact-head CI. Fenced-workspace
-continuation under issue #13 passed real interruption/restart acceptance and
-awaits exact-head CI.
+continuation shipped through PR #14 after exact-head CI. Observed restricted
+writer stop evidence under issue #15 passed real writer-pause/restart/continuation
+acceptance and awaits exact-head CI.
 
 ## Implemented
 
@@ -47,9 +48,9 @@ awaits exact-head CI.
 
 ## Evidence
 
-The latest local workspace run passed 157 tests, formatting, strict Clippy and
+The latest local workspace run passed 159 tests, formatting, strict Clippy and
 credential/media scans. Evidence is kept privately under
-`reviews/agent-conductor-runtime-20261028/workflow-continuation-workspace.log` and
+`reviews/agent-conductor-runtime-20261028/writer-stop-workspace.log` and
 `native-workflow-v1/`. The model-call cap is not an actual spend measurement.
 
 Phase 1 has separate accepted evidence in [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md).
@@ -58,7 +59,8 @@ before their respective merges. Board head `2937f43` also passed both hosts and 
 Control head `02e6954` passed both hosts and merged at `a761d94`.
 Atomic-source head `f461560` passed both hosts and merged at `2eb1f61`.
 Durable-dispatch head `eede6c9` passed both hosts and merged at `82496d3`.
-The continuation branch still requires its own exact-SHA CI. Local results do not substitute for that remote check.
+Continuation head `61de159` passed both hosts and merged at `cdd32b9`.
+The writer-stop branch still requires its own exact-SHA CI. Local results do not substitute for that remote check.
 
 ## Trust boundaries
 
@@ -113,7 +115,31 @@ and terminal-task continuation requests were refused. Evidence:
 retained-packet attempt-ID consistency guard; the final native lifecycle regression
 and strict Clippy passed with that guard included. Full workspace tests passed157.
 
-This proves fenced-workspace continuation through the CLI. The board action is
-implemented and JS syntax checked; its new continuation button has not yet had a
-separate real-browser acceptance run. Mid-writer termination without a confirmed
+This proves fenced-workspace continuation through the CLI. The board continuation button also passed an isolated Chrome acceptance on a
+copy of a genuinely rejected, fenced workflow; it queued a version-bound
+continuation while model dispatch remained disabled (`operator-continuation-v1`). Mid-writer termination without a confirmed
 fence remains refused, not silently treated as recoverable.
+
+## Observed writer-stop validation
+
+Cancellation output is now retained and checked only after the wrapper settles.
+A valid restricted file-only envelope can establish the existing capability-based
+write fence; malformed/truncated/command-capable/fake cases remain blocked. The
+expanded native lifecycle regression verifies that stop admission does not create
+a successful candidate, and controlled process tests verify bounded captured
+stdout survives cancellation.159 workspace tests and strict Clippy pass.
+
+The first real writer-pause probe established fencing with no successful exit code,
+restarted and continued retained files, then passed checks but was correctly
+rejected by the independent verifier: its synthetic objective demanded historical
+Write/read ordering that source-only review could not prove. The task remained
+verifying, not completed. Evidence: `writer-pause-v1/rejected-receipt.json`. A new
+fixture uses explicitly source-verifiable final-state requirements; no acceptance
+gate or prior verdict was overridden.
+
+The replacement writer-pause fixture passed: a running writer was paused after
+creating answer.txt, its observed stop was fenced without a successful exit code,
+and a daemon restart followed by explicit retained-work continuation completed
+through independent verification in65.91seconds. New attempt/epoch, unchanged old
+files, copied retained output and stale/terminal refusals were verified. Evidence:
+`writer-pause-v2/receipt.json`. The first rejected fixture remains preserved.

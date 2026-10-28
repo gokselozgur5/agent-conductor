@@ -2318,11 +2318,13 @@ mod effect_tests {
         use agent_conductor_store::{EffectAudit, ExecutionState};
         use conductor_runtime::{AdapterKind, PacketAcknowledgement, RunnerEvent};
         use std::os::unix::fs::PermissionsExt;
-        for (valid, replace_packet, fail_publication) in [
-            (true, false, false),
-            (false, false, false),
-            (true, true, false),
-            (true, false, true),
+        for (valid, replace_packet, fail_publication, stopped) in [
+            (true, false, false, false),
+            (false, false, false, false),
+            (true, true, false, false),
+            (true, false, true, false),
+            (true, false, false, true),
+            (false, false, false, true),
         ] {
             let (directory, store) = lifecycle_store().await;
             let service =
@@ -2385,12 +2387,19 @@ mod effect_tests {
             } else {
                 b"truncated".to_vec()
             };
-            let finished = serde_json::to_string(&RunnerEvent::Finished {
-                exit_code: Some(0),
-                stdout,
-                stderr: vec![],
-            })
-            .expect("terminal");
+            let event = if stopped {
+                RunnerEvent::Stopped {
+                    reason: "cancelled".into(),
+                    stdout,
+                }
+            } else {
+                RunnerEvent::Finished {
+                    exit_code: Some(0),
+                    stdout,
+                    stderr: vec![],
+                }
+            };
+            let finished = serde_json::to_string(&event).expect("terminal");
             let wrapper = directory.path().join("peer.sh");
             // Tests service lifecycle semantics, not vendor identity or sandboxing.
             let closed_input = directory.path().join("input-closed");
@@ -2429,6 +2438,19 @@ mod effect_tests {
             if replace_packet {
                 assert!(result.is_err());
                 assert_eq!(persisted.state, ExecutionState::Started);
+            } else if stopped && valid {
+                assert!(result.is_err(), "stop is never a successful candidate");
+                assert_eq!(persisted.state, ExecutionState::Fenced);
+                let task: Task = serde_json::from_str(
+                    &store.task("task").await.unwrap().unwrap().aggregate_json,
+                )
+                .unwrap();
+                assert!(
+                    service
+                        .continuation_packet("task", task.version)
+                        .await
+                        .is_ok()
+                );
             } else if valid {
                 let (observed, mut candidate) = result.expect("candidate");
                 assert_eq!(candidate.text, "candidate only");
