@@ -105,6 +105,10 @@ pub enum Request {
     TaskCheckpoint {
         task_id: String,
     },
+    TaskEvidence {
+        task_id: String,
+        before: Option<String>,
+    },
     TaskHistory {
         task_id: String,
         before: Option<String>,
@@ -209,6 +213,10 @@ pub enum Response {
     },
     Tasks {
         tasks: Vec<TaskResponse>,
+    },
+    TaskEvidence {
+        entries: Vec<TaskEvidenceEntry>,
+        next_before: Option<String>,
     },
     TaskHistory {
         entries: Vec<TaskHistoryEntry>,
@@ -315,6 +323,15 @@ pub struct TaskHistoryEntry {
     pub actor_id: String,
     pub correlation_id: String,
     pub occurred_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskEvidenceEntry {
+    pub sequence: String,
+    pub kind: String,
+    pub actor_id: String,
+    pub occurred_at_ms: i64,
+    pub details: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

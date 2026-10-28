@@ -93,6 +93,7 @@ impl OperatorBoard {
             .route("/api/inventory", get(inventory::<S>))
             .route("/api/tasks", get(tasks::<S>))
             .route("/api/history", get(history::<S>))
+            .route("/api/evidence", get(evidence::<S>))
             .route("/api/checkpoint", get(checkpoint::<S>))
             .route("/api/health", get(health::<S>))
             .route("/api/control", post(controls::apply::<S>))
@@ -190,6 +191,19 @@ async fn tasks<S: ControlService>(
 struct HistoryQuery {
     task_id: String,
     before: Option<String>,
+}
+async fn evidence<S: ControlService>(
+    State(state): State<BoardState<S>>,
+    Query(params): Query<HistoryQuery>,
+) -> Response {
+    query(
+        &state,
+        ControlRequest::TaskEvidence {
+            task_id: params.task_id,
+            before: params.before,
+        },
+    )
+    .await
 }
 async fn history<S: ControlService>(
     State(state): State<BoardState<S>>,
@@ -373,3 +387,5 @@ mod tests {
 
 #[cfg(test)]
 mod controls_tests;
+#[cfg(test)]
+mod evidence_tests;
