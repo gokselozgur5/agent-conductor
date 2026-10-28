@@ -24,7 +24,8 @@ Status: complete, retained as behavioral evidence rather than production archite
 
 ## Phase 1 — Production control core
 
-Status: implementation independently accepted; exact-SHA macOS/Linux CI pending.
+Status: accepted for the documented core scope. Independent review passed;
+`bebddb9` passed macOS/Linux CI run `40646746932`. Phase 2 has not started.
 Evidence and explicit scope limits: [Phase 1 acceptance](PHASE1_ACCEPTANCE.md).
 
 - Rust workspace and versioned migrations

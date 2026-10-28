@@ -2,14 +2,13 @@
 
 ## Current gate
 
-Phase 1 implementation and final independent reproducer review are accepted at
-`5d26e14`, with a separately reviewed transport correction at `751ba5b`.
-The initial Linux CI failure and its regression are recorded in the acceptance
-matrix. No reproduced review findings remain open locally. The exact published
-commit's macOS/Linux CI is the remaining acceptance gate.
-The implementation has passed local formatting, strict Clippy and repeated full
-workspace tests. See [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md) for exact evidence
-and the distinction between core tests and deferred end-to-end v1 behavior.
+Phase 1 is accepted for the documented control-core scope. Independent review
+accepted the lifecycle fixes at `5d26e14` and the transport correction at
+`751ba5b`; no reproduced findings remain open. Published `bebddb9` passed both
+macOS and Linux jobs in [CI run 40646746932](https://github.com/gokselozgur5/agent-conductor/actions/runs/40646746932).
+Local formatting, strict Clippy, and three full runs of 97 tests also passed.
+See [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md) for the exact evidence and deferred
+v1 requirements. Subsequent commits must pass their own exact-SHA CI.
 
 ## Implemented
 
@@ -40,7 +39,7 @@ runtime and there is no migration of real user task state to perform.
 
 ## Next phase
 
-After final Phase 1 review and CI acceptance, design the Phase 2 adapter contract
+The next work is to design the Phase 2 adapter contract
 and fake-agent harness before integrating local authenticated Codex/Claude CLIs.
 Resume-packet acknowledgement, instruction trust, dirty-state snapshots, worktree
 ownership, real check execution and capability enforcement must be proven before

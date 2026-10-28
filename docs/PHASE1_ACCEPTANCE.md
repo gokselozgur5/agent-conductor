@@ -7,8 +7,10 @@ Implementation baseline: `751ba5b`. Local acceptance: formatting, strict Clippy,
 and three full workspace runs of 97 tests passed on macOS. A fresh independent
 review at `5d26e14` accepted every historical reproducer family and the additional
 effect-directive retry fix; its separate build also passed 96 tests, formatting
-and strict Clippy. No reproduced findings remain open. Exact-published-SHA
-macOS/Linux CI is the remaining gate.
+and strict Clippy. No reproduced findings remain open. Both macOS and Linux
+jobs passed at published `bebddb9` in [CI run 40646746932](https://github.com/gokselozgur5/agent-conductor/actions/runs/40646746932).
+Phase 1 is accepted within the boundaries below; subsequent revisions still
+require their own exact-SHA CI.
 
 The evidence below names executable tests, not inferred guarantees. Run all with
 `cargo test --workspace --all-features`; individual names can be supplied as its
@@ -67,8 +69,8 @@ in run `40645977411`: closing with unread request bytes produced ConnectionReset
 limited request draining, awaited timed response writing, and shutdown tracking.
 Additional excess connections close immediately; malformed or stalled peers are
 not promised a structured response. The regression verifies the extra handler
-cannot create an unbounded pool or delay shutdown. Final cross-platform CI remains
-a required gate after this correction. Independent source review accepted the
+cannot create an unbounded pool or delay shutdown. Both cross-platform CI jobs
+passed at `bebddb9`, closing the initial Linux failure. Independent source review accepted the
 fix at `751ba5b`; a fresh daemon build passed all 17 daemon tests, including
 separate reruns of both initially failing tests.
 
