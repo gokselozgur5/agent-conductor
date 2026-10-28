@@ -52,8 +52,9 @@ a worker/system or publish checks, verdicts or completion. Stale state is refuse
 and refreshed. Cancellation asks for confirmation and retains artifacts. Pause
 and cancel revoke ownership; execution stop follows the runtime observing that
 revocation, rather than the HTTP response proving a completed process fence.
-Ready/resume change task lifecycle readiness; they do not create a new dispatch
-for an existing interrupted task.
+Ready/resume change task lifecycle readiness. Use the queue entry’s separate
+Continue retained work action to explicitly authorize a new attempt after the
+server verifies all prior writer fences.
 
 POST `/api/control` requires the same bearer/Host/Origin boundary as reads, exact
 `application/json`, a body of at most 4096 bytes and a three-second read deadline.
@@ -78,7 +79,7 @@ the daemon stopped. Private screenshot/receipt evidence lives under
 in the workspace.
 
 This does not claim remote multi-user authentication, exhaustive HTTP load
-hardening, automatic checkpoint continuation, pagination or mobile-browser
+hardening, unfenced-writer recovery, pagination or mobile-browser
 acceptance.
 
 A real SQLite/HTTP regression verifies authorization, foreign-origin refusal,

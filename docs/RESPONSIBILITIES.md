@@ -56,7 +56,7 @@ boundary rather than adding vendor conditionals to service. Do not introduce a p
 DI container or general workflow language solely to remove one conditional.
 
 Sequential durable dispatch, restricted-writer source finalization and independent
-verification now compose into an exercised native workflow. Generic command-writer
-fencing and automatic retained-attempt continuation remain incomplete. Hooks and
-host support stay in scope. Real work/check/reviewer acceptance does not establish
-recoverable interruption; that separate acceptance is still required.
+verification now compose into an exercised native workflow. Explicit fenced-workspace continuation now preserves prior work in a fresh
+attempt; generic command-writer fencing and automatic continuation remain incomplete. Hooks and
+host support stay in scope. An interrupted verification-phase workflow has passed retained-work continuation;
+unfenced mid-writer interruption remains outside that evidence.

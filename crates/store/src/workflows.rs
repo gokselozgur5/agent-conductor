@@ -11,9 +11,9 @@ pub struct WorkflowDispatch {
     pub status: String,
     pub boot_generation: Option<i64>,
     pub outcome_json: Option<String>,
+    pub resume_version: Option<i64>,
 }
-const SELECT: &str =
-    "SELECT task_id, plan_json, status, boot_generation, outcome_json FROM workflow_dispatch";
+const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version FROM workflow_dispatch";
 impl Store {
     /// Persists one immutable operator-approved plan, replaying identical input.
     /// # Errors
@@ -108,6 +108,28 @@ impl Store {
         }
         Ok(())
     }
+    /// Queues an explicitly approved continuation against a specific task version.
+    /// # Errors
+    /// Refuses running/queued/missing dispatches or an invalid version.
+    pub async fn requeue_workflow(
+        &self,
+        task_id: &str,
+        version: u64,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let version =
+            i64::try_from(version).map_err(|_| StoreError::Integrity("version overflow".into()))?;
+        let mut writer = self.inner.writer.lock().await;
+        let changed = sqlx::query("UPDATE workflow_dispatch SET status='queued',resume_version=?,outcome_json=NULL,updated_at_ms=? WHERE task_id=? AND status IN ('finished','needs_recovery') AND (SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running')) < 256")
+            .bind(version).bind(now).bind(task_id).execute(&mut *writer).await?.rows_affected();
+        if changed != 1 {
+            return Err(StoreError::Integrity(
+                "dispatch is not available for continuation".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Returns the latest bounded dispatch receipts, not stored plan contents.
     /// # Errors
     /// Returns database errors.
@@ -165,6 +187,13 @@ mod tests {
             .await
             .unwrap();
         assert!(store.claim_workflow(second, 11).await.unwrap().is_none());
+        store.requeue_workflow("a", 17, 11).await.unwrap();
+        assert!(store.requeue_workflow("a", 17, 11).await.is_err());
+        let continued = store.claim_workflow(second, 11).await.unwrap().unwrap();
+        assert_eq!(continued.task_id, "a");
+        assert_eq!(continued.resume_version, Some(17));
+        assert!(store.requeue_workflow("a", 17, 11).await.is_err());
+
         assert!(store.finish_workflow("b", second, "{}", 12).await.is_err());
         assert!(
             !serde_json::to_string(&store.workflows().await.unwrap())

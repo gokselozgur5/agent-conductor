@@ -93,6 +93,7 @@ impl OperatorBoard {
             .route("/api/tasks", get(tasks::<S>))
             .route("/api/health", get(health::<S>))
             .route("/api/control", post(controls::apply::<S>))
+            .route("/api/workflows/continue", post(workflows::resume::<S>))
             .route(
                 "/api/workflows",
                 get(workflows::list::<S>).post(workflows::submit::<S>),

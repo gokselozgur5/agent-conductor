@@ -53,6 +53,10 @@ pub enum Request {
         plan_json: String,
     },
     ListWorkflows,
+    ContinueWorkflow {
+        task_id: String,
+        expected_version: u64,
+    },
     RegisterProject {
         actor_id: String,
         idempotency_key: String,

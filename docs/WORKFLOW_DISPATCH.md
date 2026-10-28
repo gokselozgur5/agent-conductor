@@ -38,10 +38,29 @@ Dispatch status is not task acceptance:
 
 Restart changes the boot identity, rejects stale claim/finish operations, preserves
 queued plans and marks prior running dispatches for reconciliation. It does not
-prove old process fencing or automatically continue an interrupted attempt.
-Pause/resume/cancel still use existing domain commands; resuming a task does not
-create a fresh dispatch or erase its previous workspace. Completing this retained
-checkpoint continuation remains required work.
+prove old process fencing. Pause/resume/cancel still use existing domain commands;
+resuming a task alone does not create a fresh dispatch or erase its workspace.
+
+## Continue retained work
+
+After inspecting the task, use `conductorctl continue-workflow TASK_ID VERSION`
+or the board queue entry’s **Continue retained work** button. This explicitly
+authorizes another model attempt. The service checks the displayed/current task
+version, refuses terminal tasks, and requires every prior execution to have a
+verified write fence. The retained packet must match the task/attempt/worker/epoch
+and stored packet digest. A running or already queued dispatch cannot be requeued.
+
+An enabled dispatcher rechecks these conditions, ends the prior attempt lease
+through domain commands and copies the retained workspace into a new private
+`continuation-UUID/work/tree`. A new attempt and epoch run the original objective,
+checks and independent review. Old attempt files and evidence remain untouched.
+Required checks and objective must match the stored plan; no task or source reset
+is used. A stale request is refused instead of silently adopting newer state.
+
+This supports interrupted verification after a normally exited, fenced writer.
+A mid-writer crash with no confirmed fence still blocks continuation. No elapsed
+time or missing PID is accepted as fence proof, and no blanket automatic retry
+or generic command-capable writer recovery is claimed.
 
 The queue response omits stored plan bodies. Authentication stays in host process
 memory and the dispatcher supplies only approved environment keys to native

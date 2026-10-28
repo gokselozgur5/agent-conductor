@@ -30,6 +30,11 @@ enum Command {
         plan: PathBuf,
     },
     ListWorkflows,
+    /// Continue an unfinished task only after prior write fencing is verified.
+    ContinueWorkflow {
+        task_id: String,
+        expected_version: u64,
+    },
     RegisterProject {
         actor_id: String,
         idempotency_key: String,
@@ -127,6 +132,7 @@ async fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keep the declarative CLI-to-protocol mapping together.
 fn command_request(command: Command) -> Request {
     match command {
         Command::RunCheck(_) => {
@@ -136,6 +142,13 @@ fn command_request(command: Command) -> Request {
         Command::Health => Request::Health,
         Command::CheckInvariants => Request::CheckInvariants,
         Command::ListWorkflows => Request::ListWorkflows,
+        Command::ContinueWorkflow {
+            task_id,
+            expected_version,
+        } => Request::ContinueWorkflow {
+            task_id,
+            expected_version,
+        },
         Command::SubmitWorkflow { plan } => read_workflow_plan(plan),
         Command::RegisterProject {
             actor_id,
