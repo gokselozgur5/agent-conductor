@@ -41,6 +41,8 @@ mod lease_observation;
 #[cfg(unix)]
 mod repository_watch;
 #[cfg(unix)]
+mod usage;
+#[cfg(unix)]
 mod workflow;
 #[cfg(unix)]
 mod workflow_baseline;

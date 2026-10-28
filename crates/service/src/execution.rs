@@ -241,6 +241,8 @@ impl<C: Clock> PersistentControlService<C> {
         let record = self
             .validate_execution_connection(token, wrapper_identity, &connection)
             .await?;
+        self.record_terminal_usage(packet, token, terminal.as_ref(), settled)
+            .await?;
         let instructions_current = self.ensure_instruction_current_locked(packet).await?;
         let current = instructions_current && self.validate_runtime_owner(packet).await.is_ok();
         let stopped_fence = match &terminal {
@@ -249,22 +251,7 @@ impl<C: Clock> PersistentControlService<C> {
             }
             _ => None,
         };
-        let candidate = match terminal {
-            Some(RunnerEvent::Finished {
-                exit_code,
-                stdout,
-                stderr,
-            }) if settled && current => conductor_runtime::interpret_vendor_output(
-                packet,
-                &conductor_runtime::ProcessOutput {
-                    exit_code,
-                    stdout,
-                    stderr,
-                },
-            )
-            .ok(),
-            _ => None,
-        };
+        let candidate = native_result_candidate(packet, terminal, settled && current);
         let update = if let Some(update) = stopped_fence {
             update
         } else if candidate.is_some() {
@@ -371,6 +358,8 @@ impl<C: Clock> PersistentControlService<C> {
             .await?;
         let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
             .map_err(|_| runtime_error("stored packet invalid"))?;
+        self.record_terminal_usage(&packet, token, observation.as_ref(), true)
+            .await?;
         let update = match observation.as_ref() {
             Some(RunnerEvent::Finished { exit_code, .. }) => ExecutionUpdate::Exited {
                 wrapper_identity: wrapper_identity.into(), exit_code: *exit_code,
@@ -574,4 +563,27 @@ fn restricted_stop_fence(packet: &ResumePacket, stdout: &[u8]) -> Option<Executi
             "conformance_sha256":packet.contract.adapter.conformance_sha256,
         }).to_string(),
     })
+}
+
+fn native_result_candidate(
+    packet: &ResumePacket,
+    terminal: Option<RunnerEvent>,
+    accepted_owner: bool,
+) -> Option<conductor_runtime::VendorCandidate> {
+    match terminal {
+        Some(RunnerEvent::Finished {
+            exit_code,
+            stdout,
+            stderr,
+        }) if accepted_owner => conductor_runtime::interpret_vendor_output(
+            packet,
+            &conductor_runtime::ProcessOutput {
+                exit_code,
+                stdout,
+                stderr,
+            },
+        )
+        .ok(),
+        _ => None,
+    }
 }

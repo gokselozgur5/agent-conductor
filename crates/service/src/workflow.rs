@@ -568,6 +568,7 @@ impl<C: Clock> PersistentControlService<C> {
         let spec = native_vendor_command(&plan.verifier, &packet, authentication)
             .map_err(|_| invalid("verifier adapter refused plan"))?;
         let (_sender, cancellation) = watch::channel(false);
+        let usage_invocation = Uuid::now_v7().to_string();
         let output = run_process(&spec, cancellation).await.map_err(|error| {
             invalid(match error {
                 conductor_runtime::ProcessError::Timeout => "verifier deadline elapsed",
@@ -575,6 +576,8 @@ impl<C: Clock> PersistentControlService<C> {
                 _ => "verifier execution failed",
             })
         })?;
+        self.record_vendor_usage(&packet, "reviewer", &usage_invocation, &output.stdout)
+            .await?;
         let candidate = interpret_vendor_output(&packet, &output)
             .map_err(|_| invalid("verifier protocol failed"))?;
         let decision: ReviewDecision = serde_json::from_str(&candidate.text)

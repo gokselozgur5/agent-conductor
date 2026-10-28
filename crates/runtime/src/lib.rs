@@ -39,7 +39,11 @@ mod vendor;
 pub use vendor::*;
 
 #[cfg(unix)]
+mod usage;
+#[cfg(unix)]
 mod vendor_output;
+#[cfg(unix)]
+pub use usage::{ReportedUsage, reported_usage};
 #[cfg(unix)]
 pub use vendor_output::*;
 

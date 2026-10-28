@@ -7,6 +7,7 @@ pub enum InventoryKind {
     Events,
     Subscriptions,
     Deliveries,
+    Usage,
 }
 #[derive(Debug, sqlx::FromRow)]
 pub struct InventoryRow {
@@ -24,6 +25,10 @@ impl Store {
         after: Option<&str>,
     ) -> Result<Vec<InventoryRow>, StoreError> {
         let (table, fields) = match kind {
+            InventoryKind::Usage => (
+                "(SELECT id,task_id,payload_json,occurred_at_ms FROM audit_events WHERE kind='vendor.usage_reported')",
+                "'id',id,'task_id',task_id,'observed_at_ms',occurred_at_ms,'invocation_id',json_extract(payload_json,'$.invocation_id'),'attempt_id',json_extract(payload_json,'$.attempt_id'),'lease_epoch',json_extract(payload_json,'$.lease_epoch'),'role',json_extract(payload_json,'$.role'),'agent_id',json_extract(payload_json,'$.agent_id'),'adapter',json_extract(payload_json,'$.adapter'),'packet_sha256',json_extract(payload_json,'$.packet_sha256'),'output_sha256',json_extract(payload_json,'$.output_sha256'),'report',json_extract(payload_json,'$.report')",
+            ),
             InventoryKind::Projects => (
                 "projects",
                 "'id',id,'canonical_path',canonical_path,'created_at_ms',created_at_ms",

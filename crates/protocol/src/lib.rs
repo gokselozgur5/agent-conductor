@@ -579,6 +579,7 @@ pub enum InventoryResource {
     Events,
     Subscriptions,
     Deliveries,
+    Usage,
 }
 
 /// A read-time domain lease observation, not OS process liveness or permission.

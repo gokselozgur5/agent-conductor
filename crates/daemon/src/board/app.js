@@ -423,10 +423,15 @@ async function loadInventory(after = null) {
     el('inventory-entries').replaceChildren(...data.entries.map(entry => {
       const card = text('article', '', 'task');
       card.append(text('h3', entry.id));
+      if (resource === 'usage') card.append(text('p', 'Adapter-reported metadata, not a bill or account total. Missing reports are unknown, not zero. Token categories are not summed.', 'hint'));
       const details = text('dl', '', 'details');
       for (const [name, value] of Object.entries(entry)) {
         if (name === 'id') continue;
-        details.append(text('dt', name.replaceAll('_', ' ')), text('dd', value === null ? '—' : String(value)));
+        if (value && typeof value === 'object') {
+          for (const [key, nested] of Object.entries(value)) {
+            details.append(text('dt', `${name} · ${key.replaceAll('_', ' ')}`), text('dd', nested === null ? 'Not reported' : typeof nested === 'object' ? JSON.stringify(nested) : String(nested)));
+          }
+        } else details.append(text('dt', name.replaceAll('_', ' ')), text('dd', value === null ? '—' : String(value)));
       }
       card.append(details);
       return card;

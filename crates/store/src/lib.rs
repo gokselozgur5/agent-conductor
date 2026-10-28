@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 mod inventory;
+mod usage;
 pub use inventory::{InventoryKind, InventoryRow};
 mod history;
 #[cfg(test)]

@@ -22,6 +22,7 @@ impl<C: Clock> PersistentControlService<C> {
             InventoryResource::Events => InventoryKind::Events,
             InventoryResource::Subscriptions => InventoryKind::Subscriptions,
             InventoryResource::Deliveries => InventoryKind::Deliveries,
+            InventoryResource::Usage => InventoryKind::Usage,
         };
         let mut rows = self
             .store
