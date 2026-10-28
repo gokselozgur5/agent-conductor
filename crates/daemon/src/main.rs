@@ -91,7 +91,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    if watches.is_some() {
+    if let Some(configs) = &watches {
+        service.configure_repository_observation(configs);
         service.set_watcher_status(conductor_protocol::WatcherStatus::Starting);
     }
     let (board_stop, board_task) = start_board(args.http, service.clone()).await;

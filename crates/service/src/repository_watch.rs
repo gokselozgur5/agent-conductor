@@ -26,6 +26,42 @@ pub struct RepositoryWatchState {
 #[derive(Default)]
 pub struct OwnedWatchState {
     cursor: String,
+    observations: BTreeMap<String, RepositoryWatchState>,
+    cycle: std::collections::BTreeSet<String>,
+}
+impl OwnedWatchState {
+    fn observation(&mut self, token: &str) -> Result<&mut RepositoryWatchState, StoreError> {
+        self.cycle.insert(token.into());
+        if self.cycle.len() > 256 {
+            return Err(invalid("owned watcher active execution capacity exceeded"));
+        }
+        if !self.observations.contains_key(token) && self.observations.len() == 256 {
+            let retired = self
+                .observations
+                .keys()
+                .find(|key| !self.cycle.contains(*key))
+                .cloned()
+                .ok_or_else(|| invalid("owned watcher cache capacity exceeded"))?;
+            self.observations.remove(&retired);
+        }
+        Ok(self
+            .observations
+            .entry(token.into())
+            .or_insert_with(|| RepositoryWatchState {
+                // Baseline was already recorded before release: first observed writes
+                // must debounce too, unlike an external repository's initial baseline.
+                last: Some(String::new()),
+                ..RepositoryWatchState::default()
+            }))
+    }
+    fn finish_page(&mut self, next: String) {
+        if next.is_empty() {
+            self.observations
+                .retain(|token, _| self.cycle.contains(token));
+            self.cycle.clear();
+        }
+        self.cursor = next;
+    }
 }
 impl RepositoryWatchState {
     fn ready(&mut self, fingerprint: String, now: std::time::Duration) -> bool {
@@ -49,6 +85,53 @@ impl RepositoryWatchState {
 }
 
 impl<C: Clock> PersistentControlService<C> {
+    /// Records the trusted host's configured observation scope before dispatch starts.
+    pub fn configure_repository_observation(&self, configs: &[RepositoryWatch]) {
+        if let Ok(mut projects) = self.observed_projects.write() {
+            *projects = configs
+                .iter()
+                .map(|config| config.project_id.clone())
+                .collect();
+        }
+    }
+
+    /// Flush the accepted fenced capture while the caller owns the lifecycle lock.
+    pub(super) async fn publish_final_owned_capture(
+        &self,
+        token: &str,
+        packet: &conductor_runtime::ResumePacket,
+        manifest: &conductor_runtime::SnapshotManifest,
+    ) -> Result<(), StoreError> {
+        let task = self
+            .store
+            .task(&packet.contract.task_id)
+            .await?
+            .ok_or_else(|| invalid("final observation task absent"))?;
+        let enabled = self
+            .observed_projects
+            .read()
+            .map_err(|_| invalid("observation scope unavailable"))?
+            .contains(&task.project_id);
+        if !enabled {
+            return Ok(());
+        }
+        let mut current = manifest.clone();
+        current.entries.retain(|entry| entry.sha256.is_some());
+        // Two bounded inventories can differ in at most 20,000 paths. Each
+        // transaction advances at most 256; unchanged captured bytes are reused.
+        for _ in 0..80 {
+            self.validate_runtime_owner(packet).await?;
+            if self
+                .publish_owned_scan(token, packet, current.clone(), false)
+                .await?
+                < 256
+            {
+                return Ok(());
+            }
+        }
+        Err(invalid("final observation exceeded bounded inventory"))
+    }
+
     /// Observes a configured repository and publishes one bounded batch atomically.
     /// Initial observation establishes a baseline; subsequent calls drain at most
     /// 256 net changes. Other changes remain different from the persisted baseline.
@@ -125,6 +208,7 @@ impl<C: Clock> PersistentControlService<C> {
         &self,
         project_id: &str,
         state: &mut OwnedWatchState,
+        elapsed: std::time::Duration,
     ) -> Result<usize, StoreError> {
         let mut count = 0;
         let records = self
@@ -170,6 +254,15 @@ impl<C: Clock> PersistentControlService<C> {
                 Err(conductor_runtime::SnapshotError::Changed) => continue,
                 Err(_) => return Err(invalid("owned observation refused")),
             };
+            let fingerprint = manifest
+                .sha256()
+                .map_err(|_| invalid("owned observation digest failed"))?;
+            if !state
+                .observation(&record.preparation.effect_token)?
+                .ready(fingerprint, elapsed)
+            {
+                continue;
+            }
             let _guard = self.mutations.lock().await;
             if self.validate_runtime_owner(&packet).await.is_err() {
                 continue;
@@ -181,11 +274,15 @@ impl<C: Clock> PersistentControlService<C> {
             if current.as_ref() != Some(&record) {
                 continue;
             }
-            count += self
+            let published = self
                 .publish_owned_scan(&record.preparation.effect_token, &packet, manifest, false)
                 .await?;
+            state
+                .observation(&record.preparation.effect_token)?
+                .published(published);
+            count += published;
         }
-        state.cursor = next;
+        state.finish_page(next);
         Ok(count)
     }
 
@@ -455,6 +552,48 @@ fn envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owned_debounce_waits_for_first_burst_and_bounds_retained_state() {
+        use std::time::Duration;
+        let mut state = OwnedWatchState::default();
+        assert!(
+            !state
+                .observation("worker")
+                .unwrap()
+                .ready("first".into(), Duration::ZERO)
+        );
+        assert!(
+            !state
+                .observation("worker")
+                .unwrap()
+                .ready("second".into(), Duration::from_millis(100))
+        );
+        assert!(
+            state
+                .observation("worker")
+                .unwrap()
+                .ready("second".into(), Duration::from_millis(850))
+        );
+        state.finish_page(String::new());
+        assert_eq!(state.observations.len(), 1);
+        state.finish_page(String::new());
+        assert!(
+            state.observations.is_empty(),
+            "finished executions must not accumulate"
+        );
+        for i in 0..256 {
+            state.observation(&format!("old-{i}")).unwrap();
+        }
+        assert!(state.observation("overflow").is_err());
+        state.finish_page(String::new());
+        for i in 0..256 {
+            state.observation(&format!("new-{i}")).unwrap();
+        }
+        assert_eq!(state.observations.len(), 256);
+        state.finish_page(String::new());
+        assert!(state.observations.keys().all(|key| key.starts_with("new-")));
+    }
+
     #[test]
     fn debounce_coalesces_bursts_but_bounds_continuous_change_and_drains_batches() {
         use std::time::Duration;

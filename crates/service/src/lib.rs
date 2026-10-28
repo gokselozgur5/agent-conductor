@@ -71,6 +71,7 @@ pub struct PersistentControlService<C = SystemClock> {
     clock: Arc<C>,
     mutations: Arc<Mutex<()>>,
     watcher_status: Arc<RwLock<WatcherStatus>>,
+    observed_projects: Arc<RwLock<std::collections::BTreeSet<String>>>,
 }
 
 impl<C: Clock> Clone for PersistentControlService<C> {
@@ -82,6 +83,7 @@ impl<C: Clock> Clone for PersistentControlService<C> {
             clock: Arc::clone(&self.clock),
             mutations: Arc::clone(&self.mutations),
             watcher_status: Arc::clone(&self.watcher_status),
+            observed_projects: Arc::clone(&self.observed_projects),
         }
     }
 }
@@ -124,6 +126,7 @@ impl<C: Clock> PersistentControlService<C> {
             clock: Arc::new(clock),
             mutations: Arc::new(Mutex::new(())),
             watcher_status: Arc::new(RwLock::new(WatcherStatus::Disabled)),
+            observed_projects: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
         };
         for lease in startup.recovery_pending {
             let Some(row) = service.store.task(&lease.task_id).await? else {
@@ -2468,13 +2471,14 @@ mod effect_tests {
         use agent_conductor_store::{EffectAudit, ExecutionState};
         use conductor_runtime::{AdapterKind, PacketAcknowledgement, RunnerEvent};
         use std::os::unix::fs::PermissionsExt;
-        for (valid, replace_packet, fail_publication, stopped) in [
-            (true, false, false, false),
-            (false, false, false, false),
-            (true, true, false, false),
-            (true, false, true, false),
-            (true, false, false, true),
-            (false, false, false, true),
+        for (valid, replace_packet, fail_publication, stopped, watch_final) in [
+            (true, false, false, false, true),
+            (true, false, false, false, false),
+            (false, false, false, false, false),
+            (true, true, false, false, false),
+            (true, false, true, false, false),
+            (true, false, false, true, false),
+            (false, false, false, true, false),
         ] {
             let (directory, store) = lifecycle_store().await;
             let service =
@@ -2561,9 +2565,14 @@ mod effect_tests {
                 .await
                 .expect("release");
             let project = store.task("task").await.unwrap().unwrap().project_id;
+            let mut owned_state = OwnedWatchState::default();
             assert_eq!(
                 service
-                    .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(10)
+                    )
                     .await
                     .unwrap(),
                 0
@@ -2584,14 +2593,33 @@ mod effect_tests {
             fs::write(workspace.join("observed.txt"), "private observed output").unwrap();
             assert_eq!(
                 service
-                    .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(10)
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(11)
+                    )
                     .await
                     .unwrap(),
                 1
             );
             assert_eq!(
                 service
-                    .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(11)
+                    )
                     .await
                     .unwrap(),
                 0
@@ -2616,11 +2644,44 @@ mod effect_tests {
             fs::remove_file(workspace.join("observed.txt")).unwrap();
             assert_eq!(
                 service
-                    .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(12)
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                service
+                    .poll_owned_workspaces(
+                        &project,
+                        &mut owned_state,
+                        std::time::Duration::from_secs(13)
+                    )
                     .await
                     .unwrap(),
                 1
             );
+            if valid && !replace_packet && !fail_publication && !stopped {
+                if watch_final {
+                    service.configure_repository_observation(&[RepositoryWatch {
+                        id: "terminal-watch".into(),
+                        project_id: project.clone(),
+                        source_agent_id: "worker".into(),
+                        root: workspace.clone(),
+                    }]);
+                }
+                // Simulate a final burst after the last periodic observation.
+                for index in 0..300 {
+                    fs::write(
+                        workspace.join(format!("terminal-{index:04}.txt")),
+                        "terminal bytes",
+                    )
+                    .unwrap();
+                }
+            }
             // Force a failed renewal while the matching terminal frame is still
             // in transit. Previously this discarded a successful native result.
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2654,7 +2715,11 @@ mod effect_tests {
                 fs::write(workspace.join("expired.txt"), "unowned after lease expiry").unwrap();
                 assert_eq!(
                     service
-                        .poll_owned_workspaces(&project, &mut OwnedWatchState::default())
+                        .poll_owned_workspaces(
+                            &project,
+                            &mut owned_state,
+                            std::time::Duration::from_secs(14)
+                        )
                         .await
                         .unwrap(),
                     0
@@ -2754,7 +2819,26 @@ mod effect_tests {
                     )
                     .await
                     .expect("capture and bind");
-                assert_eq!(captured.entries.len(), 1);
+                assert_eq!(captured.entries.len(), 301);
+                let mut database = SqliteConnection::connect(&format!(
+                    "sqlite://{}",
+                    directory.path().join("state.sqlite3").display()
+                ))
+                .await
+                .unwrap();
+                let deliveries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event_deliveries d JOIN semantic_events e ON e.id=d.event_id WHERE e.path_scope LIKE 'terminal-%' AND e.attempt_id='attempt' AND e.lease_epoch=1").fetch_one(&mut database).await.unwrap();
+                assert_eq!(deliveries, if watch_final { 300 } else { 0 });
+                assert_eq!(
+                    service
+                        .poll_owned_workspaces(
+                            &project,
+                            &mut owned_state,
+                            std::time::Duration::from_secs(14)
+                        )
+                        .await
+                        .unwrap(),
+                    0
+                );
                 let row = store.task("task").await.unwrap().unwrap();
                 let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
                 assert_eq!(task.state, TaskState::Verifying);

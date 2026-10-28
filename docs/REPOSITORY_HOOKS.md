@@ -1,7 +1,9 @@
 # Repository observation
 
 The opt-in daemon watcher turns repository observations into the existing durable
-semantic-event/delivery system. It never directly launches a model. Owned-attempt attribution and automatic wake are still pending.
+semantic-event/delivery system. It never directly launches a model. Native private
+workspaces carry authoritative attempt identity; explicitly approved subscribed
+plans can be admitted by the separate dispatcher (see WORKFLOW_DISPATCH.md).
 
 Register the project and a dedicated read-only observer agent through the CLI.
 Create subscriptions with `file.*` and optional project/path filters; use
@@ -126,8 +128,8 @@ Fake executions are excluded; missing baselines fail closed.
 
 The full workspace suite and strict lint pass. The strengthened lifecycle test
 separately verifies creation/deletion, repeat-scan deduplication, actual delivery
-identity and raw-content exclusion. Real daemon acceptance, owned-tree debounce,
-terminal-scan coverage and expanded stale-owner negatives remain pending.
+identity and raw-content exclusion. Real daemon delivery acceptance is recorded
+below; additional stale-owner and interruption cases remain part of full acceptance.
 Expired ownership is tested to publish no event. Started executions are selected
 in ordered pages of at most 16 per configured project per round, with a wrapping
 cursor so a busy early execution does not permanently hide later records. FR-7 and FR-8 are not complete.
@@ -141,3 +143,31 @@ remained unchanged. Evidence: private `owned-workspace-v2/receipt.json`.
 The first v1 probe refused a changed Claude symlink before model launch; v2 used
 the previously accepted retained2.1.311 binary. This proves delivery to the
 consumer queue, not automatic adapter wake or consumption acknowledgment.
+
+
+## Coalescing and final captured changes
+
+Private-workspace scans now use the same750ms quiet /5s maximum observed-burst
+eligibility as external observation, including their first changed observation.
+The authoritative baseline still precedes worker release. A configured project's
+ordered execution pages retain at most256active debounce entries per scan cycle;
+finished entries are removed, cache replacement remains bounded, and exceeding
+active capacity fails observation explicitly. Timing excludes scan/database costs.
+
+An accepted normally exited file-only writer already supplies a fenced source
+capture for verification. For configured projects, finalization now drains that
+capture's remaining differences before entering verification, using existing
+atomic baseline/event transactions of at most256events each. The lifecycle lock
+and per-batch ownership revalidation prevent stale-lease publication. The bounded
+capture is reused; there is no extra read of a possibly changing live tree. A
+short-lived writer's final changes therefore do not depend on a later poll.
+Observation-disabled projects do not acquire this terminal event publication.
+
+The controlled lifecycle regression produces300files after its last periodic
+scan, verifies300identity-bound deliveries through final capture, and checks the
+same operation publishes none when observation is disabled. It also verifies
+repeat polling produces no duplicates. This is a service/wrapper fixture, not a
+new native model run. Abnormal termination, revoked ownership and writes that
+appear/disappear between sampled captures remain outside the normal-exit coverage;
+this does not claim a complete filesystem audit or verified task acceptance from
+a file event. Later verification failure can coexist with valid change events.

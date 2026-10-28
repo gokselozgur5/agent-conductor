@@ -71,7 +71,11 @@ pub async fn serve(
             .collect::<BTreeSet<_>>()
         {
             if service
-                .poll_owned_workspaces(project, owned_states.entry(project.clone()).or_default())
+                .poll_owned_workspaces(
+                    project,
+                    owned_states.entry(project.clone()).or_default(),
+                    started.elapsed(),
+                )
                 .await
                 .is_err()
             {
