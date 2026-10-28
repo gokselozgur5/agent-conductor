@@ -383,3 +383,50 @@ async fn valid_grant_extends_absolute_lease_before_it_expires() {
     ));
     assert!(exited(&mut child).await.success());
 }
+
+#[tokio::test]
+async fn exit_cancel_race_never_claims_a_fence_for_a_surviving_descendant() {
+    for delay in [0, 1, 2, 5, 10] {
+        let directory = tempfile::tempdir().expect("directory");
+        let input = launch(
+            directory.path(),
+            "( /bin/sleep 0.2; printf escaped > escaped ) >/dev/null 2>&1 & exit 0",
+            1000,
+        );
+        let (mut child, mut writer, mut reader) = wrapper(&input).await;
+        assert!(matches!(
+            event(&mut reader).await,
+            RunnerEvent::Ready { .. }
+        ));
+        send(
+            &mut writer,
+            &RunnerControl::Release {
+                packet_sha256: input.packet.sha256().expect("hash"),
+                continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock")
+                    + 1000,
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        // A completed wrapper may already have closed its input; that is an
+        // observation to inspect, not a reason to respawn it.
+        let _ = writer.write_all(b"{\"type\":\"cancel\"}\n").await;
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), reader.read_until(b'\n', &mut bytes))
+            .await
+            .expect("bounded observation")
+            .expect("read");
+        let status = exited(&mut child).await;
+        let observation = serde_json::from_slice::<RunnerEvent>(&bytes).ok();
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        match observation {
+            Some(RunnerEvent::Stopped { .. }) => assert!(
+                !directory.path().join("escaped").exists(),
+                "a stop observation must not hide a surviving controlled descendant"
+            ),
+            Some(RunnerEvent::Finished { .. }) => {}
+            None => assert!(!status.success(), "uncertain fencing must fail closed"),
+            Some(RunnerEvent::Ready { .. }) => panic!("duplicate ready"),
+        }
+    }
+}

@@ -153,8 +153,17 @@ async fn serve() -> Result<(), ()> {
     };
     let _ = cancel.send(true);
     match process.await.map_err(|_| ())? {
-        Ok(_)
-        | Err(ProcessError::Cancelled | ProcessError::Timeout | ProcessError::OutputLimit) => {}
+        // Cancellation can race a normal exit. Preserve the weaker observation:
+        // normal exit did not fence descendants and must never become Stopped.
+        Ok(output) => {
+            return emit(&RunnerEvent::Finished {
+                exit_code: output.exit_code,
+                stdout: output.stdout,
+                stderr: output.stderr,
+            })
+            .await;
+        }
+        Err(ProcessError::Cancelled | ProcessError::Timeout | ProcessError::OutputLimit) => {}
         Err(_) => return Err(()),
     }
     emit(&RunnerEvent::Stopped {
