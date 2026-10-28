@@ -79,6 +79,7 @@ async fn no_worker_side_effect_before_matching_recorded_release() {
     send(
         &mut writer,
         &RunnerControl::Release {
+            continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock") + 5000,
             packet_sha256: acknowledgement.packet_sha256,
         },
     )
@@ -115,6 +116,8 @@ async fn wrong_release_or_parent_loss_before_release_never_launches_worker() {
             send(
                 &mut writer,
                 &RunnerControl::Release {
+                    continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock")
+                        + 5000,
                     packet_sha256: "wrong".into(),
                 },
             )
@@ -145,6 +148,8 @@ async fn parent_loss_and_missed_renewal_stop_the_worker_group() {
         send(
             &mut writer,
             &RunnerControl::Release {
+                continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock")
+                    + 5000,
                 packet_sha256: hash,
             },
         )
@@ -186,6 +191,7 @@ async fn timely_renewals_keep_attempt_alive_but_wrong_hash_stops_it() {
     send(
         &mut writer,
         &RunnerControl::Release {
+            continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock") + 5000,
             packet_sha256: hash.clone(),
         },
     )
@@ -195,6 +201,8 @@ async fn timely_renewals_keep_attempt_alive_but_wrong_hash_stops_it() {
         send(
             &mut writer,
             &RunnerControl::Renew {
+                continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock")
+                    + 5000,
                 packet_sha256: hash.clone(),
             },
         )
@@ -204,6 +212,7 @@ async fn timely_renewals_keep_attempt_alive_but_wrong_hash_stops_it() {
     send(
         &mut writer,
         &RunnerControl::Renew {
+            continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock") + 5000,
             packet_sha256: "wrong".into(),
         },
     )
@@ -228,6 +237,7 @@ async fn spawn_failure_is_not_reported_as_successfully_stopped() {
     send(
         &mut writer,
         &RunnerControl::Release {
+            continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock") + 5000,
             packet_sha256: input.packet.sha256().expect("hash"),
         },
     )
@@ -250,7 +260,7 @@ async fn controller_persists_ack_before_release_and_refusal_has_no_side_effect()
             |_| async {
                 assert!(!path.exists(), "persistence precedes worker execution");
                 if accept {
-                    Ok(())
+                    Ok(conductor_runtime::continuous_millis().expect("clock") + 1000)
                 } else {
                     Err(RunnerConnectionError::Persistence)
                 }
@@ -274,4 +284,102 @@ async fn controller_persists_ack_before_release_and_refusal_has_no_side_effect()
             assert!(!path.exists());
         }
     }
+}
+
+#[tokio::test]
+async fn expired_absolute_release_never_starts_worker() {
+    let directory = tempfile::tempdir().expect("directory");
+    let input = launch(directory.path(), "printf bad > changed", 1000);
+    let (mut child, mut writer, mut reader) = wrapper(&input).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Ready { .. }
+    ));
+    send(
+        &mut writer,
+        &RunnerControl::Release {
+            packet_sha256: input.packet.sha256().expect("hash"),
+            continuous_deadline_ms: conductor_runtime::continuous_millis()
+                .expect("clock")
+                .saturating_sub(1),
+        },
+    )
+    .await;
+    assert!(!exited(&mut child).await.success());
+    assert!(!directory.path().join("changed").exists());
+}
+
+#[tokio::test]
+async fn absolute_lease_expires_even_when_heartbeats_are_fresh() {
+    let directory = tempfile::tempdir().expect("directory");
+    let input = launch(directory.path(), "/bin/sleep 1; printf bad > changed", 1000);
+    let hash = input.packet.sha256().expect("hash");
+    let (mut child, mut writer, mut reader) = wrapper(&input).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Ready { .. }
+    ));
+    let deadline = conductor_runtime::continuous_millis().expect("clock") + 250;
+    send(
+        &mut writer,
+        &RunnerControl::Release {
+            packet_sha256: hash.clone(),
+            continuous_deadline_ms: deadline,
+        },
+    )
+    .await;
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        send(
+            &mut writer,
+            &RunnerControl::Renew {
+                packet_sha256: hash.clone(),
+                continuous_deadline_ms: deadline,
+            },
+        )
+        .await;
+    }
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Stopped { .. }
+    ));
+    assert!(exited(&mut child).await.success());
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(!directory.path().join("changed").exists());
+}
+
+#[tokio::test]
+async fn valid_grant_extends_absolute_lease_before_it_expires() {
+    let directory = tempfile::tempdir().expect("directory");
+    let input = launch(directory.path(), "/bin/sleep 5", 1000);
+    let hash = input.packet.sha256().expect("hash");
+    let (mut child, mut writer, mut reader) = wrapper(&input).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Ready { .. }
+    ));
+    send(
+        &mut writer,
+        &RunnerControl::Release {
+            packet_sha256: hash.clone(),
+            continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock") + 300,
+        },
+    )
+    .await;
+    send(
+        &mut writer,
+        &RunnerControl::Renew {
+            packet_sha256: hash,
+            continuous_deadline_ms: conductor_runtime::continuous_millis().expect("clock") + 1500,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    assert!(child.try_wait().expect("poll").is_none());
+    send(&mut writer, &RunnerControl::Cancel).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Stopped { .. }
+    ));
+    assert!(exited(&mut child).await.success());
 }

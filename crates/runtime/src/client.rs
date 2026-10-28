@@ -36,7 +36,8 @@ impl RunnerConnection {
     /// Launches a wrapper, validates its acknowledgement, and records it through
     /// the controller callback before releasing the worker. The caller must have
     /// obtained a fresh durable preparation; replay must never call this method.
-    /// The callback must recheck live lease/epoch ownership atomically.
+    /// The callback must recheck live lease/epoch ownership atomically and return
+    /// its absolute expiry in the host suspend-aware continuous clock.
     /// # Errors
     /// Refuses failed transport, invalid acknowledgement or failed persistence.
     pub async fn launch<F, Fut>(
@@ -46,7 +47,7 @@ impl RunnerConnection {
     ) -> Result<Self, RunnerConnectionError>
     where
         F: FnOnce(PacketAcknowledgement) -> Fut,
-        Fut: Future<Output = Result<(), RunnerConnectionError>>,
+        Fut: Future<Output = Result<u64, RunnerConnectionError>>,
     {
         launch
             .packet
@@ -92,15 +93,21 @@ impl RunnerConnection {
             .packet
             .verify_ack(&acknowledgement)
             .map_err(|_| RunnerConnectionError::Protocol)?;
-        tokio::time::timeout(
+        let continuous_deadline_ms = tokio::time::timeout(
             Duration::from_secs(3),
             record_acknowledgement(acknowledgement),
         )
         .await
         .map_err(|_| RunnerConnectionError::Persistence)??;
+        if crate::continuous_millis().map_err(|_| RunnerConnectionError::Protocol)?
+            >= continuous_deadline_ms
+        {
+            return Err(RunnerConnectionError::Persistence);
+        }
         connection
             .send(&RunnerControl::Release {
                 packet_sha256: connection.packet_sha256.clone(),
+                continuous_deadline_ms,
             })
             .await?;
         Ok(connection)
@@ -109,9 +116,13 @@ impl RunnerConnection {
     /// Sends a renewal only after the controller has checked current ownership.
     /// # Errors
     /// Fails when the wrapper is unreachable or cannot accept bounded input.
-    pub async fn renew(&mut self) -> Result<(), RunnerConnectionError> {
+    pub async fn renew(
+        &mut self,
+        continuous_deadline_ms: u64,
+    ) -> Result<(), RunnerConnectionError> {
         self.send(&RunnerControl::Renew {
             packet_sha256: self.packet_sha256.clone(),
+            continuous_deadline_ms,
         })
         .await
     }

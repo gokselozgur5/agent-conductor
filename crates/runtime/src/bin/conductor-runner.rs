@@ -87,11 +87,17 @@ async fn serve() -> Result<(), ()> {
     let release = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut input, 1024))
         .await
         .map_err(|_| ())??;
-    if !matches!(serde_json::from_slice::<RunnerControl>(&release), Ok(RunnerControl::Release { packet_sha256 }) if packet_sha256 == packet_hash)
-    {
+    let mut lease_deadline = match serde_json::from_slice::<RunnerControl>(&release) {
+        Ok(RunnerControl::Release {
+            packet_sha256,
+            continuous_deadline_ms,
+        }) if packet_sha256 == packet_hash => continuous_deadline_ms,
+        _ => return Err(()),
+    };
+    let started = continuous_millis().map_err(|_| ())?;
+    if started >= lease_deadline {
         return Err(());
     }
-    let started = continuous_millis().map_err(|_| ())?;
     let mut last_renewal = started;
     let max_runtime_ms = launch.packet.contract.max_runtime_ms;
     let specification = ProcessSpec {
@@ -124,16 +130,17 @@ async fn serve() -> Result<(), ()> {
                 match continuous_millis() {
                     Ok(now) if now >= last_renewal && now >= started
                         && now - last_renewal < launch.heartbeat_timeout_ms
-                        && now - started < max_runtime_ms => {},
+                        && now - started < max_runtime_ms && now < lease_deadline => {},
                     _ => break "lease_or_runtime_expired",
                 }
             },
             message = &mut frame => {
                 match message.and_then(|bytes| serde_json::from_slice::<RunnerControl>(&bytes).map_err(|_| ())) {
-                    Ok(RunnerControl::Renew { packet_sha256 }) if packet_sha256 == packet_hash => {
+                    Ok(RunnerControl::Renew { packet_sha256, continuous_deadline_ms }) if packet_sha256 == packet_hash => {
                         let Ok(now) = continuous_millis() else { break "clock_failed"; };
                         // A renewal received after expiry must not revive the worker.
-                        if now < last_renewal || now - last_renewal >= launch.heartbeat_timeout_ms { break "late_renewal"; }
+                        if now < last_renewal || now - last_renewal >= launch.heartbeat_timeout_ms || now >= lease_deadline || now >= continuous_deadline_ms || now - started >= max_runtime_ms { break "late_renewal"; }
+                        lease_deadline = continuous_deadline_ms;
                         last_renewal = now;
                     },
                     Ok(RunnerControl::Cancel) => break "cancelled",

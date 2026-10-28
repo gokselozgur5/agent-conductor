@@ -94,11 +94,12 @@ impl<C: Clock> PersistentControlService<C> {
                 .await
                 .map_err(|_| RunnerConnectionError::Persistence)?;
             // A slow database acknowledgement must not revive an expired lease.
-            self.validate_runtime_owner(&launch.packet)
+            let deadline = self
+                .validate_runtime_owner(&launch.packet)
                 .await
                 .map_err(|_| RunnerConnectionError::Persistence)?;
             acknowledged = Some(result);
-            Ok(())
+            Ok(deadline)
         })
         .await
         .map_err(|_| runtime_error("wrapper release failed; reconcile durable execution"))?;
@@ -132,9 +133,9 @@ impl<C: Clock> PersistentControlService<C> {
         }
         let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
             .map_err(|_| runtime_error("invalid stored packet"))?;
-        self.validate_runtime_owner(&packet).await?;
+        let deadline = self.validate_runtime_owner(&packet).await?;
         connection
-            .renew()
+            .renew(deadline)
             .await
             .map_err(|_| runtime_error("wrapper renewal failed"))
     }
@@ -142,7 +143,7 @@ impl<C: Clock> PersistentControlService<C> {
     pub(super) async fn validate_runtime_owner(
         &self,
         packet: &ResumePacket,
-    ) -> Result<(), StoreError> {
+    ) -> Result<u64, StoreError> {
         packet
             .validate()
             .map_err(|_| runtime_error("invalid runtime contract"))?;
@@ -157,6 +158,10 @@ impl<C: Clock> PersistentControlService<C> {
             .attempt
             .as_ref()
             .ok_or_else(|| runtime_error("missing attempt"))?;
+        // Sample the host clock first: converting remaining service-clock time
+        // this way cannot extend the grant by time spent reading the service clock.
+        let host_now = conductor_runtime::continuous_millis()
+            .map_err(|_| runtime_error("host clock unavailable"))?;
         let now = self.clock.read(self.boot_generation);
         if !matches!(task.state, TaskState::Claimed | TaskState::Running)
             || attempt.id.0 != packet.contract.attempt_id
@@ -173,7 +178,15 @@ impl<C: Clock> PersistentControlService<C> {
         {
             return Err(runtime_error("runtime attempt or lease is not current"));
         }
-        Ok(())
+        let remaining = attempt
+            .lease
+            .worker_deadline_monotonic_ms
+            .min(attempt.lease.deadline_monotonic_ms)
+            .checked_sub(now.monotonic_ms)
+            .ok_or_else(|| runtime_error("expired lease"))?;
+        host_now
+            .checked_add(remaining)
+            .ok_or_else(|| runtime_error("deadline overflow"))
     }
 }
 fn runtime_error(reason: &str) -> StoreError {

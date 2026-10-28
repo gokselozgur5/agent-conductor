@@ -17,8 +17,14 @@ pub struct RunnerLaunch {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunnerControl {
-    Release { packet_sha256: String },
-    Renew { packet_sha256: String },
+    Release {
+        packet_sha256: String,
+        continuous_deadline_ms: u64,
+    },
+    Renew {
+        packet_sha256: String,
+        continuous_deadline_ms: u64,
+    },
     Cancel,
 }
 
