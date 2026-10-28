@@ -154,3 +154,7 @@ receipts; that final context-preservation adjustment is source-inspected and
 covered by workspace checks, not a separate native run. Dispatch now exposes
 only allowlisted fixed verifier failure reasons; arbitrary error/vendor text
 remains hidden. The board wait label has not yet received a new browser acceptance.
+
+Event routing uses literal, case-sensitive prefixes and rechecks current filters
+before delivery leasing or workflow wake. See [EVENT_ROUTING.md](EVENT_ROUTING.md)
+for subscription updates and the in-flight acknowledgement boundary.

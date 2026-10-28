@@ -813,3 +813,195 @@ async fn dependency_wait_does_not_consume_wake_and_late_failure_rolls_back_both(
             .is_some()
     );
 }
+
+#[tokio::test]
+async fn subscription_prefixes_are_literal_and_case_sensitive() {
+    let (_directory, store) = store_with_agents(&["source", "consumer"]).await;
+    for (index, topic_filter, topic, path_prefix, path, expected) in [
+        (
+            0,
+            "task.*",
+            "task.changed",
+            "/workspace/a_b/",
+            "/workspace/axb/file",
+            0,
+        ),
+        (
+            1,
+            "task.*",
+            "task.changed",
+            "/workspace/100%/",
+            "/workspace/100other/file",
+            0,
+        ),
+        (
+            2,
+            "task.*",
+            "task.changed",
+            "/workspace/Src/",
+            "/workspace/src/file",
+            0,
+        ),
+        (
+            3,
+            "task_.*",
+            "taskX.changed",
+            "/workspace",
+            "/workspace/file",
+            0,
+        ),
+        (
+            4,
+            "task%.*",
+            "taskanything.changed",
+            "/workspace",
+            "/workspace/file",
+            0,
+        ),
+        (
+            5,
+            "Task.*",
+            "task.changed",
+            "/workspace",
+            "/workspace/file",
+            0,
+        ),
+        (
+            6,
+            "task_.*",
+            "task_.changed",
+            "/workspace/a_b/",
+            "/workspace/a_b/file",
+            1,
+        ),
+        (
+            7,
+            "task%.*",
+            "task%.changed",
+            "/workspace/100%/",
+            "/workspace/100%/file",
+            1,
+        ),
+        (
+            8,
+            "Task.*",
+            "Task.changed",
+            "/workspace/Src/",
+            "/workspace/Src/file",
+            1,
+        ),
+    ] {
+        let mut sub = subscription("literal", "consumer");
+        sub.topic_filter = topic_filter.into();
+        sub.path_prefix = Some(path_prefix.into());
+        store.upsert_event_subscription(&sub).await.unwrap();
+        let mut input = event(&format!("literal-{index}"), "source", 0, None);
+        input.topic = topic.into();
+        input.path_scope = Some(path.into());
+        store
+            .publish_event(&input, &EventLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.event_delivery_count(&input.id).await.unwrap(),
+            expected,
+            "filter={topic_filter:?} prefix={path_prefix:?} topic={topic:?} path={path:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn changed_subscription_cannot_lease_old_ineligible_delivery() {
+    let (_directory, store) = store_with_agents(&["source", "consumer"]).await;
+    let mut sub = subscription("scope", "consumer");
+    store.upsert_event_subscription(&sub).await.unwrap();
+    store
+        .publish_event(
+            &event("old-scope", "source", 0, None),
+            &EventLimits::default(),
+        )
+        .await
+        .unwrap();
+    sub.path_prefix = Some("/workspace/selected".into());
+    store.upsert_event_subscription(&sub).await.unwrap();
+    assert!(
+        store
+            .claim_event_delivery("consumer", 100, &EventLimits::default())
+            .await
+            .unwrap()
+            .is_none(),
+        "changed subscription leased an out-of-scope event"
+    );
+    let mut eligible = event("selected", "source", 0, None);
+    eligible.path_scope = Some("/workspace/selected/file".into());
+    store
+        .publish_event(&eligible, &EventLimits::default())
+        .await
+        .unwrap();
+    let delivery = store
+        .claim_event_delivery("consumer", 100, &EventLimits::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivery.event.id, "selected");
+    // An already leased delivery keeps its original acknowledgement contract.
+    sub.path_prefix = Some("/workspace/different".into());
+    store.upsert_event_subscription(&sub).await.unwrap();
+    store
+        .acknowledge_event_with_state(
+            &delivery.delivery_id,
+            "consumer",
+            &delivery.claim_token,
+            &ConsumerStateEffect {
+                namespace: "routing".into(),
+                key: "selected".into(),
+                expected_version: None,
+                value_json: "{}".into(),
+            },
+            101,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn wake_rechecks_current_subscription_before_consuming_delivery() {
+    let (_directory, store) = store_with_agents(&["source", "next:worker"]).await;
+    let boot = store.start_runtime(1).await.unwrap().boot_generation;
+    let mut sub = subscription("wake", "next:worker");
+    store.upsert_event_subscription(&sub).await.unwrap();
+    store
+        .publish_event(
+            &event("before-narrowing", "source", 0, None),
+            &EventLimits::default(),
+        )
+        .await
+        .unwrap();
+    sub.path_prefix = Some("/workspace/selected".into());
+    store.upsert_event_subscription(&sub).await.unwrap();
+    store
+        .enqueue_workflow("next", r#"{"wake_subscription":"wake"}"#, 2)
+        .await
+        .unwrap();
+    assert!(
+        store.claim_workflow(boot, 100).await.unwrap().is_none(),
+        "wake consumed a delivery outside the current filter"
+    );
+    assert!(store.workflow_trigger("next").await.unwrap().is_none());
+    let mut eligible = event("after-narrowing", "source", 0, None);
+    eligible.path_scope = Some("/workspace/selected/file".into());
+    store
+        .publish_event(&eligible, &EventLimits::default())
+        .await
+        .unwrap();
+    assert!(store.claim_workflow(boot, 100).await.unwrap().is_some());
+    let trigger: serde_json::Value =
+        serde_json::from_str(&store.workflow_trigger("next").await.unwrap().unwrap()).unwrap();
+    assert_eq!(trigger["id"], "after-narrowing");
+    let old_status: String =
+        sqlx::query_scalar("SELECT status FROM event_deliveries WHERE event_id='before-narrowing'")
+            .fetch_one(store.readers())
+            .await
+            .unwrap();
+    assert_eq!(old_status, "pending");
+}

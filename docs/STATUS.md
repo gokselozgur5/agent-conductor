@@ -64,6 +64,11 @@ into native plans without adding agent filesystem capabilities. See
 Retained nonterminal workspaces now publish explicitly external observations after
 ownership loss, without granting the former worker a lease or changing recovery
 acceptance. See [RETAINED_OBSERVATION.md](RETAINED_OBSERVATION.md).
+
+Event routing uses literal, case-sensitive prefixes and rechecks current filters
+before delivery leasing or workflow wake. See [EVENT_ROUTING.md](EVENT_ROUTING.md)
+for subscription updates and the in-flight acknowledgement boundary.
+
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, abnormal ownership recovery,
 host protocol/Thor/Linux isolation,

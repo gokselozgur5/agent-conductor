@@ -238,3 +238,7 @@ lease or causal claim; ordinary `file.*` subscriptions remain separate. See
 [RETAINED_OBSERVATION.md](RETAINED_OBSERVATION.md) for current boundaries, source
 validation and replay behavior. Scoped outer document discovery is documented in
 [SCOPED_ADVISORY.md](SCOPED_ADVISORY.md); earlier sections preserve historical gates.
+
+Event routing uses literal, case-sensitive prefixes and rechecks current filters
+before delivery leasing or workflow wake. See [EVENT_ROUTING.md](EVENT_ROUTING.md)
+for subscription updates and the in-flight acknowledgement boundary.
