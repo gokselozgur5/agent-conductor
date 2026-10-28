@@ -43,6 +43,7 @@ pub enum CommandKind {
         lease_duration_ms: u64,
         worker_margin_ms: u64,
     },
+    RequeueExpired,
     Pause,
     Block {
         blocker: Blocker,

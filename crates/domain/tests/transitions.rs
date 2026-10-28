@@ -358,6 +358,120 @@ fn recovery_requires_a_new_generation_and_cannot_be_rearmed() {
 }
 
 #[test]
+fn active_lease_requeues_only_after_deadline_and_grace() {
+    let task = verifying_task();
+    let requeue = command(
+        &task,
+        actor("system", ActorRole::System),
+        CommandKind::RequeueExpired,
+    );
+
+    assert!(matches!(
+        apply(&task, &requeue, clock(1_259)),
+        Err(Rejection::InvalidLease(_))
+    ));
+    let outcome = apply(&task, &requeue, clock(1_260)).unwrap();
+    assert_eq!(outcome.task.state, TaskState::Ready);
+    assert_eq!(outcome.task.version, task.version + 1);
+    assert_eq!(outcome.transition.from, TaskState::Verifying);
+    assert_eq!(outcome.transition.to, TaskState::Ready);
+    assert_eq!(outcome.task.verification, None);
+    assert_eq!(
+        outcome.task.attempt.as_ref().unwrap().lease.status,
+        LeaseStatus::Ended
+    );
+    assert!(matches!(
+        apply(&outcome.task, &requeue, clock(1_260)),
+        Err(Rejection::VersionConflict { .. })
+    ));
+}
+
+#[test]
+fn recovery_pending_lease_uses_its_new_deadline_and_grace() {
+    let task = running_task();
+    let recovering = apply(
+        &task,
+        &command(
+            &task,
+            actor("system", ActorRole::System),
+            CommandKind::EnterRecovery,
+        ),
+        clock_on_boot(8, 5),
+    )
+    .unwrap()
+    .task;
+    let requeue = command(
+        &recovering,
+        actor("system", ActorRole::System),
+        CommandKind::RequeueExpired,
+    );
+
+    assert!(matches!(
+        apply(&recovering, &requeue, clock_on_boot(8, 504)),
+        Err(Rejection::InvalidLease(_))
+    ));
+    let requeued = apply(&recovering, &requeue, clock_on_boot(8, 505))
+        .unwrap()
+        .task;
+    assert_eq!(requeued.state, TaskState::Ready);
+    assert_eq!(
+        requeued.attempt.as_ref().unwrap().lease.status,
+        LeaseStatus::Ended
+    );
+}
+
+#[test]
+fn requeue_preserves_attempt_but_new_claim_fences_the_old_worker() {
+    let task = running_task();
+    let old_attempt = task.attempt.as_ref().unwrap().id.clone();
+    let old_epoch = task.last_lease_epoch;
+    let requeued = apply(
+        &task,
+        &command(
+            &task,
+            actor("system", ActorRole::System),
+            CommandKind::RequeueExpired,
+        ),
+        clock(1_260),
+    )
+    .unwrap()
+    .task;
+    assert_eq!(requeued.attempt.as_ref().unwrap().id, old_attempt);
+
+    let claimed = apply(
+        &requeued,
+        &command(
+            &requeued,
+            actor("worker-2", ActorRole::Worker),
+            CommandKind::Claim {
+                attempt_id: AttemptId::from("attempt-2"),
+                worker: ActorId::from("worker-2"),
+                lease_duration_ms: LEASE_MS,
+                worker_margin_ms: MARGIN_MS,
+                recovery_grace_ms: 250,
+            },
+        ),
+        clock(1_270),
+    )
+    .unwrap()
+    .task;
+    assert_eq!(claimed.last_lease_epoch, old_epoch + 1);
+
+    let stale_start = command(
+        &claimed,
+        actor("worker", ActorRole::Worker),
+        CommandKind::Start {
+            attempt_id: old_attempt,
+            lease_epoch: old_epoch,
+        },
+    );
+    assert!(matches!(
+        apply(&claimed, &stale_start, clock(1_280)),
+        Err(Rejection::InvalidLease(_))
+    ));
+}
+
+#[test]
 fn pause_and_block_end_the_lease_and_resume_requires_a_new_epoch() {
     for kind in [
         CommandKind::Pause,

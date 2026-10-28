@@ -199,6 +199,39 @@ pub fn apply(task: &Task, command: &Command, clock: ClockReading) -> Result<Outc
             recovered.lease.remaining_at_last_heartbeat_ms = *lease_duration_ms;
             recovered.lease.status = LeaseStatus::Active;
         }
+        CommandKind::RequeueExpired => {
+            require_role(command, &[ActorRole::System])?;
+            require_state(
+                task,
+                command,
+                &[TaskState::Claimed, TaskState::Running, TaskState::Verifying],
+            )?;
+            let attempt = task
+                .attempt
+                .as_ref()
+                .ok_or(Rejection::InvalidLease("task has no active attempt"))?;
+            if attempt.lease.status == LeaseStatus::Ended {
+                return Err(Rejection::InvalidLease("lease has already ended"));
+            }
+            if attempt.lease.boot_generation != clock.boot_generation {
+                return Err(Rejection::InvalidLease(
+                    "lease deadline belongs to another boot generation",
+                ));
+            }
+            let requeue_at = attempt
+                .lease
+                .deadline_monotonic_ms
+                .checked_add(attempt.lease.recovery_grace_ms)
+                .ok_or(Rejection::InvalidLease("lease grace deadline overflow"))?;
+            if clock.monotonic_ms < requeue_at {
+                return Err(Rejection::InvalidLease(
+                    "lease deadline and recovery grace have not elapsed",
+                ));
+            }
+            end_lease(&mut next);
+            next.state = TaskState::Ready;
+            next.verification = None;
+        }
         CommandKind::Pause => {
             require_role(command, &[ActorRole::Operator, ActorRole::System])?;
             require_state(
@@ -582,6 +615,7 @@ const fn command_name(kind: &CommandKind) -> &'static str {
         CommandKind::Heartbeat { .. } => "heartbeat",
         CommandKind::EnterRecovery => "enter_recovery",
         CommandKind::RecoverHeartbeat { .. } => "recover_heartbeat",
+        CommandKind::RequeueExpired => "requeue_expired",
         CommandKind::Pause => "pause",
         CommandKind::Block { .. } => "block",
         CommandKind::Resume => "resume",
