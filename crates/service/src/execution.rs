@@ -202,6 +202,13 @@ impl<C: Clock> PersistentControlService<C> {
                 event = connection.event() => break event.ok(),
                 _ = timer.tick() => {
                     if self.renew_controlled_execution(token,wrapper_identity,&mut connection).await.is_err() {
+                        // A normally exiting wrapper may close its input before
+                        // its terminal frame is consumed. Transport failure is
+                        // not itself evidence that task ownership was revoked.
+                        if self.validate_runtime_owner(packet).await.is_ok() {
+                            break tokio::time::timeout(std::time::Duration::from_secs(1), connection.event())
+                                .await.ok().and_then(Result::ok);
+                        }
                         let _ = self.stop_controlled_execution(token,wrapper_identity,connection).await;
                         return Err(runtime_error("native execution lost current task ownership"));
                     }
