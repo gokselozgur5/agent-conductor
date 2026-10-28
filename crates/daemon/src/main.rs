@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_conductor_store::Store;
 use clap::Parser;
-use conductor_daemon::{LocalServer, RuntimeLock};
+use conductor_daemon::{LocalServer, OperatorBoard, RuntimeLock};
 use conductor_service::{NativeWorkflowPlan, PersistentControlService};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -21,6 +21,9 @@ struct Args {
     /// Run one explicitly authorized native workflow while serving status, then exit.
     #[arg(long)]
     run_plan: Option<PathBuf>,
+    /// Optional authenticated loopback board; requires `CONDUCTOR_OPERATOR_TOKEN`.
+    #[arg(long)]
+    http: Option<std::net::SocketAddr>,
     #[arg(long, default_value = "state/conductor.sock")]
     socket: PathBuf,
     #[arg(long, default_value = "state/conductor.lock")]
@@ -69,6 +72,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let (board_stop, board_task) = start_board(args.http, service.clone()).await;
     let workflow_service = service.clone();
     let server = match LocalServer::bind(&args.socket, service) {
         Ok(server) => server,
@@ -80,6 +84,7 @@ async fn main() {
 
     if let Some(path) = &args.run_plan {
         Box::pin(run_plan_mode(path, workflow_service, server)).await;
+        stop_board(board_stop, board_task).await;
         return;
     }
 
@@ -94,6 +99,7 @@ async fn main() {
         eprintln!("daemon failed: {error}");
         std::process::exit(1);
     }
+    stop_board(board_stop, board_task).await;
 }
 
 fn ensure_parent(path: &Path) -> std::io::Result<()> {
@@ -188,6 +194,46 @@ async fn run_plan_mode(
         Err(message) => {
             eprintln!("{message}");
             std::process::exit(1);
+        }
+    }
+}
+
+type BoardTask = tokio::task::JoinHandle<std::io::Result<()>>;
+async fn start_board(
+    address: Option<std::net::SocketAddr>,
+    service: PersistentControlService,
+) -> (tokio::sync::watch::Sender<bool>, Option<BoardTask>) {
+    let (stop, mut stopped) = tokio::sync::watch::channel(false);
+    let Some(address) = address else {
+        return (stop, None);
+    };
+    let token = std::env::var("CONDUCTOR_OPERATOR_TOKEN").unwrap_or_else(|_| {
+        eprintln!("--http requires CONDUCTOR_OPERATOR_TOKEN in the launching environment");
+        std::process::exit(2);
+    });
+    let board = OperatorBoard::bind(address, token, service)
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("operator board failed: {error}");
+            std::process::exit(2);
+        });
+    eprintln!("Operator board: http://{}", board.address());
+    let task = tokio::spawn(board.run_until(async move {
+        let _ = stopped.changed().await;
+    }));
+    (stop, Some(task))
+}
+async fn stop_board(stop: tokio::sync::watch::Sender<bool>, task: Option<BoardTask>) {
+    let _ = stop.send(true);
+    if let Some(mut task) = task {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(_) => eprintln!("operator board did not shut down cleanly"),
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                eprintln!("operator board shutdown deadline elapsed");
+            }
         }
     }
 }

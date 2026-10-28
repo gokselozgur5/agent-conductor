@@ -84,3 +84,9 @@ a distinct read-only reviewer through the durable lifecycle. See
 [Native workflow](docs/NATIVE_WORKFLOW.md) for setup and the first real synthetic
 acceptance result. Original checkouts remain unchanged; broader product and
 recovery gates are still tracked in [Status](docs/STATUS.md).
+
+### Local operator board
+
+An opt-in authenticated loopback board displays task state, checks and independent
+review results. See [Operator board](docs/OPERATOR_BOARD.md) for `--http`, credential
+handling and the read-only scope. The existing Unix-socket CLI remains available.

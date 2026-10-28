@@ -13,7 +13,14 @@ seconds with the same source identity and unchanged original checkout.
 This is a working vertical workflow, not full v1 acceptance. The daemon currently
 serves status while one plan runs and exits when that invocation ends. See
 [NATIVE_WORKFLOW.md](NATIVE_WORKFLOW.md) for the operator command and limitations.
-Work is tracked in issue #1 on branch `feat/1-native-workflow`.
+The native workflow shipped through PR #2 (issue #1 closed). The native
+terminal/renewal race fix shipped through PR #5 (issue #4 closed).
+
+An opt-in authenticated loopback operator board now displays authoritative task
+state, checks and independent acceptance. Two Chrome probes verified rendering,
+wrong-token refusal, injection-as-text, live refresh, stale-state indication and
+disconnect. This read-only board is tracked in issue #3 on
+`feat/3-operator-board`; its exact-branch CI is still pending.
 
 ## Implemented
 
@@ -30,18 +37,20 @@ Work is tracked in issue #1 on branch `feat/1-native-workflow`.
 - Distinct read-only native reviewer, strict task/source-bound decision parsing,
   source revalidation and existing completion invariants.
 - Semantic event publication/subscriptions, bounded delivery and claim/ACK state.
+- Authenticated loopback read-only board backed by the same service projections;
+  credentials stay out of URLs, HTML, logs and browser storage.
 
 ## Evidence
 
-The latest local workspace run passed 153 tests, formatting, strict Clippy and
+The latest local workspace run passed 155 tests, formatting, strict Clippy and
 credential/media scans. Evidence is kept privately under
-`reviews/agent-conductor-runtime-20261028/native-workflow-final-workspace.log` and
+`reviews/agent-conductor-runtime-20261028/operator-board-with-terminal-fix-workspace.log` and
 `native-workflow-v1/`. The model-call cap is not an actual spend measurement.
 
 Phase 1 has separate accepted evidence in [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md).
-Previously published runtime baseline `fe0aa69` passed macOS/Linux CI; the current
-integration branch still requires its own exact-SHA CI. Local results do not
-substitute for that remote check.
+Native workflow head `5520583` and race-fix head `277d653` passed macOS/Linux CI
+before their respective merges. The board branch still requires its own exact-SHA
+CI. Local results do not substitute for that remote check.
 
 ## Trust boundaries
 
@@ -58,7 +67,7 @@ See [ADAPTER_CONFORMANCE.md](ADAPTER_CONFORMANCE.md) and [SANDBOX.md](SANDBOX.md
 - Native interruption/recovery acceptance and automatic continuation from retained
   checkpoints; source begin/bind crash reconciliation and durable review recovery.
 - Continuous scheduling and complete operator start/pause/resume/cancel workflow.
-- Authenticated operator API/board and coalesced filesystem/Git hooks.
+- Operator board task controls and broader operator API; coalesced filesystem/Git hooks.
 - Host protocol, Thor acceptance and supported host isolation beyond macOS checks.
 - Remaining adapter negative tests, load/restore/redaction validation and soak.
   Seven-day soak cannot be claimed from a same-day run.
