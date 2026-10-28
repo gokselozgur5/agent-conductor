@@ -107,6 +107,8 @@ impl<C: Clock> PersistentControlService<C> {
         verifier: BTreeMap<String, String>,
     ) -> Result<WorkflowOutcome, StoreError> {
         crate::workflow::validate_plan(plan)?;
+        self.validate_workflow_dependencies(plan).await?;
+        let initial_baseline = self.initial_workflow_baseline(plan).await?;
         let packet = {
             let _guard = self.mutations.lock().await;
             let (task, packet) = self
@@ -158,7 +160,12 @@ impl<C: Clock> PersistentControlService<C> {
             .mode(0o700)
             .create(&artifacts)
             .map_err(|_| invalid("new continuation directory failed"))?;
-        let manifest = snapshot_attempt_tree(&source, &artifacts.join("work"), &[])
+        let initial_inventory = initial_baseline
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        let manifest = snapshot_attempt_tree(&source, &artifacts.join("work"), &initial_inventory)
             .map_err(|_| invalid("retained workspace snapshot failed"))?;
         let baseline = GitSnapshot {
             starting_head: packet.contract.starting_head,

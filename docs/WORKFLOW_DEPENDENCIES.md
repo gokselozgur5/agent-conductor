@@ -114,3 +114,51 @@ the identical refusal. The fixture now resolves its initial root before construc
 the canonical positive source; explicit linked-root/manifest negative controls are
 unchanged. Production path validation is unchanged. Before/after alias logs and the
 original CI failure are retained; a passing rerun alone was not treated as a fix.
+
+## Continuation baseline requirement
+
+Retained unfinished work is the next attempt's starting work, not the original task
+input. Independent preservation review must keep the first attempt's manifest.
+Resolve it from the unique durable execution bound to the original `work/tree`,
+verify its packet identity/hash and baseline digest, and read the original bounded
+private no-link manifest. Never derive original input evidence from current dirty
+work. Refuse missing/ambiguous/corrupt original evidence before continuing; older
+packets without a baseline digest cannot prove this requirement.
+
+Continuation must keep original path inventory, including files deleted before
+interruption, while preserving the retained bytes. Review bundles must label their
+manifest as the initial task baseline. The next-attempt advisory inventory may
+still describe retained work, but must not replace that preservation baseline.
+
+The initial execution lookup is task-scoped, exact-workspace and bounded to two
+matches; ambiguity is refused. The service checks its fence, packet digest,
+attempt/epoch/worker/adapter, objective, checks and instruction pins, then requires
+one supported original advisory manifest identity. The original manifest must be
+canonical, private, regular, single-linked, bounded and digest-matched. This reuses
+the existing durable packet; no new authority or migration is introduced.
+
+Regression fixtures demonstrate that retained bytes and newly created files differ
+from the initial manifest, keep an original deletion as a tombstone in the next
+attempt, and preserve unfinished files without replacing the original evidence.
+They reject altered valid manifests as well as malformed/missing/linked evidence,
+wrong identity/fence/hash, absent legacy digests and ambiguous workspace records.
+An initial ambiguity fixture accidentally left two attempts open; it was corrected
+to close the first attempt, retaining the production one-open-attempt invariant.
+The original failed test log remains retained.
+
+Real `dependency-continuation-v1` acceptance paused the dependent Claude writer
+after `consumed.txt` appeared, confirmed its stop fence, restarted the daemon and
+refused a deliberately corrupted initial manifest without a new execution or task
+version change. After restoration, queued continuation survived another restart
+and completed checks plus independent Codex review in 78.96 seconds. The new
+attempt/epoch retained unfinished work, while its review manifest exactly matched
+the original task input and excluded the newly written file. Frozen predecessor
+identity, old work, producer files and original Git checkout remained unchanged;
+stale and terminal continuations were refused. The test used existing accepted
+immutable adapter pins/caps; actual model spend was not measured.
+
+Validation for this correction: 198 workspace tests, the expanded baseline
+negative tests, strict Clippy, formatting and build passed. This proves the
+specified local dependent-writer continuation, not generic unfenced recovery or
+remote-host/soak acceptance. Evidence and intermediate diagnostics are retained in
+the private runtime review directory.
