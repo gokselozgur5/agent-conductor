@@ -274,7 +274,12 @@ impl<C: Clock> PersistentControlService<C> {
             .map_err(store_error)?
             .ok_or_else(not_found)?;
         let task: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
-        self.apply_row(
+        // Replay uses immutable directive input, not the task version read on retry.
+        let directive_hash = hash(
+            &serde_json::to_string(&("effect-block-v1", task_id, effect_token, reason))
+                .map_err(json_error)?,
+        );
+        self.apply_row_with_hash(
             row,
             Command {
                 actor: Actor {
@@ -294,6 +299,7 @@ impl<C: Clock> PersistentControlService<C> {
                     },
                 },
             },
+            directive_hash,
         )
         .await
     }
@@ -366,7 +372,20 @@ impl<C: Clock> PersistentControlService<C> {
     ) -> Result<CommandAppliedResponse, ErrorBody> {
         let request_json =
             serde_json::to_string(&(row.id.as_str(), &command)).map_err(json_error)?;
-        let request_hash = hash(&request_json);
+        self.apply_row_with_hash(row, command, hash(&request_json))
+            .await
+    }
+
+    // Only internal operations with an immutable input identity may supply this
+    // hash. External commands hash their complete versioned payload above.
+    async fn apply_row_with_hash(
+        &self,
+        row: PersistedTask,
+        command: Command,
+        request_hash: String,
+    ) -> Result<CommandAppliedResponse, ErrorBody> {
+        let request_json =
+            serde_json::to_string(&(row.id.as_str(), &command)).map_err(json_error)?;
         if let Some(json) = self
             .store
             .command_outcome(
@@ -1557,6 +1576,70 @@ mod effect_tests {
     }
 
     #[tokio::test]
+    async fn fake_inventory_directive_reaches_audited_task_blocking() {
+        use agent_conductor_testkit::{
+            CrashPoint, FakeEffectRunner, FakeInventory, ReconcileDirective,
+        };
+        let (directory, store) = lifecycle_store().await;
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .expect("service");
+        let (_, token) = claim_task(&service).await;
+        let inventory_path = directory.path().join("external.sqlite3");
+        let inventory = FakeInventory::open(&inventory_path)
+            .await
+            .expect("inventory");
+        let runner = FakeEffectRunner::new(store.clone(), inventory, "fake-runner", 50);
+        assert!(matches!(
+            runner
+                .reconcile(&token, 200, CrashPoint::Never)
+                .await
+                .expect("settled"),
+            ReconcileDirective::Settled(_)
+        ));
+        let mut external =
+            SqliteConnection::connect(&format!("sqlite://{}", inventory_path.display()))
+                .await
+                .expect("external fixture");
+        sqlx::query("UPDATE fake_resources SET request_json = '{}' WHERE token = ?")
+            .bind(&token)
+            .execute(&mut external)
+            .await
+            .expect("contradict inventory");
+        let ReconcileDirective::BlockTask {
+            task_id: Some(task_id),
+            reason,
+        } = runner
+            .reconcile(&token, 300, CrashPoint::Never)
+            .await
+            .expect("typed directive")
+        else {
+            panic!("expected task-specific contradiction")
+        };
+        let response = service
+            .block_effect_contradiction(&task_id, &token, &reason)
+            .await
+            .expect("apply directive");
+        assert_eq!(response.task.aggregate.state, TaskState::Blocked);
+        let transitions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_transitions WHERE task_id = 'task' AND new_state = 'blocked'")
+            .fetch_one(store.readers()).await.expect("transition");
+        assert_eq!(transitions, 1);
+        assert!(
+            service
+                .block_effect_contradiction(&task_id, &token, &reason)
+                .await
+                .expect("retry")
+                .replayed
+        );
+        let transitions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_transitions WHERE task_id = 'task' AND new_state = 'blocked'")
+            .fetch_one(store.readers()).await.expect("transition");
+        assert_eq!(transitions, 1);
+    }
+
+    #[tokio::test]
     async fn effect_contradiction_directive_blocks_the_owning_task() {
         let (_directory, store) = lifecycle_store().await;
         let service = PersistentControlService::start_with_clock(store, 100, FixedClock::new(0))
@@ -1571,6 +1654,37 @@ mod effect_tests {
         let blocker = response.task.aggregate.blocker.as_ref().expect("blocker");
         assert_eq!(blocker.kind, "effect_inventory_contradiction");
         assert!(blocker.detail.contains("no tagged resource"));
+        let replay = service
+            .block_effect_contradiction("task", &token, "done intent has no tagged resource")
+            .await
+            .expect("lost-response retry replays");
+        assert!(replay.replayed);
+        assert_eq!(
+            replay.task.aggregate.version,
+            response.task.aggregate.version
+        );
+        assert_eq!(
+            service
+                .block_effect_contradiction("task", &token, "different reason")
+                .await
+                .expect_err("changed directive is a collision")
+                .code,
+            ErrorCode::Conflict
+        );
+        let store = service.store.clone();
+        drop(service);
+        let restarted = PersistentControlService::start_with_clock(store, 200, FixedClock::new(0))
+            .await
+            .expect("restart");
+        let replay = restarted
+            .block_effect_contradiction("task", &token, "done intent has no tagged resource")
+            .await
+            .expect("directive survives restart");
+        assert!(replay.replayed);
+        assert_eq!(
+            replay.task.aggregate.version,
+            response.task.aggregate.version
+        );
     }
 
     #[tokio::test]
