@@ -77,7 +77,10 @@ function renderTask(item) {
     checks.append(text('li', `${result ? (result.passed ? 'Passed' : 'Failed') : 'Pending'} · ${check.id}`));
   }
   card.append(checks);
-  if (task.blocker) card.append(text('p', task.blocker.detail, 'blocker'));
+  if (task.blocker) {
+    card.append(text('p', task.blocker.detail, 'blocker'));
+    card.append(text('p', `Resume when: ${task.blocker.resume_when}`, 'blocker'));
+  }
   const controls = text('div', '', 'controls');
   const actions = [];
   if (task.state === 'backlog') actions.push(['ready', 'Mark ready']);
@@ -114,7 +117,7 @@ async function control(task, action) {
     if (response.status === 401) { disconnect(); message = 'Authentication failed.'; }
     else if (response.status === 409) message = 'Task changed or action is not allowed. Refreshed state; inspect it before retrying.';
     else if (!response.ok) message = 'Action was not confirmed. Inspect refreshed state before retrying.';
-    else message = ['ready', 'resume'].includes(action) ? 'Task is ready. Automatic native scheduling is not enabled yet.' : 'Action applied. Active execution stops after ownership revocation is observed.';
+    else message = ['ready', 'resume'].includes(action) ? 'Task is ready. Use the workflow queue to start or continue approved work.' : 'Action applied. Active execution stops after ownership revocation is observed.';
   } catch (_) {
     message = 'Action outcome unknown. Inspect refreshed state before retrying.';
   } finally {

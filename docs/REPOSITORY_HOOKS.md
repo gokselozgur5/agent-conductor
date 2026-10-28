@@ -171,3 +171,12 @@ new native model run. Abnormal termination, revoked ownership and writes that
 appear/disappear between sampled captures remain outside the normal-exit coverage;
 this does not claim a complete filesystem audit or verified task acceptance from
 a file event. Later verification failure can coexist with valid change events.
+
+The updated native path also completed a real Claude/checks/Codex workflow in
+237.89seconds (`owned-terminal-native-v1/receipt.json`). Its answer.txt event was
+delivered once with the actual task/attempt/epoch, original project and approved
+policy stayed unchanged, and the persisted writer packet contained the advisory
+README reference. This integrated run does not distinguish periodic publication
+from final-capture publication; the300file controlled regression above specifically
+covers the latter. No additional model run was made for the subsequent board text
+clarification showing blocked resume conditions and the existing workflow queue.
