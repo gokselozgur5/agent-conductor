@@ -35,6 +35,18 @@ pub async fn serve(
         service: service.clone(),
         graceful: false,
     };
+    let mut gates = Vec::with_capacity(configs.len());
+    for config in &configs {
+        let Ok(roots) = conductor_runtime::git_observation_roots(&config.root).await else {
+            eprintln!("repository watcher stopped: Git notification roots unavailable");
+            return;
+        };
+        let Ok(gate) = crate::watch_signals::ScanGate::new(roots) else {
+            eprintln!("repository watcher stopped: native notification registration failed");
+            return;
+        };
+        gates.push(gate);
+    }
     let started = Instant::now();
     let mut owned_states = std::collections::BTreeMap::new();
     let mut states: Vec<_> = configs
@@ -46,22 +58,15 @@ pub async fn serve(
             health.graceful = true;
             return;
         }
-        for (config, state) in configs.iter().zip(&mut states) {
+        for ((config, state), gate) in configs.iter().zip(&mut states).zip(&mut gates) {
             if *stop.borrow() {
                 health.graceful = true;
                 return;
             }
-            // Let the atomic publication finish before graceful shutdown.
-            // Dropping a manually managed `SQLite` transaction mid-await would
-            // leave its writer connection in an indeterminate transaction.
-            if service
-                .poll_repository(config, state, started.elapsed())
-                .await
-                .is_err()
+            if let Err(message) =
+                poll_config(&service, config, state, gate, started.elapsed()).await
             {
-                eprintln!(
-                    "repository watcher stopped: observation or publication refused; inspect configuration and retained baseline"
-                );
+                eprintln!("repository watcher stopped: {message}");
                 return;
             }
         }
@@ -89,6 +94,28 @@ pub async fn serve(
             () = tokio::time::sleep(Duration::from_millis(250)) => {}
         }
     }
+}
+
+async fn poll_config(
+    service: &PersistentControlService,
+    config: &RepositoryWatch,
+    state: &mut RepositoryWatchState,
+    gate: &mut crate::watch_signals::ScanGate,
+    elapsed: Duration,
+) -> Result<(), &'static str> {
+    if !gate.begin_scan(elapsed, state.needs_settle())? {
+        return Ok(());
+    }
+    // Complete atomic publication before graceful shutdown; never cancel a
+    // manually managed SQLite transaction in the middle of an await.
+    service
+        .poll_repository(config, state, elapsed)
+        .await
+        .map_err(|_| "observation or publication refused; inspect retained baseline")?;
+    let roots = conductor_runtime::git_observation_roots(&config.root)
+        .await
+        .map_err(|_| "Git notification roots unavailable")?;
+    gate.refresh(roots)
 }
 
 // Dropping an aborted or panicking watcher must not leave health reporting Running.

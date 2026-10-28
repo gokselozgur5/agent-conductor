@@ -125,3 +125,37 @@ async fn observation_detects_same_status_edits_and_preserves_source() {
         Err(SnapshotError::Unsupported)
     ));
 }
+
+#[tokio::test]
+async fn notification_roots_include_linked_worktree_metadata_without_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    repository(&source);
+    let source = source.canonicalize().unwrap();
+    let linked = directory.path().join("linked");
+    git(
+        &source,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let linked = linked.canonicalize().unwrap();
+    let index = fs::read(source.join(".git/index")).unwrap();
+    let head = git(&linked, &["rev-parse", "HEAD"]);
+    let roots = conductor_runtime::git_observation_roots(&linked)
+        .await
+        .unwrap();
+    assert!(roots.contains(&linked));
+    assert!(roots.contains(&source.join(".git")));
+    assert!(
+        roots
+            .iter()
+            .any(|p| p.starts_with(source.join(".git/worktrees")))
+    );
+    assert_eq!(fs::read(source.join(".git/index")).unwrap(), index);
+    assert_eq!(git(&linked, &["rev-parse", "HEAD"]), head);
+}

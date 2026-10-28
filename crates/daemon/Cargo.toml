@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+notify.workspace = true
+conductor-runtime = { path = "../runtime" }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio", "query"] }
 sha2.workspace = true
 serde.workspace = true

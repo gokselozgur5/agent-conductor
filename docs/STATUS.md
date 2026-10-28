@@ -34,6 +34,11 @@ Dependent-writer pause/restart/continuation now preserves initial task evidence
 separately from retained unfinished work. The real continuation passed independent
 review in 78.96 seconds; corrupt initial evidence was refused before another
 attempt. The correction passes 198 local tests and strict lint/build.
+External repository observation now uses native dirty hints with explicit 5-second
+reconciliation, preserving full content validation and debounce/drain polling.
+A controlled release comparison measured 31.05% → 2.88% of one CPU at idle;
+linked-worktree event/restart/root-loss and 300-file drain checks passed.
+See [REPOSITORY_HOOKS.md](REPOSITORY_HOOKS.md) for accounting and timing limits.
 The working local workflow is not full v1 acceptance. Remaining work includes
 broader project/agent/event/checkpoint visibility, outer advisory
 discovery, abnormal ownership recovery, host protocol/Thor/Linux isolation,
