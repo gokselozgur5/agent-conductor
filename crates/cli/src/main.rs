@@ -67,6 +67,7 @@ fn print_human(result: ResponseResult) {
                 println!("{}: {}", violation.code, violation.summary);
             }
         }
+        ResponseResult::Ok(response) => println!("{response:?}"),
         ResponseResult::Error(error) => {
             eprintln!("{:?}: {}", error.code, error.message);
             std::process::exit(2);

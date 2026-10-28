@@ -244,6 +244,7 @@ dependencies = [
 name = "conductor-protocol"
 version = "0.1.0"
 dependencies = [
+ "agent-conductor-domain",
  "serde",
  "serde_json",
  "thiserror",

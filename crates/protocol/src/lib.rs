@@ -1,3 +1,4 @@
+use agent_conductor_domain::{Command, RequiredCheck, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -48,6 +49,43 @@ impl RequestEnvelope {
 pub enum Request {
     Health,
     CheckInvariants,
+    RegisterProject {
+        actor_id: String,
+        idempotency_key: String,
+        id: String,
+        canonical_path: String,
+        filesystem_identity: String,
+        git_common_dir_identity: Option<String>,
+    },
+    RegisterAgent {
+        actor_id: String,
+        idempotency_key: String,
+        id: String,
+        adapter_kind: String,
+        protocol_fingerprint: String,
+        capability_hash: String,
+        access_mode: String,
+    },
+    CreateTask {
+        actor_id: String,
+        idempotency_key: String,
+        id: String,
+        project_id: String,
+        objective: String,
+        priority: i64,
+        authority: Value,
+        required_checks: Vec<RequiredCheck>,
+    },
+    GetTask {
+        task_id: String,
+    },
+    ListTasks {
+        project_id: Option<String>,
+    },
+    ApplyCommand {
+        task_id: String,
+        command: Command,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,6 +136,27 @@ pub enum ResponseResult {
 pub enum Response {
     Health(HealthResponse),
     Invariants(InvariantResponse),
+    ProjectRegistered { id: String },
+    AgentRegistered { id: String },
+    Task(TaskResponse),
+    Tasks(Vec<TaskResponse>),
+    CommandApplied(CommandAppliedResponse),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskResponse {
+    pub project_id: String,
+    pub objective: String,
+    pub priority: i64,
+    pub authority: Value,
+    pub aggregate: Box<Task>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandAppliedResponse {
+    pub task: TaskResponse,
+    pub replayed: bool,
+    pub effect_tokens: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

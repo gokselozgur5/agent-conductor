@@ -1,6 +1,6 @@
 use agent_conductor_store::{
-    AuditAppend, CommitBatch, CommitResult, EffectIntentAppend, NewProject, NewTask, Store,
-    StoreError, TaskMutation, TaskTransitionAppend,
+    AgentRegistration, AuditAppend, CommitBatch, CommitResult, EffectIntentAppend, NewProject,
+    NewTask, Store, StoreError, TaskMutation, TaskTransitionAppend,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 use tempfile::TempDir;
@@ -32,6 +32,7 @@ async fn seeded_store() -> (TempDir, Store) {
             state: "ready",
             priority: 10,
             authority_json: "{}",
+            aggregate_json: "{}",
             created_at_ms: 101,
         })
         .await
@@ -49,8 +50,13 @@ fn batch(key: &str, hash: &str, audit_id: &str, effect_token: &str) -> CommitBat
             expected_version: 0,
             new_version: 1,
             state: "claimed".into(),
+            aggregate_json: "{}".into(),
             updated_at_ms: 200,
         }),
+        project: None,
+        agent: None,
+        new_task: None,
+        attempt: None,
         transitions: vec![TaskTransitionAppend {
             id: format!("transition-{key}"),
             task_id: "task-1".into(),
@@ -84,6 +90,90 @@ fn batch(key: &str, hash: &str, audit_id: &str, effect_token: &str) -> CommitBat
         committed_at_ms: 200,
         expires_at_ms: 86_400_200,
     }
+}
+
+fn agent_batch(key: &str, hash: &str, agent_id: &str) -> CommitBatch {
+    CommitBatch {
+        actor_id: "operator-1".into(),
+        idempotency_key: key.into(),
+        request_hash: hash.into(),
+        task: None,
+        project: None,
+        agent: Some(AgentRegistration {
+            id: agent_id.into(),
+            adapter_kind: "codex_cli".into(),
+            protocol_fingerprint: "codex-v1".into(),
+            capability_hash: "sha256:abc".into(),
+            access_mode: "read_write".into(),
+            created_at_ms: 300,
+        }),
+        new_task: None,
+        attempt: None,
+        transitions: vec![],
+        audit: vec![AuditAppend {
+            id: format!("audit-{key}"),
+            task_id: None,
+            actor_id: "operator-1".into(),
+            kind: "agent.registered".into(),
+            correlation_id: "correlation-agent".into(),
+            payload_json: format!(r#"{{"agent_id":"{agent_id}"}}"#),
+            occurred_at_ms: 300,
+        }],
+        effects: vec![],
+        outcome_json: format!(r#"{{"agent_id":"{agent_id}"}}"#),
+        committed_at_ms: 300,
+        expires_at_ms: 86_400_300,
+    }
+}
+
+#[tokio::test]
+async fn agent_registration_is_audited_and_idempotent_in_one_transaction() {
+    let (_directory, store) = store().await;
+    let batch = agent_batch("register-agent", "hash-agent", "agent-1");
+
+    assert!(matches!(
+        store.persist(&batch).await.expect("register"),
+        CommitResult::Applied { .. }
+    ));
+    assert!(matches!(
+        store.persist(&batch).await.expect("replay"),
+        CommitResult::Replayed { .. }
+    ));
+
+    let agents: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id = 'agent-1'")
+        .fetch_one(store.readers())
+        .await
+        .expect("agent count");
+    let audit: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE kind = 'agent.registered'")
+            .fetch_one(store.readers())
+            .await
+            .expect("audit count");
+    assert_eq!((agents, audit), (1, 1));
+}
+
+#[tokio::test]
+async fn failed_agent_registration_rolls_back_audit_and_idempotency() {
+    let (_directory, store) = store().await;
+    let mut batch = agent_batch("bad-agent", "hash-bad", "agent-bad");
+    batch.agent.as_mut().expect("agent").access_mode = "invalid".into();
+
+    assert!(matches!(
+        store.persist(&batch).await,
+        Err(StoreError::Database(_))
+    ));
+    let audit: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE id = 'audit-bad-agent'")
+            .fetch_one(store.readers())
+            .await
+            .expect("audit count");
+    let idempotency: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM command_idempotency WHERE idempotency_key = 'bad-agent'",
+    )
+    .fetch_one(store.readers())
+    .await
+    .expect("idempotency count");
+    assert_eq!((audit, idempotency), (0, 0));
 }
 
 #[tokio::test]

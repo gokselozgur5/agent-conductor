@@ -61,7 +61,55 @@ pub struct TaskMutation {
     pub expected_version: i64,
     pub new_version: i64,
     pub state: String,
+    pub aggregate_json: String,
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptLeaseMutation {
+    pub attempt_id: String,
+    pub task_id: String,
+    pub worker_id: String,
+    pub lease_epoch: i64,
+    pub lease_status: String,
+    pub boot_generation: i64,
+    pub remaining_ms: i64,
+    pub grace_ms: i64,
+    pub display_expires_at_ms: i64,
+    pub last_heartbeat_at_ms: i64,
+    pub required_checks_json: String,
+    pub ended_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRegistration {
+    pub id: String,
+    pub adapter_kind: String,
+    pub protocol_fingerprint: String,
+    pub capability_hash: String,
+    pub access_mode: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRegistration {
+    pub id: String,
+    pub canonical_path: String,
+    pub filesystem_identity: String,
+    pub git_common_dir_identity: Option<String>,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRegistration {
+    pub id: String,
+    pub project_id: String,
+    pub objective: String,
+    pub state: String,
+    pub priority: i64,
+    pub authority_json: String,
+    pub aggregate_json: String,
+    pub created_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +153,10 @@ pub struct CommitBatch {
     pub idempotency_key: String,
     pub request_hash: String,
     pub task: Option<TaskMutation>,
+    pub project: Option<ProjectRegistration>,
+    pub agent: Option<AgentRegistration>,
+    pub new_task: Option<TaskRegistration>,
+    pub attempt: Option<AttemptLeaseMutation>,
     pub transitions: Vec<TaskTransitionAppend>,
     pub audit: Vec<AuditAppend>,
     pub effects: Vec<EffectIntentAppend>,
@@ -129,6 +181,16 @@ pub struct NewProject<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct NewAgent<'a> {
+    pub id: &'a str,
+    pub adapter_kind: &'a str,
+    pub protocol_fingerprint: &'a str,
+    pub capability_hash: &'a str,
+    pub access_mode: &'a str,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewTask<'a> {
     pub id: &'a str,
     pub project_id: &'a str,
@@ -136,7 +198,18 @@ pub struct NewTask<'a> {
     pub state: &'a str,
     pub priority: i64,
     pub authority_json: &'a str,
+    pub aggregate_json: &'a str,
     pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedTask {
+    pub id: String,
+    pub project_id: String,
+    pub objective: String,
+    pub priority: i64,
+    pub authority_json: String,
+    pub aggregate_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,11 +284,33 @@ impl Store {
         finish_transaction(&mut writer, result).await
     }
 
+    pub async fn create_agent(&self, agent: NewAgent<'_>) -> Result<(), StoreError> {
+        let mut writer = self.inner.writer.lock().await;
+        sqlx::query("INSERT INTO agents (id, adapter_kind, protocol_fingerprint, capability_hash, access_mode, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(agent.id)
+            .bind(agent.adapter_kind)
+            .bind(agent.protocol_fingerprint)
+            .bind(agent.capability_hash)
+            .bind(agent.access_mode)
+            .bind(agent.created_at_ms)
+            .execute(&mut *writer)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn agent_exists(&self, agent_id: &str) -> Result<bool, StoreError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id = ?")
+            .bind(agent_id)
+            .fetch_one(&self.inner.readers)
+            .await?;
+        Ok(count == 1)
+    }
+
     pub async fn create_task(&self, task: NewTask<'_>) -> Result<(), StoreError> {
         let mut writer = self.inner.writer.lock().await;
         writer.execute("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
-            "INSERT INTO tasks (id, project_id, objective, state, priority, version, authority_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+            "INSERT INTO tasks (id, project_id, objective, state, priority, version, authority_json, aggregate_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
         )
         .bind(task.id)
         .bind(task.project_id)
@@ -223,6 +318,7 @@ impl Store {
         .bind(task.state)
         .bind(task.priority)
         .bind(task.authority_json)
+        .bind(task.aggregate_json)
         .bind(task.created_at_ms)
         .bind(task.created_at_ms)
         .execute(&mut *writer)
@@ -230,6 +326,57 @@ impl Store {
         .map(|_| ())
         .map_err(StoreError::from);
         finish_transaction(&mut writer, result).await
+    }
+
+    pub async fn task(&self, task_id: &str) -> Result<Option<PersistedTask>, StoreError> {
+        sqlx::query_as::<_, (String, String, String, i64, String, String)>(
+            "SELECT id, project_id, objective, priority, authority_json, aggregate_json FROM tasks WHERE id = ? AND aggregate_json IS NOT NULL",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.inner.readers)
+        .await
+        .map(|row| row.map(task_from_row))
+        .map_err(StoreError::from)
+    }
+
+    pub async fn tasks(&self, project_id: Option<&str>) -> Result<Vec<PersistedTask>, StoreError> {
+        let rows = if let Some(project_id) = project_id {
+            sqlx::query_as::<_, (String, String, String, i64, String, String)>(
+                "SELECT id, project_id, objective, priority, authority_json, aggregate_json FROM tasks WHERE project_id = ? AND aggregate_json IS NOT NULL ORDER BY priority DESC, id",
+            )
+            .bind(project_id)
+            .fetch_all(&self.inner.readers)
+            .await?
+        } else {
+            sqlx::query_as::<_, (String, String, String, i64, String, String)>(
+                "SELECT id, project_id, objective, priority, authority_json, aggregate_json FROM tasks WHERE aggregate_json IS NOT NULL ORDER BY priority DESC, id",
+            )
+            .fetch_all(&self.inner.readers)
+            .await?
+        };
+        Ok(rows.into_iter().map(task_from_row).collect())
+    }
+
+    pub async fn command_outcome(
+        &self,
+        actor_id: &str,
+        idempotency_key: &str,
+        request_hash: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let existing = sqlx::query_as::<_, (String, String)>(
+            "SELECT request_hash, outcome_json FROM command_idempotency WHERE actor_id = ? AND idempotency_key = ?",
+        )
+        .bind(actor_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.inner.readers)
+        .await?;
+        match existing {
+            Some((stored_hash, _)) if stored_hash != request_hash => {
+                Err(StoreError::IdempotencyCollision)
+            }
+            Some((_, outcome)) => Ok(Some(outcome)),
+            None => Ok(None),
+        }
     }
 
     pub async fn persist(&self, batch: &CommitBatch) -> Result<CommitResult, StoreError> {
@@ -375,6 +522,17 @@ async fn verify_integrity(connection: &mut SqliteConnection) -> Result<(), Store
     Ok(())
 }
 
+fn task_from_row(row: (String, String, String, i64, String, String)) -> PersistedTask {
+    PersistedTask {
+        id: row.0,
+        project_id: row.1,
+        objective: row.2,
+        priority: row.3,
+        authority_json: row.4,
+        aggregate_json: row.5,
+    }
+}
+
 async fn finish_transaction<T>(
     connection: &mut SqliteConnection,
     result: Result<T, StoreError>,
@@ -414,6 +572,44 @@ async fn persist_in_transaction(
         });
     }
 
+    if let Some(project) = &batch.project {
+        sqlx::query("INSERT INTO projects (id, canonical_path, filesystem_identity, git_common_dir_identity, created_at_ms) VALUES (?, ?, ?, ?, ?)")
+            .bind(&project.id)
+            .bind(&project.canonical_path)
+            .bind(&project.filesystem_identity)
+            .bind(&project.git_common_dir_identity)
+            .bind(project.created_at_ms)
+            .execute(&mut *connection)
+            .await?;
+    }
+
+    if let Some(agent) = &batch.agent {
+        sqlx::query("INSERT INTO agents (id, adapter_kind, protocol_fingerprint, capability_hash, access_mode, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(&agent.id)
+            .bind(&agent.adapter_kind)
+            .bind(&agent.protocol_fingerprint)
+            .bind(&agent.capability_hash)
+            .bind(&agent.access_mode)
+            .bind(agent.created_at_ms)
+            .execute(&mut *connection)
+            .await?;
+    }
+
+    if let Some(task) = &batch.new_task {
+        sqlx::query("INSERT INTO tasks (id, project_id, objective, state, priority, version, authority_json, aggregate_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)")
+            .bind(&task.id)
+            .bind(&task.project_id)
+            .bind(&task.objective)
+            .bind(&task.state)
+            .bind(task.priority)
+            .bind(&task.authority_json)
+            .bind(&task.aggregate_json)
+            .bind(task.created_at_ms)
+            .bind(task.created_at_ms)
+            .execute(&mut *connection)
+            .await?;
+    }
+
     if let Some(task) = &batch.task {
         if task.expected_version.checked_add(1) != Some(task.new_version) {
             return Err(StoreError::InvalidVersionStep {
@@ -423,10 +619,11 @@ async fn persist_in_transaction(
             });
         }
         let result = sqlx::query(
-            "UPDATE tasks SET state = ?, version = ?, updated_at_ms = ? WHERE id = ? AND version = ?",
+            "UPDATE tasks SET state = ?, version = ?, aggregate_json = ?, updated_at_ms = ? WHERE id = ? AND version = ?",
         )
         .bind(&task.state)
         .bind(task.new_version)
+        .bind(&task.aggregate_json)
         .bind(task.updated_at_ms)
         .bind(&task.task_id)
         .bind(task.expected_version)
@@ -439,6 +636,35 @@ async fn persist_in_transaction(
                 expected_version: task.expected_version,
             });
         }
+    }
+
+    if let Some(attempt) = &batch.attempt {
+        sqlx::query(
+            "INSERT INTO attempts (id, task_id, worker_id, lease_epoch, instruction_hashes_json, required_checks_json, capability_hash, started_at_ms, ended_at_ms) VALUES (?, ?, ?, ?, '[]', ?, 'phase1', ?, ?) ON CONFLICT(id) DO UPDATE SET ended_at_ms = excluded.ended_at_ms",
+        )
+        .bind(&attempt.attempt_id)
+        .bind(&attempt.task_id)
+        .bind(&attempt.worker_id)
+        .bind(attempt.lease_epoch)
+        .bind(&attempt.required_checks_json)
+        .bind(attempt.last_heartbeat_at_ms)
+        .bind(attempt.ended_at_ms)
+        .execute(&mut *connection)
+        .await?;
+        sqlx::query(
+            "INSERT INTO leases (attempt_id, task_id, epoch, status, boot_generation, remaining_ms, grace_ms, display_expires_at_ms, last_heartbeat_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(attempt_id) DO UPDATE SET status = excluded.status, boot_generation = excluded.boot_generation, remaining_ms = excluded.remaining_ms, grace_ms = excluded.grace_ms, display_expires_at_ms = excluded.display_expires_at_ms, last_heartbeat_at_ms = excluded.last_heartbeat_at_ms",
+        )
+        .bind(&attempt.attempt_id)
+        .bind(&attempt.task_id)
+        .bind(attempt.lease_epoch)
+        .bind(&attempt.lease_status)
+        .bind(attempt.boot_generation)
+        .bind(attempt.remaining_ms)
+        .bind(attempt.grace_ms)
+        .bind(attempt.display_expires_at_ms)
+        .bind(attempt.last_heartbeat_at_ms)
+        .execute(&mut *connection)
+        .await?;
     }
 
     for event in &batch.audit {
