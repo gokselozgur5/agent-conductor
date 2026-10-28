@@ -97,6 +97,7 @@ impl<C: Clock> PersistentControlService<C> {
         {
             return Err(invalid("retained execution identity mismatch"));
         }
+        self.retained_checkpoint(task_id).await?;
         Ok((task, packet))
     }
     pub(super) async fn continue_native_workflow(

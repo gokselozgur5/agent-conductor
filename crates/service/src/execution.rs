@@ -210,21 +210,29 @@ impl<C: Clock> PersistentControlService<C> {
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let terminal = loop {
             tokio::select! {
-                event = connection.event() => break event.ok(),
+                event = connection.event() => match event {
+                    Ok(RunnerEvent::Checkpoint { claims }) => {
+                        if let Err(error) = self.capture_worker_checkpoint(token, wrapper_identity, &claims).await {
+                            self.stop_native_after_refusal(token, wrapper_identity, packet, connection).await?;
+                            return Err(error);
+                        }
+                    }
+                    event => break event.ok(),
+                },
                 _ = timer.tick() => {
                     if self.renew_controlled_execution(token,wrapper_identity,&mut connection).await.is_err() {
                         // A normally exiting wrapper may close its input before
                         // its terminal frame is consumed. Transport failure is
                         // not itself evidence that task ownership was revoked.
                         if self.validate_runtime_owner(packet).await.is_ok() {
-                            break tokio::time::timeout(std::time::Duration::from_secs(1), connection.event())
-                                .await.ok().and_then(Result::ok);
+                            break tokio::time::timeout(std::time::Duration::from_secs(1),
+                                self.drain_native_terminal(token, wrapper_identity, &mut connection))
+                                .await.ok().flatten();
                         }
-                        let _ = self.stop_controlled_execution(token,wrapper_identity,connection).await;
-                        let _guard = self.mutations.lock().await;
-                        self.ensure_instruction_current_locked(packet).await?;
+                        self.stop_native_after_refusal(token, wrapper_identity, packet, connection).await?;
                         return Err(runtime_error("native execution lost current task ownership"));
                     }
+
                 }
             }
         };
@@ -292,6 +300,39 @@ impl<C: Clock> PersistentControlService<C> {
         ))
     }
 
+    async fn stop_native_after_refusal(
+        &self,
+        token: &str,
+        wrapper: &str,
+        packet: &ResumePacket,
+        connection: RunnerConnection,
+    ) -> Result<(), StoreError> {
+        let _ = self
+            .stop_controlled_execution(token, wrapper, connection)
+            .await;
+        let _guard = self.mutations.lock().await;
+        self.ensure_instruction_current_locked(packet).await?;
+        Ok(())
+    }
+
+    async fn drain_native_terminal(
+        &self,
+        token: &str,
+        wrapper: &str,
+        connection: &mut RunnerConnection,
+    ) -> Option<RunnerEvent> {
+        loop {
+            let event = connection.event().await.ok()?;
+            if let RunnerEvent::Checkpoint { claims } = event {
+                self.capture_worker_checkpoint(token, wrapper, &claims)
+                    .await
+                    .ok()?;
+            } else {
+                return Some(event);
+            }
+        }
+    }
+
     /// Requests stop and records the observed result without completing the task.
     /// The five-second observation bound is not proof of death on timeout. Even a
     /// controlled group stop remains blocked until isolation/fence verification
@@ -312,7 +353,12 @@ impl<C: Clock> PersistentControlService<C> {
         }
         let observation = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             connection.cancel().await?;
-            let event = connection.event().await?;
+            let event = loop {
+                let event = connection.event().await?;
+                if !matches!(event, RunnerEvent::Checkpoint { .. }) {
+                    break event;
+                }
+            };
             connection.wait().await?;
             Ok::<_, RunnerConnectionError>(event)
         })

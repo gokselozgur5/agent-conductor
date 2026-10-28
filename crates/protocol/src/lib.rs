@@ -92,6 +92,9 @@ pub enum Request {
         project_id: Option<String>,
         after: Option<String>,
     },
+    TaskCheckpoint {
+        task_id: String,
+    },
     TaskHistory {
         task_id: String,
         before: Option<String>,
@@ -186,6 +189,9 @@ pub enum Response {
         id: String,
     },
     Task(TaskResponse),
+    TaskCheckpoint {
+        view: Value,
+    },
     Tasks {
         tasks: Vec<TaskResponse>,
     },

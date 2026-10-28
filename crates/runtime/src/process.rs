@@ -78,8 +78,20 @@ pub async fn run_process(
 /// error and independently validate an adapter envelope before using stop data.
 pub async fn run_process_captured(
     spec: &ProcessSpec,
+    cancellation: watch::Receiver<bool>,
+    captured_stdout: &mut Vec<u8>,
+) -> Result<ProcessOutput, ProcessError> {
+    run_process_observed(spec, cancellation, captured_stdout, &mut |_| {}).await
+}
+
+/// Streams bounded stdout chunks to a nonblocking observer while retaining stop evidence.
+/// # Errors
+/// Uses the same supervision, output and fencing errors as `run_process_captured`.
+pub async fn run_process_observed(
+    spec: &ProcessSpec,
     mut cancellation: watch::Receiver<bool>,
     captured_stdout: &mut Vec<u8>,
+    observer: &mut (impl FnMut(&[u8]) + Send),
 ) -> Result<ProcessOutput, ProcessError> {
     use std::os::unix::process::CommandExt;
     captured_stdout.clear();
@@ -126,7 +138,7 @@ pub async fn run_process_captured(
     let outcome = {
         let collect = async {
             tokio::try_join!(
-                bounded_read(&mut stdout, spec.output_limit, captured_stdout),
+                bounded_read_observed(&mut stdout, spec.output_limit, captured_stdout, observer),
                 bounded_read(&mut stderr, spec.output_limit, &mut captured_stderr),
             )?;
             Ok::<_, ProcessError>(())
@@ -234,14 +246,30 @@ async fn bounded_read(
     limit: usize,
     bytes: &mut Vec<u8>,
 ) -> Result<(), ProcessError> {
-    reader
-        .take(u64::try_from(limit).map_err(|_| ProcessError::InvalidSpec)? + 1)
-        .read_to_end(bytes)
-        .await?;
-    if bytes.len() > limit {
-        return Err(ProcessError::OutputLimit);
+    bounded_read_observed(reader, limit, bytes, &mut |_| {}).await
+}
+async fn bounded_read_observed(
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    limit: usize,
+    bytes: &mut Vec<u8>,
+    observer: &mut (impl FnMut(&[u8]) + Send),
+) -> Result<(), ProcessError> {
+    let mut chunk = [0; 4096];
+    loop {
+        let remaining = limit
+            .saturating_sub(bytes.len())
+            .saturating_add(1)
+            .min(chunk.len());
+        let count = reader.read(&mut chunk[..remaining]).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if bytes.len() > limit {
+            return Err(ProcessError::OutputLimit);
+        }
+        observer(&chunk[..count]);
     }
-    Ok(())
 }
 
 #[cfg(test)]
