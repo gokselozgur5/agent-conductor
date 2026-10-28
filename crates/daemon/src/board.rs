@@ -1,4 +1,5 @@
-//! Authenticated loopback projection of the existing control service.
+//! Authenticated loopback operator access to the existing control service.
+mod controls;
 use axum::{
     Router,
     body::Body,
@@ -6,7 +7,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use conductor_protocol::Request as ControlRequest;
 use conductor_service::ControlService;
@@ -90,6 +91,7 @@ impl OperatorBoard {
             )
             .route("/api/tasks", get(tasks::<S>))
             .route("/api/health", get(health::<S>))
+            .route("/api/control", post(controls::apply::<S>))
             .layer(middleware::from_fn_with_state(state.clone(), boundary::<S>))
             .with_state(state);
         Ok(Self {
@@ -282,3 +284,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod controls_tests;
