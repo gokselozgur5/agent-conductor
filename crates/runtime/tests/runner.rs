@@ -507,9 +507,10 @@ async fn instruction_change_before_ack_or_release_never_starts_worker() {
     use sha2::{Digest, Sha256};
     for before_ack in [true, false] {
         let directory = tempfile::tempdir().unwrap();
-        let instruction = directory.path().join("policy.md");
+        let root = directory.path().canonicalize().unwrap();
+        let instruction = root.join("policy.md");
         std::fs::write(&instruction, "approved instruction").unwrap();
-        let mut input = launch(directory.path(), "printf ran > worker-ran", 1000);
+        let mut input = launch(&root, "printf ran > worker-ran", 1000);
         input.packet.contract.instructions = vec![InstructionPin {
             path: instruction.clone(),
             sha256: format!("{:x}", Sha256::digest(b"approved instruction")),
@@ -549,10 +550,11 @@ async fn changed_instruction_refuses_renewal_and_stops_live_worker() {
     use conductor_runtime::InstructionPin;
     use sha2::{Digest, Sha256};
     let directory = tempfile::tempdir().unwrap();
-    let instruction = directory.path().join("policy.md");
+    let root = directory.path().canonicalize().unwrap();
+    let instruction = root.join("policy.md");
     std::fs::write(&instruction, "approved").unwrap();
     let mut input = launch(
-        directory.path(),
+        &root,
         "while :; do printf tick >> writes; /bin/sleep 0.02; done",
         2000,
     );

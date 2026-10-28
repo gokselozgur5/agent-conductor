@@ -131,3 +131,51 @@ fn instruction_prompt_uses_only_verified_text_in_frozen_order() {
     fs::write(&packet.contract.instructions[0].path, "replacement").unwrap();
     assert!(native_vendor_command(&pin, &packet, BTreeMap::new()).is_err());
 }
+
+#[test]
+fn exact_external_instruction_file_does_not_grant_its_parent_directory() {
+    use conductor_runtime::InstructionPin;
+    use sha2::{Digest, Sha256};
+    let (_root, pin, mut packet) = fixture(AdapterKind::Claude);
+    let external = tempfile::tempdir().unwrap();
+    let parent = external.path().canonicalize().unwrap();
+    let path = parent.join("policy.md");
+    fs::write(&path, "approved outer policy").unwrap();
+    packet.contract.instructions.push(InstructionPin {
+        path: path.clone(),
+        sha256: format!("{:x}", Sha256::digest(b"approved outer policy")),
+    });
+    packet.contract.authority.read_roots.push(path);
+    let spec = native_vendor_command(&pin, &packet, BTreeMap::new()).unwrap();
+    assert!(!spec.arguments.iter().any(|arg| arg == "--add-dir"));
+    assert!(
+        spec.arguments
+            .last()
+            .unwrap()
+            .contains("approved outer policy")
+    );
+    packet.contract.authority.read_roots.push(parent);
+    assert!(matches!(
+        native_vendor_command(&pin, &packet, BTreeMap::new()),
+        Err(VendorError::Capability)
+    ));
+}
+
+#[test]
+fn encoded_instruction_expansion_is_bounded_before_launch() {
+    use conductor_runtime::InstructionPin;
+    use sha2::{Digest, Sha256};
+    let (_root, pin, mut packet) = fixture(AdapterKind::Claude);
+    let path = packet.contract.workspace.join("policy.md");
+    let content = "\"".repeat(40 * 1024);
+    fs::write(&path, &content).unwrap();
+    packet.contract.instructions.push(InstructionPin {
+        path,
+        sha256: format!("{:x}", Sha256::digest(content.as_bytes())),
+    });
+    assert!(conductor_runtime::read_pinned_instructions(&packet).is_ok());
+    assert!(matches!(
+        native_vendor_command(&pin, &packet, BTreeMap::new()),
+        Err(VendorError::Encoding)
+    ));
+}

@@ -33,6 +33,8 @@ use uuid::Uuid;
 mod check_execution;
 mod clock;
 #[cfg(unix)]
+mod instruction_policy;
+#[cfg(unix)]
 mod repository_watch;
 #[cfg(unix)]
 mod workflow;
@@ -919,6 +921,9 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
     }
 
     async fn maintain(&self) -> Result<(), ErrorBody> {
+        self.invalidate_instruction_tasks()
+            .await
+            .map_err(store_error)?;
         self.recover_fenced_receipts().await.map_err(store_error)?;
         self.reconcile_expired()
             .await
@@ -2316,6 +2321,126 @@ mod effect_tests {
                 .expect("fence status")
         );
     }
+    #[tokio::test]
+    // Keep persisted invalidation, operator precedence and restart in one scenario.
+    #[allow(clippy::too_many_lines)]
+    async fn instruction_invalidation_is_durable_and_preserves_operator_stop() {
+        use agent_conductor_store::{EffectAudit, ExecutionPreparation};
+        use conductor_runtime::InstructionPin;
+        for operator_stop in [None, Some(CommandKind::Pause), Some(CommandKind::Cancel)] {
+            let (directory, store) = lifecycle_store().await;
+            let service =
+                PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                    .await
+                    .unwrap();
+            let (claimed, token) = claim_task(&service).await;
+            store
+                .claim_effect(
+                    &token,
+                    "runner",
+                    10000,
+                    EffectAudit {
+                        id: "claim",
+                        actor_id: "runtime",
+                        correlation_id: &token,
+                        now_ms: 100,
+                    },
+                )
+                .await
+                .unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let workspace = root.join("work");
+            fs::create_dir(&workspace).unwrap();
+            fs::write(workspace.join("retained"), "unfinished work").unwrap();
+            let source = root.join("outer-policy.md");
+            fs::write(&source, "approved").unwrap();
+            let mut input = runtime_launch(&workspace);
+            input.packet.contract.instructions = vec![InstructionPin {
+                path: source.clone(),
+                sha256: hash("approved"),
+            }];
+            input
+                .packet
+                .contract
+                .authority
+                .read_roots
+                .push(source.clone());
+            store
+                .prepare_execution(
+                    &ExecutionPreparation {
+                        effect_token: token.clone(),
+                        task_id: "task".into(),
+                        attempt_id: "attempt".into(),
+                        lease_epoch: 1,
+                        runner_id: "runner".into(),
+                        packet_json: serde_json::to_string(&input.packet).unwrap(),
+                        packet_sha256: input.packet.sha256().unwrap(),
+                    },
+                    EffectAudit {
+                        id: "prepare",
+                        actor_id: "runtime",
+                        correlation_id: &token,
+                        now_ms: 100,
+                    },
+                )
+                .await
+                .unwrap();
+            service.invalidate_instruction_tasks().await.unwrap();
+            assert_eq!(
+                service.workflow_task("task").await.unwrap().version,
+                claimed.version
+            );
+            if let Some(kind) = operator_stop.clone() {
+                let row = store.task("task").await.unwrap().unwrap();
+                service
+                    .apply_row(
+                        row,
+                        lifecycle_command(
+                            &claimed,
+                            Actor {
+                                id: ActorId("operator".into()),
+                                role: ActorRole::Operator,
+                            },
+                            kind,
+                            "operator-stop",
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+            fs::write(&source, "changed").unwrap();
+            service.invalidate_instruction_tasks().await.unwrap();
+            let task = service.workflow_task("task").await.unwrap();
+            let expected = match operator_stop {
+                None => TaskState::Blocked,
+                Some(CommandKind::Pause) => TaskState::Paused,
+                _ => TaskState::Cancelled,
+            };
+            assert_eq!(task.state, expected);
+            if expected == TaskState::Blocked {
+                assert_eq!(task.blocker.as_ref().unwrap().kind, "instruction_changed");
+            }
+            service.invalidate_instruction_tasks().await.unwrap();
+            assert_eq!(
+                service.workflow_task("task").await.unwrap().version,
+                task.version
+            );
+            assert_eq!(
+                fs::read(workspace.join("retained")).unwrap(),
+                b"unfinished work"
+            );
+            drop(service);
+            let restarted =
+                PersistentControlService::start_with_clock(store, 101, FixedClock::new(0))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                restarted.workflow_task("task").await.unwrap().state,
+                expected
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::too_many_lines)]

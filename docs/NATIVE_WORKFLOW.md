@@ -99,3 +99,39 @@ both transitions. The captured files and previously recorded execution fence are
 retained; this does not itself implement retry after a fenced capture or restart.
 The fault regression injects an audit failure in the second command and verifies
 unchanged task state and absent partial audit/replay records.
+
+## Explicit approved instructions
+
+A plan may include `instructions`, an ordered list of exact absolute file paths
+and SHA-256 hashes. Order outer-workspace rules before project-specific rules:
+
+```json
+"instructions": [
+  {"path": "/absolute/canonical/workspace/AGENTS.md", "sha256": "<approved SHA-256>"}
+]
+```
+
+Only explicitly approved files become instruction sources. Naming a file AGENTS,
+README or STATUS does not make its contents authoritative. Missing/changed files,
+symlink traversal, hardlinks, special files and invalid UTF-8 are refused. Use
+canonical source paths. File reads are bounded to 64 KiB each and 256 KiB total;
+the complete native prompt must additionally fit the 64 KiB argument bound.
+
+The controller brokers reads of these exact files and includes verified text in
+frozen order in the prompt. It does not grant the native model filesystem tools
+access to the files' parent directories or copy instruction files into project
+outputs. Empty instruction lists are omitted when serializing, preserving older
+normalized plan identities. Pins are rechecked at plan admission/execution,
+wrapper ACK/release/renewal and before independent verdict publication.
+
+Maintenance blocks an active attempt as `instruction_changed` when a pinned file
+changes or disappears. Blocked task state survives restart, preserves retained
+work and revokes current worker mutation authority. Operator-paused/cancelled
+state is preserved. Restoring the approved identity does not silently resume the
+task; continuation remains explicit, revalidates the original pins and cannot
+substitute new instruction hashes. Approving changed instructions needs a new
+operator-approved plan; in-place instruction-policy amendment is not implemented.
+
+Instruction filenames are not auto-discovered as authority. Conventional advisory
+context discovery, owned-event attribution and automatic wake remain separate
+requirements; explicit pins do not claim those are complete.

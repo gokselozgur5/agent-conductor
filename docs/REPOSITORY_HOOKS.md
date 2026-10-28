@@ -2,7 +2,7 @@
 
 The opt-in daemon watcher turns repository observations into the existing durable
 semantic-event/delivery system. It never directly launches a model. Automatic wake,
-owned-attempt attribution and instruction-contract invalidation are still pending.
+owned-attempt attribution and automatic wake are still pending.
 
 Register the project and a dedicated read-only observer agent through the CLI.
 Create subscriptions with `file.*` and optional project/path filters; use
@@ -95,12 +95,16 @@ a mismatch or unavailable source stops the worker with
 `instruction_changed_or_unavailable`. Native command construction includes only
 verified UTF-8 texts in frozen order. Files are limited to 64 KiB each and 256 KiB in
 aggregate; missing files, symlinks, hardlinks, special files and hash mismatch
-are refused. This currently supports workspace-contained pins only.
+are refused. Explicit approved pins can name exact canonical files outside the
+workspace; their parent directories are not granted to native model tools.
 
 Regressions demonstrate refusal before ACK/release, a live worker stopped after
 instruction replacement, rejected bounded/file-type/content cases, ordered prompt
 text and debug redaction. These are synthetic local process/command tests, not
-new native model conformance runs. Native workflow plan construction still emits
-an empty pin list; operator-approved source discovery/staging, outer-workspace
-sources, task-level invalidation and continuation policy are not yet connected.
-The runtime boundary alone does not complete instruction-change handling.
+new native model conformance runs. Native workflow plans now carry explicit
+ordered pins. Maintenance blocks active tasks when original instruction bytes
+change, preserves operator pause/cancel, and persists the block across restart.
+Continuation revalidates the original pins; approving new hashes requires a new
+plan. See [native workflow instructions](NATIVE_WORKFLOW.md#explicit-approved-instructions).
+Automatic advisory discovery, owned attribution and eligible wake remain open;
+these changes do not complete the full repository-hook requirement.

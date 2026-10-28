@@ -4,26 +4,43 @@ use sha2::{Digest, Sha256};
 use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::Component};
 
 /// Reads bounded UTF-8 instruction files in frozen order and verifies every hash.
-/// Native adapters currently admit workspace-contained instruction sources only.
+/// Sources must be authorized by the frozen packet read capabilities.
 /// Reads use directory descriptors and reject symlink/hardlink/special-file escapes.
 /// # Errors
-/// Refuses missing, changed, oversized, invalid UTF-8 or outside-workspace sources.
+/// Refuses missing, changed, oversized, invalid UTF-8 or unauthorized sources.
 pub fn read_pinned_instructions(packet: &ResumePacket) -> Result<Vec<String>, SnapshotError> {
     packet.validate().map_err(|_| SnapshotError::Invalid)?;
-    if packet.contract.instructions.is_empty() {
+    read_approved_instruction_sources(&packet.contract.instructions)
+}
+
+/// Reads exactly the source files explicitly pinned by a trusted operator plan.
+/// This broker read does not add directories to native model-tool permissions.
+/// # Errors
+/// Refuses non-absolute/non-clean/duplicate paths and bounded-content violations.
+pub fn read_approved_instruction_sources(
+    pins: &[crate::InstructionPin],
+) -> Result<Vec<String>, SnapshotError> {
+    if pins.is_empty() {
         return Ok(Vec::new());
+    }
+    if pins.len() > 128 {
+        return Err(SnapshotError::Bounds);
     }
     let root = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
-        .open(&packet.contract.workspace)
+        .open("/")
         .map_err(|_| SnapshotError::Io)?;
+    let mut unique = std::collections::BTreeSet::new();
     let mut contents = Vec::new();
     let mut total = 0usize;
-    for pin in &packet.contract.instructions {
+    for pin in pins {
+        if !unique.insert(&pin.path) {
+            return Err(SnapshotError::Invalid);
+        }
         let relative = pin
             .path
-            .strip_prefix(&packet.contract.workspace)
+            .strip_prefix("/")
             .map_err(|_| SnapshotError::Invalid)?;
         if relative
             .components()

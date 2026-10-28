@@ -61,7 +61,7 @@ pub fn native_vendor_command(
             .authority
             .read_roots
             .iter()
-            .any(|path| path != &root)
+            .any(|path| path != &root && !contract.instructions.iter().any(|pin| &pin.path == path))
         || contract
             .authority
             .write_roots
@@ -95,6 +95,10 @@ pub fn native_vendor_command(
         "{prompt}\nOperator-pinned instruction texts in contract order (within the frozen task authority):\n{}",
         serde_json::to_string(&instructions).map_err(|_| VendorError::Encoding)?
     );
+    // Keep one prompt argument below supported host exec argument limits.
+    if prompt.len() > 64 * 1024 {
+        return Err(VendorError::Encoding);
+    }
     if pin.kind == AdapterKind::Claude {
         authentication_environment.insert(
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),

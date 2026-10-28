@@ -33,6 +33,9 @@ pub struct NativeWorkflowPlan {
     #[serde(default)]
     pub toolchain_roots: Vec<PathBuf>,
     pub model_timeout_ms: u64,
+    /// Explicit operator-approved instruction files, ordered outer scope first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instructions: Vec<conductor_runtime::InstructionPin>,
 }
 #[derive(Debug, Serialize)]
 pub struct WorkflowOutcome {
@@ -101,6 +104,7 @@ impl<C: Clock> PersistentControlService<C> {
         worker_authentication: BTreeMap<String, String>,
         verifier_authentication: BTreeMap<String, String>,
     ) -> Result<WorkflowOutcome, StoreError> {
+        validate_plan(plan)?;
         let workspace = artifacts.join("work/tree");
         let Assignment {
             worker_id,
@@ -120,12 +124,12 @@ impl<C: Clock> PersistentControlService<C> {
                 workspace: workspace.clone(),
                 starting_head: baseline.starting_head,
                 authority: CapabilityEnvelope {
-                    read_roots: vec![workspace.clone()],
+                    read_roots: std::iter::once(workspace.clone()).chain(plan.instructions.iter().map(|pin|pin.path.clone())).collect(),
                     write_roots: vec![workspace],
                     network: NetworkPolicy::InferenceOnly,
                     allow_workspace_commands: false,
                 },
-                instructions: vec![],
+                instructions: plan.instructions.clone(),
                 checks: plan.checks.clone(),
                 max_runtime_ms: plan.model_timeout_ms,
             },
@@ -418,7 +422,9 @@ impl<C: Clock> PersistentControlService<C> {
         packet.contract.worker_id = verifier.into();
         packet.contract.adapter = identity(&plan.verifier);
         packet.contract.workspace = artifacts.join("source/tree");
-        packet.contract.authority.read_roots = vec![packet.contract.workspace.clone()];
+        packet.contract.authority.read_roots = std::iter::once(packet.contract.workspace.clone())
+            .chain(plan.instructions.iter().map(|pin| pin.path.clone()))
+            .collect();
         packet.contract.authority.write_roots.clear();
         packet.contract.authority.allow_workspace_commands =
             plan.verifier.kind == AdapterKind::Codex;
@@ -462,6 +468,12 @@ impl<C: Clock> PersistentControlService<C> {
             return Err(invalid("verification source changed"));
         }
         let _guard = self.mutations.lock().await;
+        if !self
+            .ensure_instruction_current_locked(worker_packet)
+            .await?
+        {
+            return Err(invalid("approved instruction invalidated before verdict"));
+        }
         let current = self.workflow_task(&plan.task_id).await?;
         if current.version != before.version
             || !current.attempt.as_ref().is_some_and(|attempt| {
@@ -561,6 +573,8 @@ fn identity(pin: &VendorPin) -> AdapterIdentity {
     }
 }
 pub(super) fn validate_plan(plan: &NativeWorkflowPlan) -> Result<(), StoreError> {
+    conductor_runtime::read_approved_instruction_sources(&plan.instructions)
+        .map_err(|_| invalid("approved instruction source changed or unavailable"))?;
     let check_budget = plan
         .checks
         .iter()
@@ -641,7 +655,32 @@ mod tests {
             }],
             toolchain_roots: vec![],
             model_timeout_ms: 1000,
+            instructions: vec![],
         }
+    }
+    #[test]
+    fn explicit_instruction_sources_are_validated_without_changing_legacy_plan_encoding() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let mut plan = plan(canonical.join("project"), canonical.join("artifacts"));
+        assert!(
+            serde_json::to_value(&plan)
+                .unwrap()
+                .get("instructions")
+                .is_none()
+        );
+        let source = canonical.join("policy.md");
+        std::fs::write(&source, "approved").unwrap();
+        plan.instructions = vec![conductor_runtime::InstructionPin {
+            path: source.clone(),
+            sha256: crate::hash("approved"),
+        }];
+        assert!(validate_plan(&plan).is_ok());
+        let restored: NativeWorkflowPlan =
+            serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
+        assert_eq!(restored.instructions, plan.instructions);
+        std::fs::write(source, "changed").unwrap();
+        assert!(validate_plan(&plan).is_err());
     }
     #[tokio::test]
     async fn repeated_tasks_reuse_observed_project_identity() {

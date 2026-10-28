@@ -182,5 +182,13 @@ updates/deletion, ignore exclusion, changes across restart and HEAD events. See
 prior failures remain recorded. The controlled delayed-start probe explains the
 fixture's missed-renewal assumption, not every historical timeout. The earlier
 socket-permit deadline remains unresolved under issue20. Issue19 remains open:
-owned-attempt attribution, instruction invalidation and eligible bounded wake
-are not yet implemented. No model calls were made for watcher acceptance.
+owned-attempt attribution and eligible bounded wake are not yet implemented.
+No model calls were made for watcher acceptance.
+
+Explicit instruction integration now carries ordered approved original-file pins
+through native plans, including exact outer-workspace files without parent tool
+access. Active tasks are blocked on changed pins; pause/cancel and retained files
+are preserved, with block persistence across restart. Continuation revalidates
+original pins. All 174 workspace tests pass, including JSON prompt-expansion
+refusal and durable invalidation. This does not complete automatic discovery,
+attribution or wake; native integration acceptance is still being exercised.
