@@ -53,7 +53,10 @@ snapshot. Retain that external directory; see
 [RECOVERY_AUTHORITY.md](RECOVERY_AUTHORITY.md). Snapshot tools require their exact
 supported schema, so preserve matching tools for pre-upgrade snapshots.
 Recorded interrupted publications can now be repaired through `repair-restore`;
-full state-loss ownership and generation recovery remain open under issue #59.
+missing/corrupt-state recovery has a separate
+[prepared host-restart workflow](DISASTER_RECOVERY.md), requiring authority
+format 2 and a fresh compatible snapshot. Actual host-restart acceptance remains
+open under issue #59.
 
 Validation covers state preservation, WAL export, manifest verification,
 tampering, live-lock refusal, active/unfenced work, unsupported schema, links,

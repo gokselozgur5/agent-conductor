@@ -49,6 +49,8 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -p test_operator_backup.py -v
           python3 -m unittest discover -s tests -p test_restore_publication.py -v
+          python3 -m unittest discover -s tests -p test_disaster_recovery.py -v
+          python3 -m unittest discover -s tests -p test_host_recovery_integration.py -v
 
       - name: Reject committed credential material
         shell: bash

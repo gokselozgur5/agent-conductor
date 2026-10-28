@@ -22,8 +22,12 @@ outside the replaceable state directory. Generations are reserved durably before
 SQLite boot recovery and remain consumed after failed startup or database
 rollback. Backup/restore/repair share that lock. See
 [RECOVERY_AUTHORITY.md](RECOVERY_AUTHORITY.md) for upgrade and retention rules.
-This establishes generation history, not proof that orphan writers have stopped;
-missing/corrupt-state restoration remains refused.
+Generation history alone does not establish that orphan writers have stopped.
+The separate [prepared host recovery](DISASTER_RECOVERY.md) path now quarantines
+startup and requires a different native boot epoch on the same host before
+restoring missing/corrupt state. Native same-boot refusal and daemon reopen are
+tested; positive boot transitions are simulated in automated tests. Real host
+restart acceptance remains pending and issue #59 stays open.
 
 Repository hooks now observe configured source repositories and owned attempt
 trees, debounce changes, flush normal accepted terminal captures and admit one

@@ -47,6 +47,28 @@ def write_record(path, value):
     return inode
 
 
+def populate_stage(state, source, stage, manifest):
+    snapshot.copy_inventory(source / 'state', stage, manifest['entries'])
+    if snapshot.inventory(stage) != manifest['entries']:
+        raise ValueError('staged restore differs from the verified snapshot')
+    # Preserve excluded executables still located beneath this runtime root.
+    # Registered project directories inside state cannot retain their inode
+    # identity through copying, so that unsupported layout is refused.
+    for item in manifest['dependencies']:
+        path = Path(item['path'])
+        if path.is_relative_to(state):
+            relative = path.relative_to(state)
+            if item['kind'] == 'directory':
+                raise ValueError('external directory dependency overlaps restored state')
+            target = stage / relative
+            if not target.exists():
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                record = snapshot.inventory(path.parent).get(path.name)
+                if not record or record['kind'] != 'file':
+                    raise ValueError('required retained executable unavailable')
+                snapshot.copy_inventory(path.parent, target.parent, {path.name: record})
+
+
 def restore(state, source, retained):
     with recovery_authority.hold(state):
         return _restore(state, source, retained)
@@ -79,25 +101,7 @@ def _restore(state, source, retained):
             raise ValueError('runtime generation cannot safely advance')
         stage = state.parent / (state.name + '.restore-' + uuid.uuid4().hex)
         stage.mkdir(mode=0o700)
-        snapshot.copy_inventory(source / 'state', stage, manifest['entries'])
-        if snapshot.inventory(stage) != manifest['entries']:
-            raise ValueError('staged restore differs from the verified snapshot')
-        # Preserve excluded executables still located beneath this runtime root.
-        # Registered project directories inside state cannot retain their inode
-        # identity through copying, so that unsupported layout is refused.
-        for item in manifest['dependencies']:
-            path = Path(item['path'])
-            if path.is_relative_to(state):
-                relative = path.relative_to(state)
-                if item['kind'] == 'directory':
-                    raise ValueError('external directory dependency overlaps restored state')
-                target = stage / relative
-                if not target.exists():
-                    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    record = snapshot.inventory(path.parent).get(path.name)
-                    if not record or record['kind'] != 'file':
-                        raise ValueError('required retained executable unavailable')
-                    snapshot.copy_inventory(path.parent, target.parent, {path.name: record})
+        populate_stage(state, source, stage, manifest)
         with closing(sqlite3.connect(stage / 'state.sqlite3')) as db:
             db.execute('update runtime_metadata set boot_generation=?', (high,))
             db.commit()
