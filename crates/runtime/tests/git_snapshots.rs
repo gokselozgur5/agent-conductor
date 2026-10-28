@@ -89,3 +89,39 @@ async fn sparse_checkout_refuses_instead_of_recording_omitted_files_as_deletions
     ));
     assert!(!target.exists());
 }
+
+#[tokio::test]
+async fn observation_detects_same_status_edits_and_preserves_source() {
+    use conductor_runtime::observe_git;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    repository(&source);
+    let index = fs::read(source.join(".git/index")).unwrap();
+    fs::write(source.join("tracked"), "first dirty version").unwrap();
+    let first = observe_git(&source).await.unwrap();
+    fs::write(source.join("tracked"), "other dirty version").unwrap();
+    let second = observe_git(&source).await.unwrap();
+    assert_eq!(first.status_sha256, second.status_sha256);
+    assert_ne!(
+        first.manifest.sha256().unwrap(),
+        second.manifest.sha256().unwrap()
+    );
+    assert_eq!(fs::read(source.join(".git/index")).unwrap(), index);
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    fs::remove_file(source.join("deleted")).unwrap();
+    fs::write(source.join("ignored"), "not included").unwrap();
+    let third = observe_git(&source).await.unwrap();
+    assert!(
+        third
+            .manifest
+            .entries
+            .iter()
+            .any(|e| e.path == "deleted" && e.sha256.is_none())
+    );
+    assert!(!third.manifest.entries.iter().any(|e| e.path == "ignored"));
+    std::os::unix::fs::symlink("tracked", source.join("linked")).unwrap();
+    assert!(matches!(
+        observe_git(&source).await,
+        Err(SnapshotError::Unsupported)
+    ));
+}

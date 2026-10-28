@@ -152,6 +152,39 @@ pub fn snapshot_paths(
     Ok(manifest)
 }
 
+/// Read-only bounded manifest observation using the snapshot path/link boundary.
+/// No file contents are retained in the returned manifest or written to disk.
+pub(crate) fn observe_paths(
+    source: &Path,
+    paths: &[String],
+) -> Result<SnapshotManifest, SnapshotError> {
+    let inventory = validate_paths(paths)?;
+    let root = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+        .open(source)
+        .map_err(|_| SnapshotError::Io)?;
+    let mut manifest = SnapshotManifest {
+        version: 1,
+        entries: Vec::new(),
+    };
+    let mut total = 0_u64;
+    for path in inventory {
+        let item = entry(&path, read_source(&root, &path)?.as_ref());
+        total = total
+            .checked_add(item.bytes)
+            .filter(|total| *total <= TOTAL_LIMIT)
+            .ok_or(SnapshotError::Bounds)?;
+        manifest.entries.push(item);
+    }
+    for expected in &manifest.entries {
+        if entry(&expected.path, read_source(&root, &expected.path)?.as_ref()) != *expected {
+            return Err(SnapshotError::Changed);
+        }
+    }
+    Ok(manifest)
+}
+
 fn validate_paths(paths: &[String]) -> Result<BTreeSet<String>, SnapshotError> {
     if paths.len() > PATH_LIMIT {
         return Err(SnapshotError::Bounds);
