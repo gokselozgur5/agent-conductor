@@ -182,3 +182,8 @@ A missing, linked, changed or unbound initial manifest refuses continuation befo
 another attempt starts. The task and prior work remain intact. Older packets that
 lack a baseline digest cannot establish this evidence; do not manufacture a new
 baseline from their dirty work to bypass the refusal.
+
+Initial decisions can be supplied with `plan --decisions-file /absolute/decisions.json`.
+The file is an array of objects with `id`, `question` and optional `rationale`.
+See [TASK_DECISIONS.md](TASK_DECISIONS.md) for limits, attribution and pause/resolve
+behavior; an open question blocks completion, not initial execution.

@@ -42,7 +42,9 @@ See [REPOSITORY_HOOKS.md](REPOSITORY_HOOKS.md) for accounting and timing limits.
 Task decisions now persist through the same versioned command/audit path and
 block completion until resolved. The board exposes operator actions; subsequent
 attempts receive labelled decision context. See [TASK_DECISIONS.md](TASK_DECISIONS.md)
-for authority, compatibility and remaining intake limits.
+for authority and compatibility. Initial operator questions and optional resolved
+rationales can now be declared in plans before the first worker claim; open
+questions retain the completion gate.
 Native worker checkpoint capture, continuation and read-only board/CLI visibility
 are validated locally: 215 tests, strict lint, real Chrome and a real Claude
 pause/restart/continuation followed by independent Codex acceptance.

@@ -72,6 +72,7 @@ def main():
     plan.add_argument('--checks-file', type=Path, required=True)
     plan.add_argument('--depends-on', action='append', default=[])
     plan.add_argument('--input-task')
+    plan.add_argument('--decisions-file', type=Path, help='JSON array of initial questions and optional operator rationales')
     plan.add_argument('--instruction', type=Path, action='append', default=[])
     submit = sub.add_parser('submit', help='authorize and queue one prepared native plan')
     submit.add_argument('plan', type=Path)
@@ -127,6 +128,8 @@ def main():
                 raise ValueError('accepted adapter binary changed; conformance must be revalidated')
             pin['executable'] = str(executable)
         value.update(task_id=args.task, project=config['project'], objective=args.objective_file.read_text(), artifacts=str(state / 'artifacts' / args.task), wrapper=str(Path(config['bin_dir']) / 'conductor-runner'), checks=json.loads(args.checks_file.read_text()), toolchain_roots=template.get('toolchain_roots', []), instructions=[])
+        if args.decisions_file:
+            value['decisions'] = json.loads(args.decisions_file.read_text())
         if args.depends_on:
             value['depends_on'] = args.depends_on
         if args.input_task:

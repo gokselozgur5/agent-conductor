@@ -43,6 +43,17 @@ pub struct NativeWorkflowPlan {
     pub depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_task: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<InitialDecision>,
+}
+/// Operator-declared context admitted before the first worker claim.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitialDecision {
+    pub id: String,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct WorkflowOutcome {
@@ -383,6 +394,36 @@ impl<C: Clock> PersistentControlService<C> {
         Ok(project_id)
     }
 
+    async fn record_initial_decisions(&self, plan: &NativeWorkflowPlan) -> Result<(), StoreError> {
+        for decision in &plan.decisions {
+            self.workflow_command(
+                &plan.task_id,
+                "operator",
+                ActorRole::Operator,
+                CommandKind::OpenDecision {
+                    id: decision.id.clone(),
+                    question: decision.question.clone(),
+                },
+                "operator-declared initial question",
+            )
+            .await?;
+            if let Some(rationale) = &decision.rationale {
+                self.workflow_command(
+                    &plan.task_id,
+                    "operator",
+                    ActorRole::Operator,
+                    CommandKind::ResolveDecision {
+                        id: decision.id.clone(),
+                        rationale: rationale.clone(),
+                    },
+                    "operator-declared initial resolution",
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn assign_workflow(
         &self,
         plan: &NativeWorkflowPlan,
@@ -426,6 +467,7 @@ impl<C: Clock> PersistentControlService<C> {
                     .collect(),
             })
             .await?;
+            self.record_initial_decisions(plan).await?;
             self.workflow_command(
                 &plan.task_id,
                 "operator",
@@ -668,6 +710,25 @@ pub(super) fn validate_plan(plan: &NativeWorkflowPlan) -> Result<(), StoreError>
     {
         return Err(invalid("invalid workflow dependencies"));
     }
+    let decisions = plan
+        .decisions
+        .iter()
+        .map(|d| &d.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if plan.decisions.len() > 32
+        || decisions.len() != plan.decisions.len()
+        || plan.decisions.iter().any(|d| {
+            d.id.trim().is_empty()
+                || d.id.len() > 128
+                || d.question.trim().is_empty()
+                || d.question.len() > 1024
+                || d.rationale
+                    .as_ref()
+                    .is_some_and(|r| r.trim().is_empty() || r.len() > 2048)
+        })
+    {
+        return Err(invalid("invalid initial decisions"));
+    }
     let check_budget = plan
         .checks
         .iter()
@@ -737,6 +798,7 @@ mod tests {
             wake_subscription: None,
             depends_on: vec![],
             input_task: None,
+            decisions: vec![],
             task_id: "task-one".into(),
             project,
             objective: "synthetic objective".into(),
@@ -754,6 +816,186 @@ mod tests {
             instructions: vec![],
         }
     }
+    #[test]
+    fn initial_decisions_are_bounded_and_legacy_plan_encoding_is_unchanged() {
+        let mut plan = plan("/project".into(), "/artifacts".into());
+        assert!(
+            serde_json::to_value(&plan)
+                .unwrap()
+                .get("decisions")
+                .is_none()
+        );
+        plan.decisions = vec![InitialDecision {
+            id: "format".into(),
+            question: "Which format?".into(),
+            rationale: Some("UTF-8 text".into()),
+        }];
+        assert!(validate_plan(&plan).is_ok());
+        for (field, value) in [
+            ("id", " ".into()),
+            ("id", "a".repeat(129)),
+            ("question", "x".repeat(1025)),
+            ("rationale", "x".repeat(2049)),
+            ("rationale", " ".into()),
+        ] {
+            let mut json = serde_json::to_value(&plan).unwrap();
+            json["decisions"][0][field] = serde_json::Value::String(value);
+            assert!(validate_plan(&serde_json::from_value(json).unwrap()).is_err());
+        }
+        plan.decisions.push(plan.decisions[0].clone());
+        assert!(validate_plan(&plan).is_err());
+        plan.decisions = (0..33)
+            .map(|id| InitialDecision {
+                id: id.to_string(),
+                question: "question".into(),
+                rationale: None,
+            })
+            .collect();
+        assert!(validate_plan(&plan).is_err());
+    }
+
+    #[tokio::test]
+    async fn initial_questions_and_resolutions_precede_claim_and_survive_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let store = agent_conductor_store::Store::open(root.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        let service = PersistentControlService::start(store.clone(), 1)
+            .await
+            .unwrap();
+        let mut plan = plan(project.clone(), root.path().join("artifacts"));
+        plan.decisions = vec![
+            InitialDecision {
+                id: "format".into(),
+                question: "Which format?".into(),
+                rationale: Some("UTF-8 text".into()),
+            },
+            InitialDecision {
+                id: "scope".into(),
+                question: "Confirm final scope".into(),
+                rationale: None,
+            },
+        ];
+        validate_plan(&plan).unwrap();
+        service
+            .assign_workflow(&plan, &project, false)
+            .await
+            .unwrap();
+        let before = service.workflow_task(&plan.task_id).await.unwrap();
+        assert_eq!(before.state, agent_conductor_domain::TaskState::Claimed);
+        assert_eq!(before.decisions.len(), 2);
+        assert_eq!(before.decisions[0].opened_by.0, "operator");
+        let resolution = before.decisions[0].resolution.as_ref().unwrap();
+        assert_eq!(resolution.resolved_by.0, "operator");
+        assert_eq!(resolution.rationale, "UTF-8 text");
+        assert!(before.decisions[1].resolution.is_none());
+        let Response::TaskHistory { entries, .. } = service
+            .handle(Request::TaskHistory {
+                task_id: plan.task_id.clone(),
+                before: None,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("history");
+        };
+        let kinds: Vec<_> = entries
+            .iter()
+            .rev()
+            .map(|entry| entry.kind.as_str())
+            .collect();
+        let claim = kinds.iter().position(|kind| *kind == "claim").unwrap();
+        assert!(kinds[..claim].contains(&"open_decision"));
+        assert!(kinds[..claim].contains(&"resolve_decision"));
+        drop(service);
+        let restarted = PersistentControlService::start(store, 2).await.unwrap();
+        assert_eq!(
+            restarted
+                .workflow_task(&plan.task_id)
+                .await
+                .unwrap()
+                .decisions,
+            before.decisions
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_initial_decisions_have_no_dispatch_or_artifact_side_effect() {
+        let root = tempfile::tempdir().unwrap();
+        let store = agent_conductor_store::Store::open(root.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        let service = PersistentControlService::start(store.clone(), 1)
+            .await
+            .unwrap();
+        let mut plan = plan(
+            root.path().join("missing-project"),
+            root.path().join("artifacts"),
+        );
+        plan.decisions = vec![InitialDecision {
+            id: "x".into(),
+            question: " ".into(),
+            rationale: None,
+        }];
+        assert!(
+            service
+                .submit_workflow(&serde_json::to_string(&plan).unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .run_native_workflow(&plan, BTreeMap::new(), BTreeMap::new())
+                .await
+                .is_err()
+        );
+        assert!(store.workflows().await.unwrap().is_empty());
+        assert!(store.task(&plan.task_id).await.unwrap().is_none());
+        assert!(!plan.artifacts.exists());
+    }
+
+    #[tokio::test]
+    async fn initial_decision_audit_failure_never_claims_a_worker() {
+        use sqlx::{Connection, Executor};
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let database = root.path().join("state.sqlite3");
+        let store = agent_conductor_store::Store::open(&database).await.unwrap();
+        let service = PersistentControlService::start(store, 1).await.unwrap();
+        let mut plan = plan(project.clone(), root.path().join("artifacts"));
+        plan.decisions = vec![InitialDecision {
+            id: "format".into(),
+            question: "Which format?".into(),
+            rationale: Some("UTF-8".into()),
+        }];
+        let mut connection =
+            sqlx::SqliteConnection::connect(&format!("sqlite:{}", database.display()))
+                .await
+                .unwrap();
+        connection.execute("CREATE TRIGGER reject_initial_resolution BEFORE INSERT ON audit_events WHEN NEW.kind='resolve_decision' BEGIN SELECT RAISE(ABORT, 'injected'); END").await.unwrap();
+        assert!(
+            service
+                .assign_workflow(&plan, &project, false)
+                .await
+                .is_err()
+        );
+        let task = service.workflow_task(&plan.task_id).await.unwrap();
+        assert_eq!(task.state, agent_conductor_domain::TaskState::Backlog);
+        assert!(task.attempt.is_none());
+        assert_eq!(task.decisions.len(), 1);
+        assert!(task.decisions[0].resolution.is_none());
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE kind IN ('claim','resolve_decision')",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
     #[test]
     fn explicit_instruction_sources_are_validated_without_changing_legacy_plan_encoding() {
         let root = tempfile::tempdir().unwrap();
