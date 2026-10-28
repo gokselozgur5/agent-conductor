@@ -2,6 +2,11 @@
 
 ## Current result
 
+Checkpoint free-text claims now redact recognized credential shapes before new
+persistence, operator display and continuation. Legacy stored bytes and backups
+remain unchanged; this is a scoped literal policy, not general secret detection.
+See [CHECKPOINTS.md](CHECKPOINTS.md#credential-shaped-claim-redaction).
+
 The local operator launcher (`tools/conductor`) runs the authenticated board,
 repository observation and opt-in durable workflow dispatcher. Accepted pinned
 Claude and Codex adapters have completed real writer → immutable capture → checks

@@ -1,5 +1,7 @@
 //! Execution contracts outside the lifecycle domain. Vendor output never grants authority.
 mod contract;
+mod privacy;
+pub use privacy::redact_credentials;
 
 pub use contract::*;
 

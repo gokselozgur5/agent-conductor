@@ -20,6 +20,29 @@ pub struct WorkerCheckpoint {
     pub changed_artifacts: Vec<String>,
 }
 impl WorkerCheckpoint {
+    /// Produces display/context claims without changing ownership or sequence.
+    #[must_use]
+    pub fn redacted(&self) -> Self {
+        let mut value = self.clone();
+        for text in [
+            &mut value.completed_work,
+            &mut value.current_state,
+            &mut value.next_action,
+        ] {
+            *text = crate::redact_credentials(text);
+        }
+        for items in [
+            &mut value.open_decisions,
+            &mut value.running_commands,
+            &mut value.changed_artifacts,
+        ] {
+            for text in items {
+                *text = crate::redact_credentials(text);
+            }
+        }
+        value
+    }
+
     /// # Errors
     /// Rejects stale identity, unsupported schema and unbounded or empty claims.
     pub fn validate(&self, packet: &ResumePacket) -> Result<(), &'static str> {
@@ -122,7 +145,7 @@ impl CheckpointStream {
                 let envelope: CheckpointEnvelope = serde_json::from_str(text).ok()?;
                 let claim = envelope.conductor_checkpoint;
                 claim.validate(&self.packet).ok()?;
-                (claim.sequence > self.sequence).then_some(claim)
+                (claim.sequence > self.sequence).then(|| claim.redacted())
             })
             .max_by_key(|claim| claim.sequence)
     }
@@ -229,5 +252,25 @@ mod tests {
             1
         );
         assert!(checkpoint_guidance(&packet()).contains("Do not create a checkpoint file"));
+    }
+    #[test]
+    fn checkpoint_stream_redacts_credential_shaped_claims_before_delivery() {
+        let credential = ["sk", "-ant-", "syntheticCredential123456789"].concat();
+        let mut value = claim(1);
+        value["current_state"] = format!("Observed {credential}; keep ordinary context").into();
+        value["running_commands"] = serde_json::json!([format!("tool --key={credential}")]);
+        let bytes = event("assistant", &value);
+        let mut stream = CheckpointStream::new(packet());
+        let middle = bytes.len() / 2;
+        assert!(stream.observe(&bytes[..middle]).is_none());
+        let captured = stream.observe(&bytes[middle..]).unwrap();
+        let encoded = serde_json::to_string(&captured).unwrap();
+        assert!(
+            !encoded.contains(&credential),
+            "credential-shaped claim crossed the checkpoint boundary"
+        );
+        assert!(captured.current_state.contains("keep ordinary context"));
+        assert_eq!(captured.task_id, "task");
+        assert_eq!(captured.sequence, 1);
     }
 }
