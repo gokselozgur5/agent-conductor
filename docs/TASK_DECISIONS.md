@@ -42,10 +42,37 @@ Legacy tasks without a decision field decode to an empty list. Keep a database
 backup for an intentional downgrade; never remove the migration record to force
 an older binary to run.
 
-Current limits: decisions belong to existing tasks. A native plan does not yet
-provide initial decision declarations; pause its first attempt before adding a
-question. Workers do not autonomously create/close decisions. Checkpoint inspection,
-reassignment controls and full project/agent/event visibility remain separate work.
+## Initial plan declarations
+
+Native plans accept an optional `decisions` array (maximum 32 unique IDs):
+
+```json
+{"decisions":[{"id":"format","question":"Which format?","rationale":"Use UTF-8 text."},{"id":"scope","question":"Confirm final delivery scope"}]}
+```
+
+Use `tools/conductor plan ... --decisions-file /absolute/decisions.json` to supply
+that array. Each declaration opens a question through the existing operator
+command; an optional nonempty rationale then resolves it. Supplied author or time
+fields are rejected: the service records the operator and observation time.
+Validation occurs before queue admission or artifact creation. Legacy plans omit
+this field when empty, preserving their canonical encoding and replay identity.
+
+Declarations are applied after task creation and before readiness or first claim.
+They are separate audited transactions: if a later write fails, earlier declared
+questions remain visible in the unfinished backlog task, and no worker is claimed.
+This does not promise an all-or-nothing task initialization transaction. Such a
+partial intake requires operator reconciliation; it is never silently replayed.
+Continuation uses the task's current records and does not redeclare initial
+questions or replace later resolutions with the original plan.
+
+Open questions allow work to begin but prevent completion. To resolve one during
+an active attempt, pause first, resolve it, then continue with fresh context and
+independent review. A resolved initial decision is an operator declaration, not
+worker authority or proof that the deliverable satisfies it.
+
+Workers do not autonomously create/close decisions. Checkpoint claims remain
+separate from formal decisions; see [CHECKPOINTS.md](CHECKPOINTS.md). Reassignment
+controls and full project/agent/event visibility remain separate work.
 
 Validation covers completion refusal despite passing checks/verdict, resolution
 followed by a new attempt/epoch and review, current-worker role spoofing, active
@@ -57,3 +84,12 @@ A Chrome probe exercises open/resolve, CLI read-back, markup-as-text, token stor
 boundaries and disconnect with an in-flight response. A pre-decision binary was
 actually refused on a migrated fixture database. No model calls were needed for
 these controlled decision tests; this is not new native model acceptance.
+
+Initial intake validation passes 219 workspace tests and strict Clippy, including
+bounds/duplicates, pre-claim ordering, restart, invalid-input side-effect refusal
+and an injected audit failure preventing claim. A real launcher/CLI process probe
+verified generation, identical resubmission, forged-author refusal and queued
+restart persistence without model calls. Evidence is retained privately in
+`reviews/agent-conductor-runtime-20261028/intake-cli-v1/receipt.json` and
+`intake-workspace-v2.log`. This does not replace the earlier native workflow
+acceptance or claim automatic recovery of partially initialized tasks.

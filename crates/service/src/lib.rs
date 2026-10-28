@@ -53,7 +53,7 @@ mod workflow_review;
 #[cfg(unix)]
 pub use repository_watch::{OwnedWatchState, RepositoryWatch, RepositoryWatchState};
 #[cfg(unix)]
-pub use workflow::{NativeWorkflowPlan, WorkflowOutcome};
+pub use workflow::{InitialDecision, NativeWorkflowPlan, WorkflowOutcome};
 #[cfg(unix)]
 mod source_finalization;
 #[cfg(unix)]
