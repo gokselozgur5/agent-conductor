@@ -249,9 +249,20 @@ async fn actual_live_proxy_loses_write_capability_after_host_stop() {
     assert_eq!(nix::unistd::getpgid(Some(pid)).unwrap(), pid);
     cancel.send(true).unwrap();
     assert_eq!(host.await.unwrap().completed_sequence, Some(0));
-    assert!(child.try_wait().unwrap().is_none());
-    let result=call(&mut input,&mut output,&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"conductor_write_text","arguments":{"path":"late","contents":"must not appear","expected_sha256":null}}})).await;
-    assert_eq!(result["result"]["isError"], true);
+    let mut late = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"conductor_write_text","arguments":{"path":"late","contents":"must not appear","expected_sha256":null}}})).unwrap();
+    late.push(b'\n');
+    if let Err(error) = input.write_all(&late).await {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+    // Broker loss must terminate the proxy even while its stdin remains open.
+    let mut line = String::new();
+    assert_eq!(
+        tokio::time::timeout(WAIT, output.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
     drop(input);
     let result = tokio::time::timeout(WAIT, child.wait_with_output())
         .await

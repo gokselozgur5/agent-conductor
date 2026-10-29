@@ -1486,3 +1486,7 @@ async fn owned_journal_eof_reports_transport_completion_without_durable_closure(
         .unwrap();
     assert_progress(&store, &binding, 0, 0).await;
 }
+
+mod idle_transport {
+    include!("broker_journal_idle_tests.rs");
+}

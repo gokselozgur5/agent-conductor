@@ -2,7 +2,7 @@
 use crate::{
     BrokerEndpoint, BrokerError, BrokerFilesystem, BrokerScope, BrokerStreamEnd,
     BrokerStreamReason, RemoteBrokerJournal, connect_broker_endpoint, continuous_millis,
-    serve_broker_stream,
+    serve_owned_broker_stream,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -252,7 +252,7 @@ async fn broker_worker(
             Err(_)=>return Ok(BrokerStreamEnd {reason:BrokerStreamReason::TransportFailed,completed_sequence:broker.revoke().ok()}),
         }
     };
-    serve_broker_stream(
+    serve_owned_broker_stream(
         stream,
         broker,
         Arc::new(journal),

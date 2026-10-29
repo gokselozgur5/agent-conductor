@@ -215,10 +215,64 @@ async fn forward(
 /// Invalid frames/state, exhausted IDs, stalled transports or uncertain broker results.
 pub async fn serve_broker_mcp<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     input: R,
+    output: W,
+    stream: UnixStream,
+    scope: BrokerScope,
+    wait: Duration,
+) -> Result<(), BrokerMcpError> {
+    serve_mcp(input, output, stream, scope, wait, false).await
+}
+
+/// Translate MCP for an independently supervised broker. After initialization,
+/// wait for input without spending the frame budget, while watching broker loss.
+/// The broker owner must enforce lease expiry and cancellation independently.
+/// Initial handshake, partial frames, calls and replies remain bounded.
+/// # Errors
+/// Invalid protocol, lost broker, unsolicited broker data or stalled frames.
+pub async fn serve_owned_broker_mcp<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    input: R,
+    output: W,
+    stream: UnixStream,
+    scope: BrokerScope,
+    wait: Duration,
+) -> Result<(), BrokerMcpError> {
+    serve_mcp(input, output, stream, scope, wait, true).await
+}
+
+async fn owned_input_ready<R: AsyncBufRead + Unpin>(
+    input: &mut R,
+    broker: &mut BufReader<UnixStream>,
+) -> Result<bool, BrokerMcpError> {
+    tokio::select! {
+        biased;
+        // No request is outstanding: EOF, errors and unsolicited bytes all
+        // invalidate this private connection.
+        _ = broker.fill_buf() => Err(BrokerMcpError::Broker),
+        ready = input.fill_buf() => Ok(!ready.map_err(|_| BrokerMcpError::Transport)?.is_empty()),
+    }
+}
+
+async fn next_mcp_frame<R: AsyncBufRead + Unpin>(
+    input: &mut R,
+    broker: &mut BufReader<UnixStream>,
+    wait: Duration,
+    allow_idle: bool,
+) -> Result<Option<Vec<u8>>, BrokerMcpError> {
+    if allow_idle && !owned_input_ready(input, broker).await? {
+        return Ok(None);
+    }
+    tokio::time::timeout(wait, frame(input, MAX_BROKER_FRAME))
+        .await
+        .map_err(|_| BrokerMcpError::Transport)?
+}
+
+async fn serve_mcp<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    input: R,
     mut output: W,
     stream: UnixStream,
     scope: BrokerScope,
     wait: Duration,
+    allow_idle: bool,
 ) -> Result<(), BrokerMcpError> {
     if wait.is_zero() || wait > Duration::from_secs(30) {
         return Err(BrokerMcpError::Invalid);
@@ -229,9 +283,7 @@ pub async fn serve_broker_mcp<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let mut sequence = 1;
     let mut ids = BTreeSet::new();
     loop {
-        let bytes = tokio::time::timeout(wait, frame(&mut input, MAX_BROKER_FRAME))
-            .await
-            .map_err(|_| BrokerMcpError::Transport)??;
+        let bytes = next_mcp_frame(&mut input, &mut broker, wait, allow_idle && state == 2).await?;
         let Some(bytes) = bytes else {
             return Ok(());
         };

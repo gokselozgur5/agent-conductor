@@ -6,12 +6,12 @@ historical evidence and must not be read as current feature inventories.
 
 ## Current baseline and broker vendor candidate
 
-Main at `4a2ec6f415995603af7304ae170655945687f87b` includes merged PRs #103
-and #105: prepared broker vendor commands, exact session handoff and selected
+Main at `2f1ed4f1e0578b12112ae3f2c03c2f48454008f2` includes merged PRs #103,
+#105 and #107: prepared commands, joint vendor supervision and selected
 actual Codex file-access controls. Their exact pre-merge and post-merge CI passed
 on macOS and Linux. Delivered bundles and existing runtimes remain unchanged.
 
-The joint supervision candidate owns the prepared vendor process and broker in
+Joint supervision owns the prepared vendor process and broker in
 one future, monitors authoritative lease deadlines and preserves separate process
 and durable closure results. Normal proxy EOF can precede final vendor output;
 verified broker closure permits that tail while lease cancellation remains active.
@@ -24,7 +24,16 @@ exit, private receipt closure and closed state after reopen. Plugin/catalog
 features are disabled to remove observed background Git descendants; process-fence
 conditions remain unchanged. This is not enabled native daemon writer admission.
 
-Pre-ACK reconciliation, daemon lifecycle integration, long idle inference,
+The idle-session candidate separates waiting for a request from bounded framing
+in the owned journal, supervised file transport and initialized MCP proxy. Legacy
+API idle deadlines and handshake, partial-frame, operation and reply bounds remain.
+Cancellation and broker loss still terminate idle sessions. A pinned Codex test
+waited 35 seconds between write and read through the local Responses provider,
+then exited successfully with two completed operations and durable closure after
+reopen (49.21 seconds total). Its test lease is 55 seconds; production budgets are
+unchanged. This proves this controlled idle path, not live-provider reliability.
+
+Pre-ACK reconciliation, daemon lifecycle integration,
 complete OS confinement, live-model behavior and operational acceptance remain
 incomplete. See [the broker design](CODEX_WRITER_DESIGN.md) for proof boundaries
 and [the delivery audit](DELIVERY_ACCEPTANCE.md) for the original full scope.

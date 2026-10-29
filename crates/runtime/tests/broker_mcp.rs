@@ -316,3 +316,69 @@ async fn abort_inflight_proxy_closes_channel_and_never_replays() {
     peer.read_to_end(&mut bytes).await.unwrap();
     assert!(bytes.is_empty());
 }
+
+#[tokio::test]
+async fn owned_mcp_idle_retains_deadlines_and_observes_broker_loss() {
+    for mode in [
+        "request",
+        "partial",
+        "broker_eof",
+        "unsolicited",
+        "input_eof",
+        "handshake",
+    ] {
+        let (mut peer, proxy) = UnixStream::pair().unwrap();
+        let (client, stdio) = tokio::io::duplex(MAX_BROKER_FRAME * 2);
+        let (input, output) = tokio::io::split(stdio);
+        let task = tokio::spawn(conductor_runtime::serve_owned_broker_mcp(
+            input,
+            output,
+            proxy,
+            scope(),
+            Duration::from_millis(100),
+        ));
+        let mut io = BufReader::new(client);
+        if mode != "handshake" {
+            init(&mut io).await;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if mode != "handshake" {
+            assert!(!task.is_finished(), "{mode}");
+        }
+        let expected = match mode {
+            "request" => {
+                let reply = call(
+                    &mut io,
+                    json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+                )
+                .await;
+                assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 2);
+                drop(io);
+                Ok(())
+            }
+            "partial" => {
+                io.get_mut().write_all(b"{").await.unwrap();
+                Err(BrokerMcpError::Transport)
+            }
+            "broker_eof" => {
+                drop(peer);
+                Err(BrokerMcpError::Broker)
+            }
+            "unsolicited" => {
+                peer.write_all(b"{}\n").await.unwrap();
+                Err(BrokerMcpError::Broker)
+            }
+            "input_eof" => {
+                drop(io);
+                Ok(())
+            }
+            "handshake" => Err(BrokerMcpError::Transport),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            tokio::time::timeout(WAIT, task).await.unwrap().unwrap(),
+            expected,
+            "{mode}"
+        );
+    }
+}

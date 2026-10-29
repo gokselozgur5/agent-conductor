@@ -29,7 +29,7 @@ impl RegisteredBrokerJournal {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| BrokerError::Invalid)?;
         let (hold, cancel) = watch::channel(false);
         Ok(BrokerJournalSession {
-            task: runtime.spawn(self.serve_remote(stream, cancel, wait)),
+            task: runtime.spawn(self.serve_remote_owned(stream, cancel, wait)),
             _hold: hold,
         })
     }

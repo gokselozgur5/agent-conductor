@@ -106,9 +106,56 @@ pub async fn serve_broker_stream(
     stream: UnixStream,
     broker: BrokerFilesystem,
     journal: Arc<dyn BrokerJournal>,
+    cancel: watch::Receiver<bool>,
+    frame_timeout: Duration,
+    settle_timeout: Duration,
+) -> Result<BrokerStreamEnd, BrokerError> {
+    serve_stream(
+        stream,
+        broker,
+        journal,
+        cancel,
+        frame_timeout,
+        settle_timeout,
+        false,
+    )
+    .await
+}
+
+/// Serve a private stream whose owner independently enforces lease expiry and
+/// heartbeat loss through cancellation. Idle time before the first frame byte
+/// does not consume the framing budget; partial frames and operations remain
+/// bounded. The cancellation sender must remain owned by that supervisor.
+/// # Errors
+/// Invalid timeout configuration refuses serving and revokes the broker.
+pub async fn serve_owned_broker_stream(
+    stream: UnixStream,
+    broker: BrokerFilesystem,
+    journal: Arc<dyn BrokerJournal>,
+    cancel: watch::Receiver<bool>,
+    frame_timeout: Duration,
+    settle_timeout: Duration,
+) -> Result<BrokerStreamEnd, BrokerError> {
+    serve_stream(
+        stream,
+        broker,
+        journal,
+        cancel,
+        frame_timeout,
+        settle_timeout,
+        true,
+    )
+    .await
+}
+
+async fn serve_stream(
+    stream: UnixStream,
+    broker: BrokerFilesystem,
+    journal: Arc<dyn BrokerJournal>,
     mut cancel: watch::Receiver<bool>,
     frame_timeout: Duration,
     settle_timeout: Duration,
+    allow_idle: bool,
 ) -> Result<BrokerStreamEnd, BrokerError> {
     if frame_timeout.is_zero()
         || frame_timeout > Duration::from_secs(30)
@@ -123,6 +170,17 @@ pub async fn serve_broker_stream(
     let (input, mut output) = stream.into_split();
     let mut reader = BufReader::new(input);
     loop {
+        if allow_idle {
+            tokio::select! {
+                biased;
+                () = stop(&mut cancel) => return Ok(end(broker, BrokerStreamReason::Cancelled)),
+                ready = reader.fill_buf() => match ready {
+                    Ok([]) => return Ok(end(broker, BrokerStreamReason::PeerClosed)),
+                    Ok(_) => {},
+                    Err(_) => return Ok(end(broker, BrokerStreamReason::TransportFailed)),
+                }
+            }
+        }
         let bytes = tokio::select! {
             biased;
             ()=stop(&mut cancel)=>return Ok(end(broker,BrokerStreamReason::Cancelled)),

@@ -38,8 +38,7 @@ async fn owned_vendor_supervision_separates_process_exit_and_broker_closure() {
                 setup.store.clone(),
                 setup.binding.clone(),
                 deadline,
-                // This five-second renewal control must not expire its separate journal wait.
-                Duration::from_secs(if mode == "live-renewed" { 10 } else { 5 }),
+                Duration::from_secs(5),
                 broker_owner_audit("supervised-owner"),
             )
             .await
