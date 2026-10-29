@@ -270,6 +270,39 @@ fn heartbeat_is_allowed_after_mutation_cutoff_but_before_lease_expiry() {
 }
 
 #[test]
+fn heartbeat_accepts_only_the_instant_before_expiry_even_if_wall_time_moves_back() {
+    for task in [running_task(), verifying_task()] {
+        let deadline = task.attempt.as_ref().unwrap().lease.deadline_monotonic_ms;
+        let heartbeat = command(
+            &task,
+            actor("worker", ActorRole::Worker),
+            CommandKind::Heartbeat {
+                attempt_id: AttemptId::from("attempt-1"),
+                lease_epoch: task.last_lease_epoch,
+                lease_duration_ms: LEASE_MS,
+                worker_margin_ms: MARGIN_MS,
+            },
+        );
+        for at in [deadline - 1, deadline, deadline + 1] {
+            let mut reading = clock(at);
+            // A wall-clock correction cannot revive an expired monotonic lease.
+            reading.wall_unix_ms = 0;
+            let result = apply(&task, &heartbeat, reading);
+            if at < deadline {
+                let renewed = result.unwrap().task.attempt.unwrap().lease;
+                assert_eq!(renewed.deadline_monotonic_ms, at + LEASE_MS);
+                assert_eq!(
+                    renewed.worker_deadline_monotonic_ms,
+                    at + LEASE_MS - MARGIN_MS
+                );
+            } else {
+                assert!(matches!(result, Err(Rejection::InvalidLease(_))));
+            }
+        }
+    }
+}
+
+#[test]
 fn restart_requires_recovery_heartbeat_before_mutation() {
     let task = running_task();
     let epoch = task.last_lease_epoch;
