@@ -517,3 +517,75 @@ async fn seed_invalid_preowner_page(root: &tempfile::TempDir, binding: &FileBrok
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn owned_session_refuses_release_when_owner_audit_fails() {
+    let NativeLaunchSetup {
+        root,
+        store,
+        binding,
+        launch,
+        endpoint,
+        wrapper,
+    } = native_launch_setup(false).await;
+    let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+    let acknowledged =
+        crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+            .await
+            .unwrap();
+    let expected = acknowledged.runner.identity().clone();
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("state.sqlite3").display(),
+    ))
+    .await
+    .unwrap();
+    db.execute("CREATE TRIGGER reject_session_owner BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.release_authorized' BEGIN SELECT RAISE(FAIL,'fixture'); END").await.unwrap();
+    assert!(
+        acknowledged
+            .release(
+                store.clone(),
+                binding.clone(),
+                continuous_millis().unwrap() + 4000,
+                Duration::from_secs(5),
+                broker_owner_audit("session-owner-fail"),
+            )
+            .await
+            .is_err()
+    );
+    let directory = conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if directory.read(&expected).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        directory.read(&expected).unwrap().observation,
+        conductor_runtime::BrokerShutdownObservation::NeverReleased
+    ));
+    assert!(store.file_broker_owner(&binding).await.is_err());
+    assert_progress(&store, &binding, 0, 0).await;
+    assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    assert!(
+        crate::recover_unowned_broker_from_receipt(
+            &store,
+            &binding,
+            binding.boot_generation,
+            broker_owner_audit("session-owner-recover"),
+        )
+        .await
+        .unwrap()
+    );
+    assert!(store.file_broker_status(&binding).await.unwrap().closed);
+}
