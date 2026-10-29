@@ -756,3 +756,28 @@ store reopen and a new generation beyond 129 malformed preparations. No file is
 written and no workflow continuation is admitted. This resolves the preceding
 registered-but-unowned gap; pre-ACK uncertainty, full journal/release supervision,
 vendor admission and operational acceptance remain open.
+
+
+## Owned native broker service session (issue #100)
+
+`AcknowledgedBroker::release` consumes the runner and authenticated journal stream.
+It registers a fresh journal, starts it with an abort-on-drop task owner, persists
+the independently observed release owner, and only then releases the wrapper.
+The returned `NativeBrokerSession` retains both transports and their exact store,
+binding and receipt-root context. The caller supplies a deadline from its live
+lease authority and remains responsible for approved vendor/OS admission.
+
+The session exposes the private proxy handoff, renewal and cancellation. Its
+`finish` verifies runner shutdown and the private receipt, observes journal
+completion, then closes durable broker ownership. This is not execution fencing
+or task acceptance. Dropping the session or cancelling a pending finish closes
+the runner control pipe and aborts the journal task; no closure is invented.
+
+Actual-runner controls cover real file publication and late-write refusal, valid
+and expired renewal, direct drop, cancellation of a polled pending finish,
+owner-audit refusal before Release and closure-audit failure after shutdown.
+Independent receipt verification can close retained records after these tested
+interruptions. Transport EOF alone leaves ownership open. The SQLx transaction
+owner preserves rollback on journal cancellation; already committed effects are
+retained. These controls do not establish vendor confinement, external-effect
+settlement, physical reboot or long-running operational acceptance.

@@ -408,6 +408,15 @@ async fn operation_deadline_does_not_certify_a_stalled_journal() {
 
 #[tokio::test]
 async fn separate_session_peer_survives_broker_stop_but_cannot_write() {
+    separate_session_control(0).await;
+}
+
+#[tokio::test]
+async fn separate_session_delayed_start_preserves_write_revocation() {
+    separate_session_control(3).await;
+}
+
+async fn separate_session_control(start_delay_secs: u64) {
     use std::{os::fd::OwnedFd, process::Stdio};
     let (root, broker, request) = fixture();
     let control = tempfile::tempdir().unwrap();
@@ -422,6 +431,7 @@ async fn separate_session_peer_survives_broker_stop_but_cannot_write() {
 from pathlib import Path
 os.setsid()
 peer=socket.socket(fileno=0);peer.settimeout(2)
+time.sleep(int(sys.argv[3]))
 print('ready',flush=True)
 deadline=time.monotonic()+5
 while not Path(sys.argv[1]).exists():
@@ -439,6 +449,7 @@ except (BrokenPipeError,ConnectionResetError):
         .args(["-c", script])
         .arg(&release)
         .arg(wire_request)
+        .arg(start_delay_secs.to_string())
         .stdin(Stdio::from(fd))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -447,7 +458,8 @@ except (BrokenPipeError,ConnectionResetError):
         .unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
-    tokio::time::timeout(WAIT, output.read_line(&mut line))
+    // Interpreter startup has a separate budget from broker I/O and revocation.
+    tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut line))
         .await
         .unwrap()
         .unwrap();

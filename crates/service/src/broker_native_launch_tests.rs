@@ -150,26 +150,19 @@ async fn release_write_and_close(
     prepared: PreparedBrokerRunner,
     stream: tokio::net::UnixStream,
 ) {
-    let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
-        .await
-        .unwrap();
-    let (_hold, rx) = tokio::sync::watch::channel(false);
-    let server = tokio::spawn(journal.serve_remote(stream, rx, Duration::from_secs(5)));
-    let (store_ref, binding_ref, receipt_root) = (store, binding, &launch.receipt_root);
-    let mut session = prepared
-        .release(|identity| async move {
-            crate::record_broker_owner(
-                store_ref,
-                binding_ref,
-                &identity,
-                receipt_root,
-                broker_owner_audit("native-owner"),
-            )
-            .await?;
-            Ok(continuous_millis().unwrap() + 4000)
-        })
-        .await
-        .unwrap();
+    let mut session = crate::AcknowledgedBroker {
+        runner: prepared,
+        journal_stream: stream,
+    }
+    .release(
+        store.clone(),
+        binding.clone(),
+        continuous_millis().unwrap() + 4000,
+        Duration::from_secs(5),
+        broker_owner_audit("native-owner"),
+    )
+    .await
+    .unwrap();
     let (mut peer, _) =
         conductor_runtime::connect_broker_endpoint(session.proxy_handoff(), Duration::from_secs(2))
             .await
@@ -189,18 +182,11 @@ async fn release_write_and_close(
         "durable answer\n"
     );
     session.cancel().await.unwrap();
-    let receipt = session.finish().await.unwrap();
-    assert!(server.await.unwrap().is_ok());
+    let receipt = session
+        .finish(broker_owner_audit("native-close"))
+        .await
+        .unwrap();
     assert_late_write_refused(peer, binding, &launch.root).await;
-    crate::close_broker_from_receipt(
-        store,
-        binding,
-        &receipt,
-        &launch.receipt_root,
-        broker_owner_audit("native-close"),
-    )
-    .await
-    .unwrap();
     assert!(
         !store
             .execution_has_unresolved_file_broker(&binding.execution_token)
@@ -529,5 +515,260 @@ async fn seed_invalid_preowner_page(root: &tempfile::TempDir, binding: &FileBrok
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn owned_session_refuses_release_when_owner_audit_fails() {
+    let NativeLaunchSetup {
+        root,
+        store,
+        binding,
+        launch,
+        endpoint,
+        wrapper,
+    } = native_launch_setup(false).await;
+    let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+    let acknowledged =
+        crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+            .await
+            .unwrap();
+    let expected = acknowledged.runner.identity().clone();
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("state.sqlite3").display(),
+    ))
+    .await
+    .unwrap();
+    db.execute("CREATE TRIGGER reject_session_owner BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.release_authorized' BEGIN SELECT RAISE(FAIL,'fixture'); END").await.unwrap();
+    assert!(
+        acknowledged
+            .release(
+                store.clone(),
+                binding.clone(),
+                continuous_millis().unwrap() + 4000,
+                Duration::from_secs(5),
+                broker_owner_audit("session-owner-fail"),
+            )
+            .await
+            .is_err()
+    );
+    let directory = conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if directory.read(&expected).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        directory.read(&expected).unwrap().observation,
+        conductor_runtime::BrokerShutdownObservation::NeverReleased
+    ));
+    assert!(store.file_broker_owner(&binding).await.is_err());
+    assert_progress(&store, &binding, 0, 0).await;
+    assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    assert!(
+        crate::recover_unowned_broker_from_receipt(
+            &store,
+            &binding,
+            binding.boot_generation,
+            broker_owner_audit("session-owner-recover"),
+        )
+        .await
+        .unwrap()
+    );
+    assert!(store.file_broker_status(&binding).await.unwrap().closed);
+}
+
+#[tokio::test]
+async fn owned_session_drop_and_cancelled_finish_retain_durable_ownership() {
+    use std::{future::Future, task::Poll};
+    for cancel_finish in [false, true] {
+        let NativeLaunchSetup {
+            root: _root,
+            store,
+            binding,
+            launch,
+            endpoint,
+            wrapper,
+        } = native_launch_setup(false).await;
+        let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+        let acknowledged =
+            crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+                .await
+                .unwrap();
+        let mut expected = acknowledged.runner.identity().clone();
+        let mut session = acknowledged
+            .release(
+                store.clone(),
+                binding.clone(),
+                continuous_millis().unwrap() + 4000,
+                Duration::from_secs(5),
+                broker_owner_audit("session-drop-owner"),
+            )
+            .await
+            .unwrap();
+        session
+            .renew(continuous_millis().unwrap() + 4000)
+            .await
+            .unwrap();
+        assert!(session.renew(0).await.is_err());
+        let (peer, _) = conductor_runtime::connect_broker_endpoint(
+            session.proxy_handoff(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        if cancel_finish {
+            let mut finish = Box::pin(session.finish(broker_owner_audit("cancelled-close")));
+            std::future::poll_fn(|cx| {
+                assert!(finish.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(finish);
+        } else {
+            drop(session);
+        }
+        expected.observation = conductor_runtime::BrokerShutdownObservation::Revoked {
+            completed_sequence: 0,
+        };
+        let directory =
+            conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if directory.read(&expected).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_progress(&store, &binding, 0, 0).await;
+        assert!(store.file_broker_owner(&binding).await.is_ok());
+        assert_first_write_refused(peer, &binding).await;
+        assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
+        assert!(
+            store
+                .execution_has_unresolved_file_broker(&binding.execution_token)
+                .await
+                .unwrap()
+        );
+        assert!(
+            crate::close_broker_from_receipt(
+                &store,
+                &binding,
+                &expected,
+                &launch.receipt_root,
+                broker_owner_audit("session-drop-independent-close"),
+            )
+            .await
+            .unwrap()
+        );
+    }
+}
+
+async fn assert_first_write_refused(peer: tokio::net::UnixStream, binding: &FileBrokerBinding) {
+    let mut peer = BufReader::new(peer);
+    let mut bytes = serde_json::to_vec(&request(binding)).unwrap();
+    bytes.push(b'\n');
+    let _ = peer.write_all(&bytes).await;
+    let mut reply = String::new();
+    let read = tokio::time::timeout(Duration::from_secs(2), peer.read_line(&mut reply))
+        .await
+        .unwrap();
+    assert!(matches!(read, Ok(0) | Err(_)));
+}
+
+#[tokio::test]
+async fn owned_session_failed_close_retains_receipt_for_independent_recovery() {
+    let NativeLaunchSetup {
+        root,
+        store,
+        binding,
+        launch,
+        endpoint,
+        wrapper,
+    } = native_launch_setup(false).await;
+    let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+    let acknowledged =
+        crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+            .await
+            .unwrap();
+    let mut expected = acknowledged.runner.identity().clone();
+    let mut session = acknowledged
+        .release(
+            store.clone(),
+            binding.clone(),
+            continuous_millis().unwrap() + 4000,
+            Duration::from_secs(5),
+            broker_owner_audit("session-close-owner"),
+        )
+        .await
+        .unwrap();
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("state.sqlite3").display(),
+    ))
+    .await
+    .unwrap();
+    db.execute("CREATE TRIGGER reject_session_close BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.closed' BEGIN SELECT RAISE(FAIL,'fixture'); END").await.unwrap();
+    session.cancel().await.unwrap();
+    assert!(
+        session
+            .finish(broker_owner_audit("session-close-fail"))
+            .await
+            .is_err()
+    );
+    expected.observation = conductor_runtime::BrokerShutdownObservation::Revoked {
+        completed_sequence: 0,
+    };
+    conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root)
+        .unwrap()
+        .read(&expected)
+        .unwrap();
+    assert_progress(&store, &binding, 0, 0).await;
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    let closed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE kind='file_broker.closed'")
+            .fetch_one(&mut db)
+            .await
+            .unwrap();
+    assert_eq!(closed, 0);
+    db.execute("DROP TRIGGER reject_session_close")
+        .await
+        .unwrap();
+    assert!(
+        crate::close_broker_from_receipt(
+            &store,
+            &binding,
+            &expected,
+            &launch.receipt_root,
+            broker_owner_audit("session-close-recovered"),
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
     );
 }

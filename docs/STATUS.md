@@ -22,7 +22,11 @@ then drops before Release, reopens the store at a new generation and recovers
 beyond 129 malformed preparations. This does not fence the execution or accept a
 task. See [the broker design](CODEX_WRITER_DESIGN.md) for proof boundaries.
 
-Pre-ACK reconciliation, full journal/release lifetime supervision, native vendor
+The issue #100 candidate adds a consuming service session owning journal tasks,
+release and verified shutdown. Actual-runner drop/cancelled-finish and audit-failure
+controls retain unresolved ownership until independent receipt verification.
+
+Pre-ACK reconciliation, integration into vendor/daemon supervision, native vendor
 admission, OS denial controls and operational acceptance remain incomplete.
 This candidate does not enable native Codex writers or establish full acceptance.
 

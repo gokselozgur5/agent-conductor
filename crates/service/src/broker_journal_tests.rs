@@ -1421,3 +1421,68 @@ async fn journal_startup_defers_writer_receipt_until_broker_is_resolved() {
 mod native_launch {
     include!("broker_native_launch_tests.rs");
 }
+
+#[tokio::test]
+async fn owned_journal_drop_and_cancelled_finish_close_transport_without_settlement() {
+    use tokio::io::AsyncReadExt;
+    for cancel_wait in [false, true] {
+        let (_root, store, binding, _db) = fixture().await;
+        let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
+            .await
+            .unwrap();
+        let (stream, mut peer) = tokio::net::UnixStream::pair().unwrap();
+        let session = journal
+            .start_remote(stream, Duration::from_secs(30))
+            .unwrap();
+        if cancel_wait {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let waiter = tokio::spawn(async move {
+                started.send(()).unwrap();
+                session.finish().await
+            });
+            ready.await.unwrap();
+            waiter.abort();
+            assert!(waiter.await.unwrap_err().is_cancelled());
+        } else {
+            drop(session);
+        }
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), peer.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_progress(&store, &binding, 0, 0).await;
+        assert!(
+            store
+                .execution_has_unresolved_file_broker(&binding.execution_token)
+                .await
+                .unwrap()
+        );
+        assert!(
+            RegisteredBrokerJournal::register(store.clone(), binding.clone())
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn owned_journal_eof_reports_transport_completion_without_durable_closure() {
+    let (_root, store, binding, _db) = fixture().await;
+    let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
+        .await
+        .unwrap();
+    let (stream, peer) = tokio::net::UnixStream::pair().unwrap();
+    let session = journal
+        .start_remote(stream, Duration::from_secs(2))
+        .unwrap();
+    drop(peer);
+    tokio::time::timeout(Duration::from_secs(3), session.finish())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_progress(&store, &binding, 0, 0).await;
+}
