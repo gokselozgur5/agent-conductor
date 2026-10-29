@@ -20,6 +20,9 @@ root = Path(sys.argv[1]).resolve().parent
 args = sys.argv[2:]
 command_index = 2 if args[:1] == ['--state'] else 0
 command = args[command_index] if len(args) > command_index else ''
+if command == 'transfer-snapshot':
+    executable = str(root / 'bin/conductorctl')
+    os.execv(executable, [executable, *args[command_index:]])
 if command == 'init' and '--bin-dir' not in args:
     args += ['--bin-dir', str(root / 'bin')]
 if command == 'plan' and '--from-plan' not in args:

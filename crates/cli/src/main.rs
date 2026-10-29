@@ -1,4 +1,5 @@
 mod check_command;
+mod snapshot_command;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -21,6 +22,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Transfer a source snapshot between accounts without sharing its directory.
+    TransferSnapshot(snapshot_command::Args),
     /// Run an approved check in a disposable source copy (does not complete a task).
     RunCheck(check_command::CheckArgs),
     /// Read-only bounded advisory references from the current Git inventory.
@@ -147,6 +150,9 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    if let Command::TransferSnapshot(args) = &cli.command {
+        std::process::exit(snapshot_command::run(args));
+    }
     if let Command::RunCheck(args) = &cli.command {
         let status = check_command::run(args).await;
         std::process::exit(status);
@@ -220,7 +226,8 @@ async fn main() {
 #[allow(clippy::too_many_lines)] // Keep the declarative CLI-to-protocol mapping together.
 fn command_request(command: Command) -> Request {
     match command {
-        Command::RunCheck(_)
+        Command::TransferSnapshot(_)
+        | Command::RunCheck(_)
         | Command::InspectProject { .. }
         | Command::InspectWorkspace { .. } => {
             eprintln!("local inspection/check execution is not a daemon request");

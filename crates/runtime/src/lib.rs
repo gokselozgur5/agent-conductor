@@ -34,6 +34,11 @@ mod snapshot;
 pub use snapshot::*;
 
 #[cfg(unix)]
+mod snapshot_transfer;
+#[cfg(unix)]
+pub use snapshot_transfer::*;
+
+#[cfg(unix)]
 mod git_snapshot;
 #[cfg(unix)]
 pub use git_snapshot::*;

@@ -338,6 +338,7 @@ dependencies = [
  "conductor-runtime",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

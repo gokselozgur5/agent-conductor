@@ -31,6 +31,40 @@ the daemon account; RPC registration does not launch a worker under another UID,
 transfer its workspace, or prove remote-host execution. Those integrations remain
 required for automatic cross-account native workflows.
 
+## Transfer a selected snapshot between accounts
+
+The bundled launcher can stream a snapshot without a running daemon or local
+operator configuration. Obtain the expected manifest digest from the selected
+source record through your trusted coordinator connection, separately from the
+incoming stream:
+
+```sh
+snapshot_sha256='<approved snapshot digest>'
+./conductor transfer-snapshot export \
+  --source /absolute/snapshot/tree --manifest /absolute/snapshot/manifest.json \
+  --expected-sha256 "$snapshot_sha256" > source.acsnap
+```
+
+Transfer that stream through your explicitly configured account channel. In the
+receiving account, choose a new destination under an existing parent directory:
+
+```sh
+./conductor transfer-snapshot import \
+  --destination "$HOME/codex/incoming/source" \
+  --expected-sha256 "$snapshot_sha256" < source.acsnap
+```
+
+A source checkout uses `target/debug/conductorctl transfer-snapshot` instead.
+Import preserves executable flags, empty files and deletion entries. It publishes
+`manifest.json` only after the complete stream matches the expected source;
+`tree/` contains the received files. An existing destination is never overwritten.
+Failed transfers leave an unpublished partial directory: retain it for inspection
+and choose a fresh destination. Do not launch from a failed import.
+
+This command transfers snapshot bytes only. It does not grant a lease, change OS
+identity, establish stopped-worker fencing or accept a task. Automatic account
+channel selection and native worker dispatch remain separate integration work.
+
 ## Initialize a local runtime
 
 The `tools/conductor` launcher uses the Rust daemon and CLI for every state change.
