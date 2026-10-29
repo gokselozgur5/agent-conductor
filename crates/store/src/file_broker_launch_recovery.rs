@@ -251,6 +251,7 @@ mod tests {
             sqlx::query("INSERT INTO file_brokers(invocation_id,execution_token,binding_json,state,created_at_ms) VALUES(?,?,?,'open',100)")
                 .bind(&binding.invocation_id).bind(&binding.execution_token).bind(binding.encoded().unwrap())
                 .execute(&mut *store.inner.writer.lock().await).await.unwrap();
+            assert_unowned_conflicts_refused(&store, &binding, &proof).await;
         }
 
         store.inner.writer.lock().await.execute("CREATE TRIGGER reject_launch_recovery BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.launch_recovered' BEGIN SELECT RAISE(FAIL,'fixture'); END").await.unwrap();
@@ -304,6 +305,70 @@ mod tests {
         );
         if registered {
             assert!(store.file_broker_status(&binding).await.unwrap().closed);
+        }
+    }
+    async fn assert_unowned_conflicts_refused(
+        store: &Store,
+        binding: &FileBrokerBinding,
+        proof: &UnreleasedBrokerLaunchProof,
+    ) {
+        // Deliberately contradictory persisted evidence must never authorize closure.
+        let cases = [
+            (
+                "INSERT INTO file_broker_owners SELECT invocation_id,'{}',100,NULL FROM file_brokers",
+                "DELETE FROM file_broker_owners",
+            ),
+            (
+                "INSERT INTO file_operations SELECT invocation_id,1,printf('%064d',0),NULL,100,NULL FROM file_brokers",
+                "DELETE FROM file_operations",
+            ),
+            (
+                "INSERT INTO file_operations SELECT invocation_id,1,printf('%064d',0),printf('%064d',1),100,101 FROM file_brokers",
+                "DELETE FROM file_operations",
+            ),
+            (
+                "UPDATE file_brokers SET state='closed',closed_at_ms=101",
+                "UPDATE file_brokers SET state='open',closed_at_ms=NULL",
+            ),
+            (
+                "UPDATE file_brokers SET binding_json=json_set(binding_json,'$.lease_epoch',999)",
+                "UPDATE file_brokers SET binding_json=(SELECT binding_json FROM file_broker_launches)",
+            ),
+        ];
+        let original = snapshot(&mut *store.inner.writer.lock().await).await;
+        for (introduce, restore) in cases {
+            store
+                .inner
+                .writer
+                .lock()
+                .await
+                .execute(introduce)
+                .await
+                .unwrap();
+            let before = snapshot(&mut *store.inner.writer.lock().await).await;
+            assert!(
+                store
+                    .recover_unowned_broker_launch(binding, proof, 2, audit("recover-conflict"))
+                    .await
+                    .is_err(),
+                "accepted contradictory evidence: {introduce}"
+            );
+            assert_eq!(
+                snapshot(&mut *store.inner.writer.lock().await).await,
+                before
+            );
+            store
+                .inner
+                .writer
+                .lock()
+                .await
+                .execute(restore)
+                .await
+                .unwrap();
+            assert_eq!(
+                snapshot(&mut *store.inner.writer.lock().await).await,
+                original
+            );
         }
     }
     #[tokio::test]
