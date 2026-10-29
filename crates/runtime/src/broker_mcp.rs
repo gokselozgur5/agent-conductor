@@ -252,6 +252,20 @@ async fn owned_input_ready<R: AsyncBufRead + Unpin>(
     }
 }
 
+async fn next_mcp_frame<R: AsyncBufRead + Unpin>(
+    input: &mut R,
+    broker: &mut BufReader<UnixStream>,
+    wait: Duration,
+    allow_idle: bool,
+) -> Result<Option<Vec<u8>>, BrokerMcpError> {
+    if allow_idle && !owned_input_ready(input, broker).await? {
+        return Ok(None);
+    }
+    tokio::time::timeout(wait, frame(input, MAX_BROKER_FRAME))
+        .await
+        .map_err(|_| BrokerMcpError::Transport)?
+}
+
 async fn serve_mcp<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     input: R,
     mut output: W,
@@ -269,12 +283,7 @@ async fn serve_mcp<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let mut sequence = 1;
     let mut ids = BTreeSet::new();
     loop {
-        if allow_idle && state == 2 && !owned_input_ready(&mut input, &mut broker).await? {
-            return Ok(());
-        }
-        let bytes = tokio::time::timeout(wait, frame(&mut input, MAX_BROKER_FRAME))
-            .await
-            .map_err(|_| BrokerMcpError::Transport)??;
+        let bytes = next_mcp_frame(&mut input, &mut broker, wait, allow_idle && state == 2).await?;
         let Some(bytes) = bytes else {
             return Ok(());
         };
