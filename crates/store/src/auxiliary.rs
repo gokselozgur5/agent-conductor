@@ -122,7 +122,7 @@ impl Store {
             tx.commit().await?;
             return Ok(false);
         }
-        let owned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM executions e JOIN tasks t ON t.id=e.task_id JOIN runtime_metadata r ON r.singleton=1 WHERE e.effect_token=? AND e.task_id=? AND e.attempt_id=? AND e.state='fenced' AND t.version=? AND t.state='verifying' AND json_extract(t.aggregate_json,'$.attempt.id')=e.attempt_id AND json_extract(t.aggregate_json,'$.verification.source')=? AND r.boot_generation=? AND NOT EXISTS (SELECT 1 FROM executions x WHERE x.task_id=t.id AND x.state!='fenced')")
+        let owned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM capture_eligible_executions e JOIN tasks t ON t.id=e.task_id JOIN runtime_metadata r ON r.singleton=1 WHERE e.effect_token=? AND e.task_id=? AND e.attempt_id=? AND t.version=? AND t.state='verifying' AND json_extract(t.aggregate_json,'$.attempt.id')=e.attempt_id AND json_extract(t.aggregate_json,'$.verification.source')=? AND r.boot_generation=?")
             .bind(&input.execution_token).bind(&input.task_id).bind(&input.attempt_id).bind(input.task_version).bind(&input.source).bind(input.boot_generation).fetch_one(&mut *tx).await?;
         if owned != 1 {
             return Err(invalid());

@@ -90,6 +90,7 @@ mod workflow_review;
 pub use repository_watch::{OwnedWatchState, RepositoryWatch, RepositoryWatchState};
 #[cfg(unix)]
 pub use workflow::{InitialDecision, NativeWorkflowPlan, WorkflowOutcome};
+mod capture_eligibility;
 #[cfg(unix)]
 mod source_finalization;
 #[cfg(unix)]
@@ -1578,6 +1579,7 @@ mod effect_tests {
     include!("checkpoint_tests.rs");
     include!("reassignment_tests.rs");
     include!("unowned_tests.rs");
+    include!("full_capture_tests.rs");
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
     use agent_conductor_store::{NewAgent, NewProject, NewTask, Store};

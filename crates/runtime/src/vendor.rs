@@ -239,13 +239,17 @@ pub fn binary_sha256(path: &std::path::Path) -> Result<String, VendorError> {
 /// accepted. Vendor-specific admission stays here, outside task coordination.
 /// Credentials remain in the private launch environment, never the contract.
 /// # Errors
-/// Refuses command-capable writers until their descendant fencing is accepted,
-/// and propagates native identity/capability/environment validation failures.
+/// Validates the explicitly selected launch profile and vendor identity.
+/// Unrestricted launches use their selected account's home authentication;
+/// supplied coordinator authentication applies only to the bounded profile.
 pub fn native_writer_launch(
     pin: &VendorPin,
     packet: &ResumePacket,
     authentication: BTreeMap<String, String>,
 ) -> Result<crate::RunnerLaunch, VendorError> {
+    if packet.contract.full_capability.is_some() {
+        return crate::full_capability_launch(pin, packet);
+    }
     if pin.kind != AdapterKind::Claude || packet.contract.authority.allow_workspace_commands {
         return Err(VendorError::Capability);
     }

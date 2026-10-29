@@ -15,6 +15,8 @@ pub(super) fn review_command(
     source: &str,
     authentication: std::collections::BTreeMap<String, String>,
 ) -> Result<conductor_runtime::ProcessSpec, StoreError> {
+    packet.contract.full_capability = None;
+    packet.contract.authority.network = conductor_runtime::NetworkPolicy::InferenceOnly;
     packet.contract.authority.read_roots = std::iter::once(packet.contract.workspace.clone())
         .chain(plan.instructions.iter().map(|pin| pin.path.clone()))
         .collect();

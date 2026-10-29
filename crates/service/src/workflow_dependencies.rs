@@ -1,7 +1,7 @@
 //! Explicit dependency admission and source-bound input copying.
 use crate::{Clock, NativeWorkflowPlan, PersistentControlService};
 use agent_conductor_domain::{Task, TaskState};
-use agent_conductor_store::{ExecutionState, StoreError};
+use agent_conductor_store::StoreError;
 use conductor_runtime::{
     AdapterKind, GitSnapshot, ResumePacket, SnapshotManifest, snapshot_attempt_tree,
 };
@@ -102,11 +102,8 @@ impl<C: Clock> PersistentControlService<C> {
                 .ok_or_else(|| invalid("input plan missing"))?,
         )
         .map_err(|_| invalid("input plan invalid"))?;
-        if upstream.task_id != predecessor
-            || upstream.project != plan.project
-            || self.store.has_unfenced_execution(predecessor).await?
-        {
-            return Err(invalid("input project or write fence mismatch"));
+        if upstream.task_id != predecessor || upstream.project != plan.project {
+            return Err(invalid("input project mismatch"));
         }
         let attempt = task
             .attempt
@@ -119,18 +116,19 @@ impl<C: Clock> PersistentControlService<C> {
             .ok_or_else(|| invalid("input execution missing"))?;
         let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
             .map_err(|_| invalid("input packet invalid"))?;
+        self.validate_capture_eligibility(&record, &packet).await?;
         if record.preparation.task_id != predecessor
             || record.preparation.attempt_id != attempt.id.0
             || record.preparation.lease_epoch
                 != i64::try_from(attempt.lease.epoch)
                     .map_err(|_| invalid("input epoch overflow"))?
-            || record.state != ExecutionState::Fenced
             || packet.contract.adapter.kind == AdapterKind::Fake
             || packet.contract.task_id != predecessor
             || packet.contract.attempt_id != attempt.id.0
             || packet.contract.lease_epoch != attempt.lease.epoch
             || packet.contract.worker_id != attempt.worker.0
             || packet.contract.checks != upstream.checks
+            || packet.contract.full_capability != upstream.full_capability
             || packet
                 .sha256()
                 .map_err(|_| invalid("input packet hash failed"))?

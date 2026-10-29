@@ -349,7 +349,7 @@ async fn owner(
     input: &AuxiliaryPreparation,
     authority: &str,
 ) -> Result<(), StoreError> {
-    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM tasks t JOIN executions e ON e.effect_token=? JOIN runtime_metadata r ON r.singleton=1 JOIN recovery_authority a ON a.singleton=1 WHERE t.id=? AND t.version=? AND t.state='verifying' AND e.state='fenced' AND e.task_id=t.id AND e.attempt_id=? AND json_extract(t.aggregate_json,'$.attempt.id')=e.attempt_id AND json_extract(t.aggregate_json,'$.verification.source')=? AND r.boot_generation=? AND a.authority_id=? AND NOT EXISTS(SELECT 1 FROM executions x WHERE x.task_id=t.id AND x.state!='fenced')")
+    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM tasks t JOIN capture_eligible_executions e ON e.effect_token=? JOIN runtime_metadata r ON r.singleton=1 JOIN recovery_authority a ON a.singleton=1 WHERE t.id=? AND t.version=? AND t.state='verifying' AND e.task_id=t.id AND e.attempt_id=? AND json_extract(t.aggregate_json,'$.attempt.id')=e.attempt_id AND json_extract(t.aggregate_json,'$.verification.source')=? AND r.boot_generation=? AND a.authority_id=?")
         .bind(&input.execution_token).bind(&input.task_id).bind(input.task_version).bind(&input.attempt_id).bind(&input.source).bind(input.boot_generation).bind(authority).fetch_one(connection).await?;
     if count != 1 {
         return Err(invalid());

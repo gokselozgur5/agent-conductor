@@ -185,6 +185,8 @@ def main():
                 raise ValueError('accepted adapter binary changed; conformance must be revalidated')
             pin['executable'] = str(executable)
         value.update(task_id=args.task, project=config['project'], objective=args.objective_file.read_text(), artifacts=str(state / 'artifacts' / args.task), wrapper=str(Path(config['bin_dir']) / 'conductor-runner'), checks=json.loads(args.checks_file.read_text()), toolchain_roots=template.get('toolchain_roots', []), instructions=[])
+        if template.get('full_capability') is not None:
+            value['full_capability'] = template['full_capability']
         if args.document and not args.workspace_root:
             raise ValueError('--document requires --workspace-root')
         if args.workspace_root:
