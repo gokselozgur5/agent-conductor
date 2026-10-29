@@ -1054,3 +1054,104 @@ async fn dispatch_notification_follows_commit_and_survives_scan_to_wait_race() {
     changes.changed().await.unwrap();
     assert!(!changes.has_changed().unwrap());
 }
+
+#[tokio::test]
+async fn two_agent_causal_cycle_stops_without_duplicate_or_echo_deliveries() {
+    let (directory, store) = store_with_agents(&["a", "b"]).await;
+    for agent in ["a", "b"] {
+        store
+            .upsert_event_subscription(&subscription(agent, agent))
+            .await
+            .unwrap();
+    }
+    let limits = EventLimits {
+        max_generation: 3,
+        ..EventLimits::default()
+    };
+    let mut current = event("cycle-0", "a", 0, None);
+    for generation in 0..=limits.max_generation {
+        assert_eq!(
+            store.publish_event(&current, &limits).await.unwrap(),
+            PublishResult::Published {
+                event_id: current.id.clone(),
+                fanout: 1
+            }
+        );
+        assert_eq!(
+            store.publish_event(&current, &limits).await.unwrap(),
+            PublishResult::Duplicate {
+                event_id: current.id.clone()
+            }
+        );
+        let receiver = if current.source_agent_id == "a" {
+            "b"
+        } else {
+            "a"
+        };
+        assert!(
+            store
+                .claim_event_delivery(&current.source_agent_id, 101, &limits)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let delivery = store
+            .claim_event_delivery(receiver, 101, &limits)
+            .await
+            .unwrap()
+            .expect("opposite agent receives causal event");
+        assert_eq!(delivery.event, current);
+        assert_eq!(delivery.attempts, 1);
+        store
+            .acknowledge_event_with_state(
+                &delivery.delivery_id,
+                receiver,
+                &delivery.claim_token,
+                &ConsumerStateEffect {
+                    namespace: "cycle-acceptance".into(),
+                    key: current.id.clone(),
+                    expected_version: None,
+                    value_json: "{}".into(),
+                },
+                102,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .claim_event_delivery(receiver, 103, &limits)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.event_delivery_count(&current.id).await.unwrap(), 1);
+        current = event(
+            &format!("cycle-{}", generation + 1),
+            receiver,
+            generation + 1,
+            Some(&current.id),
+        );
+    }
+    assert!(matches!(
+        store.publish_event(&current, &limits).await,
+        Err(EventStoreError::GenerationLimit)
+    ));
+    assert_eq!(store.event_delivery_count(&current.id).await.unwrap(), 0);
+    drop(store);
+    let reopened = Store::open(directory.path().join("events.sqlite"))
+        .await
+        .unwrap();
+    for agent in ["a", "b"] {
+        assert!(
+            reopened
+                .claim_event_delivery(agent, 104, &limits)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(matches!(
+        reopened.publish_event(&current, &limits).await,
+        Err(EventStoreError::GenerationLimit)
+    ));
+}
