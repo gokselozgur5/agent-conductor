@@ -46,3 +46,26 @@ not duplicate it. The original project remained unchanged. Receipt:
 `literal-native-v1/receipt.json`; source script: `literal_native_probe.py`.
 All 245 workspace tests, strict Clippy, formatting and release build passed.
 Model spend was not measured. This is one bounded local acceptance, not a soak.
+
+## Git reference observation
+
+Repository observation records both the resolved commit (`starting_head`) and
+HEAD reference identity (`starting_ref`). A symbolic reference uses its full
+name, such as `refs/heads/main`; a detached checkout uses `HEAD`. Switching
+branches at the same commit therefore changes the observation even when file
+contents and status are identical.
+
+The watcher includes this identity in its settling fingerprint and publishes
+`git.ref_changed` with the previous and current reference. Commit movement still
+publishes `git.head_changed`. Once the new observation is persisted, an unchanged
+scan publishes neither event again. Subscriptions may select either literal
+topic or the `git.*` family under the existing matching rules.
+
+Legacy inventories omit `starting_ref` and remain readable without adding that
+field when reserialized. Captured attempt trees without Git metadata also omit
+it; no branch identity is invented. A legacy observation becoming a known Git
+reference can produce a reference-change event with a null previous value.
+
+These events report observation changes. They do not themselves stop an active
+worker, fence its writes, or establish the requirement that unexpected branch
+movement blocks its task.
