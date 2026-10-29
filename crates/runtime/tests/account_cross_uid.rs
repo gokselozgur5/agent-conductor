@@ -74,6 +74,7 @@ fn address(f: &Fixture, digest: String) -> AccountChannelAddress {
 }
 
 async fn start(f: &Fixture) -> tokio::process::Child {
+    receiving_account_preflight(f).await;
     let mut child = tokio::process::Command::new("/usr/bin/setpriv")
         .args([
             "--reuid",
@@ -103,6 +104,26 @@ async fn start(f: &Fixture) -> tokio::process::Child {
     .unwrap();
     assert_eq!(fs::metadata(&f.socket).unwrap().uid(), f.account.uid);
     child
+}
+
+async fn receiving_account_preflight(f: &Fixture) {
+    let output = tokio::process::Command::new("/usr/bin/setpriv")
+        .args([
+            "--reuid", &f.account.uid.to_string(),
+            "--regid", &f.account.gid.to_string(), "--clear-groups",
+            "/usr/bin/python3", "-c",
+            "import os,socket,sys,json\np=sys.argv[1]\ns=os.stat(p)\nprint(json.dumps({'uid':os.getuid(),'euid':os.geteuid(),'gid':os.getgid(),'path':p,'canonical':os.path.realpath(p),'owner':s.st_uid,'mode':oct(s.st_mode&0o777),'cwd':os.getcwd()}),flush=True)\nassert os.getuid()==os.geteuid()==s.st_uid\nassert p==os.path.realpath(p)\nassert s.st_mode&0o022==0\nx=socket.socket(socket.AF_UNIX)\nx.bind(p+'/probe.sock')\nx.close()\nos.unlink(p+'/probe.sock')\n",
+        ])
+        .arg(&f.receiver).env_clear().kill_on_drop(true).output().await.unwrap();
+    eprintln!(
+        "receiver fixture preflight: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.status.success(),
+        "receiver preflight failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 async fn stage(f: &Fixture) -> PathBuf {
@@ -139,11 +160,28 @@ fn packet(f: &Fixture, workspace: &Path) -> ResumePacket {
     })).unwrap()
 }
 
+async fn assert_wrong_coordinator_refused(f: &Fixture) {
+    // The receiving account can reach its own socket, but cannot impersonate root.
+    let output = tokio::process::Command::new("/usr/bin/setpriv")
+        .args([
+            "--reuid", &f.account.uid.to_string(),
+            "--regid", &f.account.gid.to_string(), "--clear-groups",
+            "/usr/bin/python3", "-c",
+            "import socket,sys\ns=socket.socket(socket.AF_UNIX)\ns.settimeout(2)\ns.connect(sys.argv[1])\nassert s.recv(1)==b''\n",
+        ])
+        .arg(&f.socket).env_clear().kill_on_drop(true).output().await.unwrap();
+    assert!(
+        output.status.success(),
+        "wrong coordinator was not rejected before payload"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Linux root; explicitly executed in an isolated hosted CI fixture"]
 async fn distinct_uid_worker_stages_executes_and_returns_exact_candidate() {
     let f = fixture();
     let mut worker = start(&f).await;
+    assert_wrong_coordinator_refused(&f).await;
     let workspace = stage(&f).await;
     let packet = packet(&f, &workspace);
     let digest = packet.sha256().unwrap();
