@@ -389,6 +389,8 @@ async fn assert_persistent_account_worker(
         assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let (staged_pin, staged_packet) = prepare_staged_worker(&path, root.path(), pin, packet).await;
+    let (pin, packet) = (&staged_pin, &staged_packet);
     assert_worker_digest_binding(&path, pin, packet).await;
     for decision in ["wrong-pin", "refused", "first", "second"] {
         let mut request = AccountNativeLaunch {
@@ -434,13 +436,15 @@ async fn assert_persistent_account_worker(
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(matches!(
-                event,
-                RunnerEvent::Finished {
-                    exit_code: Some(0),
-                    ..
-                }
-            ));
+            let RunnerEvent::Finished {
+                exit_code: Some(0),
+                stdout,
+                ..
+            } = event
+            else {
+                panic!("staged worker did not finish successfully");
+            };
+            assert_eq!(stdout, b"selected source bytes\n");
         }
         assert!(worker.try_wait().unwrap().is_none());
         assert!(path.exists());
@@ -498,4 +502,102 @@ async fn assert_worker_digest_binding(
             .unwrap(),
         0
     );
+}
+
+async fn stage_worker_baseline(
+    socket: &std::path::Path,
+    root: &std::path::Path,
+) -> std::path::PathBuf {
+    let source = root.join("baseline-source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("baseline"), b"selected source bytes\n").unwrap();
+    let snapshot = root.join("baseline-snapshot");
+    let manifest =
+        conductor_runtime::snapshot_paths(&source, &snapshot, &["baseline".into()]).unwrap();
+    let uid = nix::unistd::geteuid().as_raw();
+    let address = conductor_runtime::AccountChannelAddress {
+        path: socket.into(),
+        worker_uid: uid,
+        coordinator_uid: uid,
+        packet_sha256: manifest.sha256().unwrap(),
+    };
+    let destination = root.join("worker-baseline");
+    conductor_runtime::stage_account_snapshot(
+        &address,
+        &snapshot.join("tree"),
+        &manifest,
+        &destination,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read(destination.join("tree/baseline")).unwrap(),
+        b"selected source bytes\n"
+    );
+    let published = fs::read(destination.join("manifest.json")).unwrap();
+    let received: conductor_runtime::SnapshotManifest = serde_json::from_slice(&published).unwrap();
+    assert_eq!(received, manifest);
+    assert!(
+        conductor_runtime::stage_account_snapshot(
+            &address,
+            &snapshot.join("tree"),
+            &manifest,
+            &destination
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        fs::read(destination.join("manifest.json")).unwrap(),
+        published
+    );
+    assert_truncated_staging(&address, &root.join("truncated-baseline")).await;
+    destination.join("tree")
+}
+
+async fn assert_truncated_staging(
+    address: &conductor_runtime::AccountChannelAddress,
+    destination: &std::path::Path,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = conductor_runtime::connect_account_channel(address, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let request = conductor_runtime::AccountSnapshotRequest {
+        snapshot_sha256: address.packet_sha256.clone(),
+        destination: destination.into(),
+    };
+    // Send header and truncated archive together to exercise buffered payload.
+    let mut bytes = serde_json::to_vec(&request).unwrap();
+    bytes.extend_from_slice(b"\nACSNAP01");
+    stream.write_all(&bytes).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let mut reply = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reply.is_empty());
+    assert!(!destination.join("manifest.json").exists());
+}
+
+async fn prepare_staged_worker(
+    socket: &std::path::Path,
+    root: &std::path::Path,
+    pin: &VendorPin,
+    packet: &conductor_runtime::ResumePacket,
+) -> (VendorPin, conductor_runtime::ResumePacket) {
+    let mut staged_packet = packet.clone();
+    staged_packet.contract.workspace = stage_worker_baseline(socket, root).await;
+    let mut staged_pin = pin.clone();
+    staged_pin.executable = root.join("staged-vendor");
+    fs::write(&staged_pin.executable, "#!/bin/sh\ncat baseline\n").unwrap();
+    fs::set_permissions(&staged_pin.executable, fs::Permissions::from_mode(0o700)).unwrap();
+    staged_pin.executable_sha256 = binary_sha256(&staged_pin.executable).unwrap();
+    staged_packet
+        .contract
+        .adapter
+        .executable_sha256
+        .clone_from(&staged_pin.executable_sha256);
+    (staged_pin, staged_packet)
 }
