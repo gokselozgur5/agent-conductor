@@ -44,3 +44,21 @@ test('offline refresh clears stale diagnostics and disconnect discards late repl
   assert.equal(f.get('diagnostics').hidden,true);
   assert.equal(f.get('diagnostics-entries').children.length,0);
 });
+test('queue explains generation-limited pending events without claiming admission',async()=>{
+  const f=fixture();
+  f.run("token='current'");
+  f.context.fetch=async()=>({ok:true,json:async()=>({type:'workflows',entries:[
+    {task_id:'limited',status:'queued',waiting_for_event:true,pending_generation_limited_events:2},
+    {task_id:'empty',status:'queued',waiting_for_event:true,pending_generation_limited_events:0},
+    {task_id:'legacy',status:'queued',waiting_for_event:true},
+    {task_id:'admitted',status:'running',waiting_for_event:false,pending_generation_limited_events:2}
+  ]})});
+  await f.run("refreshQueue('current')");
+  const rows=f.get('queue').children;
+  assert.match(rows[0].textContent,/waiting for eligible subscribed event/);
+  assert.match(rows[0].children[0].textContent,/2 pending event\(s\).*causal generation limit/);
+  assert.equal(rows[1].children.length,0);
+  assert.equal(rows[2].children.length,0);
+  assert.match(rows[3].textContent,/running/);
+  assert.equal(rows[3].children.length,0);
+});

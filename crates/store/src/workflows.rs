@@ -14,9 +14,11 @@ pub struct WorkflowDispatch {
     pub resume_version: Option<i64>,
     pub auto_recovery_count: i64,
     pub waiting_for_event: bool,
+    /// Pending subscribed deliveries at the causal limit; a hint, not admission authority.
+    pub pending_generation_limited_events: i64,
     pub waiting_for_dependencies: bool,
 }
-const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version, auto_recovery_count, EXISTS(SELECT 1 FROM workflow_wakes w WHERE w.task_id=workflow_dispatch.task_id AND w.delivery_id IS NULL) AS waiting_for_event, EXISTS(SELECT 1 FROM workflow_dependencies d WHERE d.task_id=workflow_dispatch.task_id AND d.accepted_source IS NULL) AS waiting_for_dependencies FROM workflow_dispatch";
+const SELECT: &str = "SELECT task_id, plan_json, status, boot_generation, outcome_json, resume_version, auto_recovery_count, EXISTS(SELECT 1 FROM workflow_wakes w WHERE w.task_id=workflow_dispatch.task_id AND w.delivery_id IS NULL) AS waiting_for_event, (SELECT count(*) FROM workflow_wakes w JOIN event_deliveries d ON d.subscription_id=w.subscription_id JOIN semantic_events e ON e.id=d.event_id WHERE w.task_id=workflow_dispatch.task_id AND w.delivery_id IS NULL AND d.status='pending' AND e.generation>=8) AS pending_generation_limited_events, EXISTS(SELECT 1 FROM workflow_dependencies d WHERE d.task_id=workflow_dispatch.task_id AND d.accepted_source IS NULL) AS waiting_for_dependencies FROM workflow_dispatch";
 impl Store {
     /// Coalesced scheduling hints; durable eligibility remains authoritative.
     /// Subscribe before scanning, then mark seen before each scan to retain
@@ -139,7 +141,7 @@ impl Store {
                         .bind(uuid::Uuid::now_v7().to_string()).bind(&row.task_id).bind(payload).bind(now).execute(&mut *writer).await?;
                 }
                 sqlx::query("UPDATE workflow_dispatch SET status='running',boot_generation=?,updated_at_ms=? WHERE task_id=? AND status='queued'").bind(generation).bind(now).bind(&row.task_id).execute(&mut *writer).await?;
-                row.status = "running".into(); row.boot_generation = Some(generation); row.waiting_for_event = false; row.waiting_for_dependencies = false;
+                row.status = "running".into(); row.boot_generation = Some(generation); row.waiting_for_event = false; row.pending_generation_limited_events = 0; row.waiting_for_dependencies = false;
                 Ok(Some(row))
             } else { Ok(None) }
         }.await;

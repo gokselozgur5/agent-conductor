@@ -700,6 +700,10 @@ async fn wake_generation_limit_and_failed_claim_preserve_pending_delivery() {
         .publish_event(&event("chain-8", "source", 8, Some("chain-7")), &limits)
         .await
         .unwrap();
+    assert_eq!(
+        store.workflows().await.unwrap()[0].pending_generation_limited_events,
+        1
+    );
     assert!(store.claim_workflow(boot, 101).await.unwrap().is_none());
     store
         .publish_event(&event("eligible", "source", 0, None), &limits)
@@ -724,7 +728,12 @@ async fn wake_generation_limit_and_failed_claim_preserve_pending_delivery() {
         .execute(&mut db)
         .await
         .unwrap();
-    assert!(store.claim_workflow(boot, 103).await.unwrap().is_some());
+    let claimed = store.claim_workflow(boot, 103).await.unwrap().unwrap();
+    assert_eq!(claimed.pending_generation_limited_events, 0);
+    assert_eq!(
+        store.workflows().await.unwrap()[0].pending_generation_limited_events,
+        0
+    );
     assert!(
         store
             .workflow_trigger("next")
