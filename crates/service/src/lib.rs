@@ -1,3 +1,5 @@
+mod broker_journal_session;
+pub use broker_journal_session::BrokerJournalSession;
 mod broker_preowner_recovery;
 pub use broker_preowner_recovery::{
     recover_unowned_broker_from_receipt, recover_unregistered_broker_from_receipt,

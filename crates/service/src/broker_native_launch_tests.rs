@@ -153,8 +153,9 @@ async fn release_write_and_close(
     let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
         .await
         .unwrap();
-    let (_hold, rx) = tokio::sync::watch::channel(false);
-    let server = tokio::spawn(journal.serve_remote(stream, rx, Duration::from_secs(5)));
+    let server = journal
+        .start_remote(stream, Duration::from_secs(5))
+        .unwrap();
     let (store_ref, binding_ref, receipt_root) = (store, binding, &launch.receipt_root);
     let mut session = prepared
         .release(|identity| async move {
@@ -190,7 +191,7 @@ async fn release_write_and_close(
     );
     session.cancel().await.unwrap();
     let receipt = session.finish().await.unwrap();
-    assert!(server.await.unwrap().is_ok());
+    assert!(server.finish().await.is_ok());
     assert_late_write_refused(peer, binding, &launch.root).await;
     crate::close_broker_from_receipt(
         store,
