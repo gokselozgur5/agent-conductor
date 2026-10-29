@@ -97,7 +97,55 @@ impl Store {
         if !digest(shutdown_sha256) {
             return Err(invalid());
         }
-        self.close_file_broker_inner(binding, completed, Some((owner, shutdown_sha256)), event)
-            .await
+        self.close_file_broker_inner(
+            binding,
+            completed,
+            Some((owner, shutdown_sha256)),
+            None,
+            event,
+        )
+        .await
     }
+}
+
+impl Store {
+    /// Reconcile an older broker under the currently reserved daemon generation.
+    /// Requires independently verified receipt evidence; never authorizes release.
+    /// # Errors
+    /// Refuses current/foreign/stale generations, substituted owners and pending effects.
+    pub async fn recover_owned_file_broker(
+        &self,
+        binding: &FileBrokerBinding,
+        owner: &FileBrokerOwner,
+        completed: i64,
+        shutdown_sha256: &str,
+        generation: i64,
+        event: EffectAudit<'_>,
+    ) -> Result<bool, StoreError> {
+        if !digest(shutdown_sha256) {
+            return Err(invalid());
+        }
+        self.close_file_broker_inner(
+            binding,
+            completed,
+            Some((owner, shutdown_sha256)),
+            Some(generation),
+            event,
+        )
+        .await
+    }
+}
+
+pub(super) async fn recovery_audit(
+    db: &mut sqlx::SqliteConnection,
+    binding: &FileBrokerBinding,
+    completed: i64,
+    generation: i64,
+    event: EffectAudit<'_>,
+) -> Result<(), StoreError> {
+    sqlx::query("INSERT INTO audit_events(id,task_id,actor_id,kind,correlation_id,payload_json,occurred_at_ms) VALUES(?,?,?,'file_broker.recovered',?,?,?)")
+        .bind(event.id).bind(&binding.task_id).bind(event.actor_id).bind(event.correlation_id)
+        .bind(serde_json::json!({"invocation_id":binding.invocation_id,"sequence":completed,"origin_generation":binding.boot_generation,"recovery_generation":generation}).to_string())
+        .bind(event.now_ms).execute(db).await?;
+    Ok(())
 }

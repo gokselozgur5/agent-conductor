@@ -1119,3 +1119,192 @@ async fn assert_changed_receipts_refused(
         assert_progress(store, binding, 1, 1).await;
     }
 }
+
+#[tokio::test]
+async fn journal_receipt_recovers_lost_terminal_pipe_after_generation_change() {
+    for mode in ["before_release", "after_release", "after_write"] {
+        recover_lost_broker_pipe(mode).await;
+    }
+}
+async fn recover_lost_broker_pipe(mode: &str) {
+    use conductor_runtime::{
+        BrokerRunnerControl, BrokerRunnerEvent, BrokerShutdownObservation, BrokerShutdownReceipt,
+    };
+    let BrokerRunnerFixture {
+        root,
+        store,
+        binding,
+        files,
+        hash,
+        mut child,
+        mut input,
+        mut output,
+        server,
+        hold: _hold,
+    } = runner_fixture(false, 5000).await;
+    let BrokerRunnerEvent::Ready {
+        proxy_handoff,
+        process,
+        ..
+    } = runner_frame(&mut output).await
+    else {
+        panic!("expected ready");
+    };
+    let observed = conductor_runtime::ChildIdentity::observe(child.id().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(process, observed);
+    let expected = BrokerShutdownReceipt {
+        version: 1,
+        scope: request(&binding).scope,
+        launch_sha256: hash.clone(),
+        root_identity_sha256: binding.root_identity_sha256.clone(),
+        process: observed,
+        observation: BrokerShutdownObservation::NeverReleased,
+    };
+    let receipts = root.path().canonicalize().unwrap().join("r");
+    crate::record_broker_owner(
+        &store,
+        &binding,
+        &expected,
+        &receipts,
+        broker_owner_audit("observed"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        crate::recover_broker_from_receipt(
+            &store,
+            &binding,
+            &receipts,
+            binding.boot_generation,
+            broker_owner_audit("premature")
+        )
+        .await
+        .is_err()
+    );
+    if mode != "before_release" {
+        runner_send(
+            &mut input,
+            &BrokerRunnerControl::Release {
+                launch_sha256: hash,
+                lease_deadline_ms: continuous_millis().unwrap() + 4000,
+            },
+        )
+        .await;
+    }
+    let peer = if mode == "after_write" {
+        Some(broker_peer_write(&proxy_handoff, &binding).await)
+    } else {
+        None
+    };
+    drop(output);
+    drop(input);
+    drop(peer);
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(server.await.unwrap().is_ok());
+    let count = i64::from(mode == "after_write");
+    assert_progress(&store, &binding, count, count).await;
+    assert_recovered_generation(&root, &binding, &receipts, count).await;
+    assert_eq!(files.join("answer").exists(), count == 1);
+}
+async fn broker_peer_write(
+    handoff: &str,
+    binding: &FileBrokerBinding,
+) -> BufReader<tokio::net::UnixStream> {
+    let (mut peer, _) = conductor_runtime::connect_broker_endpoint(handoff, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let mut bytes = serde_json::to_vec(&request(binding)).unwrap();
+    bytes.push(b'\n');
+    peer.write_all(&bytes).await.unwrap();
+    let mut peer = BufReader::new(peer);
+    let mut reply = String::new();
+    tokio::time::timeout(Duration::from_secs(5), peer.read_line(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!reply.is_empty());
+    peer
+}
+
+async fn assert_recovered_generation(
+    root: &tempfile::TempDir,
+    binding: &FileBrokerBinding,
+    receipts: &Path,
+    count: i64,
+) {
+    let reopened = Store::open(root.path().join("state.sqlite3"))
+        .await
+        .unwrap();
+    let generation = binding.boot_generation + 1;
+    reopened
+        .start_reserved_runtime(200, &binding.authority_id, generation.try_into().unwrap())
+        .await
+        .unwrap();
+    for stale in [binding.boot_generation, generation + 1] {
+        assert!(
+            crate::recover_broker_from_receipt(
+                &reopened,
+                binding,
+                receipts,
+                stale,
+                broker_owner_audit("stale")
+            )
+            .await
+            .is_err()
+        );
+    }
+    let receipt_path = receipts.join(format!("broker-{}.json", binding.invocation_id));
+    let retained = receipts.join("retained-receipt");
+    fs::rename(&receipt_path, &retained).unwrap();
+    assert!(
+        crate::recover_broker_from_receipt(
+            &reopened,
+            binding,
+            receipts,
+            generation,
+            broker_owner_audit("absent")
+        )
+        .await
+        .is_err()
+    );
+    assert_progress(&reopened, binding, count, count).await;
+    fs::rename(retained, receipt_path).unwrap();
+    assert!(
+        crate::recover_broker_from_receipt(
+            &reopened,
+            binding,
+            receipts,
+            generation,
+            broker_owner_audit("recovered")
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !crate::recover_broker_from_receipt(
+            &reopened,
+            binding,
+            receipts,
+            generation,
+            broker_owner_audit("replay")
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        reopened.file_broker_status(binding).await.unwrap(),
+        FileBrokerStatus {
+            closed: true,
+            admitted: count,
+            completed: count
+        }
+    );
+}

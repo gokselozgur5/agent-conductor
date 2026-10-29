@@ -236,19 +236,33 @@ impl Store {
         completed: i64,
         a: EffectAudit<'_>,
     ) -> Result<bool, StoreError> {
-        self.close_file_broker_inner(b, completed, None, a).await
+        self.close_file_broker_inner(b, completed, None, None, a)
+            .await
     }
     async fn close_file_broker_inner(
         &self,
         b: &FileBrokerBinding,
         completed: i64,
         evidence: Option<(&FileBrokerOwner, &str)>,
+        recovery_generation: Option<i64>,
         a: EffectAudit<'_>,
     ) -> Result<bool, StoreError> {
         let encoded = b.encoded()?;
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
-        owner(&mut tx, b).await?;
+        if let Some(generation) = recovery_generation {
+            if generation <= b.boot_generation || evidence.is_none() {
+                return Err(invalid());
+            }
+            let matches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM recovery_authority a JOIN runtime_metadata r ON r.singleton=a.singleton WHERE a.singleton=1 AND a.authority_id=? AND r.boot_generation=?")
+                .bind(&b.authority_id).bind(generation).fetch_one(&mut *tx).await?;
+            if matches != 1 {
+                return Err(invalid());
+            }
+        } else {
+            owner(&mut tx, b).await?;
+        }
+
         let state = bound(&mut tx, b, &encoded).await?;
         let saved: Option<(String, Option<String>)> = sqlx::query_as(
             "SELECT owner_json,shutdown_sha256 FROM file_broker_owners WHERE invocation_id=?",
@@ -289,7 +303,11 @@ impl Store {
             .bind(&b.invocation_id)
             .execute(&mut *tx)
             .await?;
-        audit(&mut tx, b, "file_broker.closed", completed, a).await?;
+        if let Some(generation) = recovery_generation {
+            ownership::recovery_audit(&mut tx, b, completed, generation, a).await?;
+        } else {
+            audit(&mut tx, b, "file_broker.closed", completed, a).await?;
+        }
         tx.commit().await?;
         Ok(true)
     }

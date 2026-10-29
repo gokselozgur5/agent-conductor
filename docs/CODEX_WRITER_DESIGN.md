@@ -557,7 +557,7 @@ Release, revalidates process/root identities, and checks the independent receipt
 on successful shutdown. Actual-runner client tests cover persisted identity before release, callback
 failure without release, and failed completion audit retaining the file and
 pending intent without a receipt. The callback now uses the production store ownership transaction. Vendor
-admission and daemon restart reconciliation remain incomplete. Native admission still requires durable parent
+admission and automatic daemon scheduling of receipt recovery remain incomplete. Native admission still requires durable parent
 ownership and restart reconciliation, vendor configuration/OS confinement and
 long-lived idle handling. The existing Claude workflow and Codex writer refusal
 remain unchanged.
@@ -584,6 +584,36 @@ record. Changed process, launch/root hash and observation are refused. Store tes
 cover replay, changed ownership/receipt, bypass closure, pending operations and
 full-database rollback on authorization/closure audit failures. Initial execution
 acknowledgement is still fixture setup. This API is not yet wired into native
-Codex vendor admission; older-generation restart recovery remains refused until
-an explicit recovery protocol is implemented. Existing delivered user databases
+Codex vendor admission; older-generation closure requires the explicit receipt recovery protocol below. Existing delivered user databases
 are not upgraded by these tests.
+
+
+## Receipt recovery without a terminal message
+
+The service reconstructs expected receipt fields from the durable binding, parent
+owner and completed operation count. It never adopts identity from a receipt or
+infers closure from PID absence. Pending effects, missing/altered files, moved
+receipt directories and foreign native hosts remain unresolved. With zero
+operations it accepts either exact NeverReleased or exact Revoked(0) evidence;
+otherwise it requires the exact completed watermark. Receipt reads remain private,
+bounded and descriptor-relative.
+
+Same-generation recovery uses ordinary owned closure. Older-generation recovery
+requires the exact currently reserved generation, the original authority, exact
+persisted binding and owner, unchanged receipt digest on replay, and no pending
+operations. All conditions are rechecked inside the closure transaction. A
+file_broker.recovered audit records both origin and recovery generations with the
+watermark; replay produces no duplicate event. Audit failure rolls back receipt
+and closure. No restored PID is signaled, no file operation is replayed, and this
+never fences an execution or accepts a task.
+
+Actual runner tests close its stdout/control pipes before release, after release,
+and after a real write. They require failed terminal delivery, reopen SQLite,
+reserve a newer generation, refuse stale/future/absent proof, and recover solely
+from independent receipts. The client peer is retained until stdout is closed so
+normal peer EOF cannot race terminal delivery. These are controlled runner and
+store generation tests, not a killed production daemon/vendor acceptance run.
+Store controls cover pending effects, changed authority/binding/process/root,
+audit rollback and single generation-bound recovery audit. Automatic daemon
+recovery scheduling, pre-owner failure recovery and native Codex launch/OS/idle
+composition remain incomplete.
