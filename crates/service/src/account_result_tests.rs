@@ -159,6 +159,56 @@ async fn account_result_binds_imported_source_without_local_exit_or_fence() {
     worker.wait().await.unwrap();
 }
 
+#[tokio::test]
+async fn account_result_expired_before_capture_cannot_publish_source() {
+    let f = account_result_fixture().await;
+    let address = account_result_address(&f);
+    let mut worker = account_result_worker(&address.path).await;
+    let connection = account_result_release(&f, &address).await;
+    let outcome = f
+        .service
+        .await_account_execution(&f.token, connection)
+        .await
+        .unwrap();
+    f.service.clock.set(5000);
+    let remote = f.directory.path().join("peer-source");
+    let local = f.directory.path().join("source");
+    assert!(
+        f.service
+            .finalize_account_source(outcome, &address, &remote, &local, &[])
+            .await
+            .is_err()
+    );
+    assert!(!remote.exists());
+    assert!(!local.exists());
+    let record = f.store.execution(&f.token).await.unwrap().unwrap();
+    assert!(record.account_result.unwrap().snapshot_sha256.is_none());
+    worker.kill().await.unwrap();
+    worker.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn account_result_malformed_terminal_preserves_unresolved_execution() {
+    let f = account_service_fixture().await;
+    fs::write(f.packet.contract.workspace.join("finish"), b"done").unwrap();
+    let address = account_result_address(&f);
+    let mut worker = account_result_worker(&address.path).await;
+    let connection = account_result_release(&f, &address).await;
+    assert!(
+        f.service
+            .await_account_execution(&f.token, connection)
+            .await
+            .is_err()
+    );
+    let record = f.store.execution(&f.token).await.unwrap().unwrap();
+    assert_eq!(record.state, agent_conductor_store::ExecutionState::Blocked);
+    assert!(record.account_result.is_none());
+    assert!(record.process.is_none());
+    assert!(f.store.has_unfenced_execution("task").await.unwrap());
+    worker.kill().await.unwrap();
+    worker.wait().await.unwrap();
+}
+
 async fn assert_account_import_binding(
     f: &AccountServiceFixture,
     record: &agent_conductor_store::ExecutionRecord,
