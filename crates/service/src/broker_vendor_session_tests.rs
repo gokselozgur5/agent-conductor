@@ -1,6 +1,6 @@
 use super::*;
 
-const SUPERVISION_SCENARIOS: [&str; 12] = [
+const SUPERVISION_SCENARIOS: [&str; 13] = [
     "success",
     "nonzero",
     "revoked",
@@ -9,6 +9,7 @@ const SUPERVISION_SCENARIOS: [&str; 12] = [
     "live-revoked",
     "live-lost",
     "live-invalid-deadline",
+    "live-renewed",
     "close-fails",
     "proxy-eof",
     "proxy-eof-revoked",
@@ -37,7 +38,8 @@ async fn owned_vendor_supervision_separates_process_exit_and_broker_closure() {
                 setup.store.clone(),
                 setup.binding.clone(),
                 deadline,
-                Duration::from_secs(5),
+                // This five-second renewal control must not expire its separate journal wait.
+                Duration::from_secs(if mode == "live-renewed" { 10 } else { 5 }),
                 broker_owner_audit("supervised-owner"),
             )
             .await
@@ -82,6 +84,9 @@ async fn owned_vendor_supervision_separates_process_exit_and_broker_closure() {
                     .unwrap()
                     .send(Some(setup.launch.maximum_deadline_ms + 1))
                     .unwrap();
+            } else if mode == "live-renewed" {
+                renew_past_original_deadline(authority.as_ref().unwrap(), &operation, deadline)
+                    .await;
             } else {
                 drop(authority.take());
             }
@@ -123,7 +128,7 @@ async fn assert_vendor_outcome(
         "{mode}"
     );
     match mode {
-        "success" | "close-fails" | "proxy-eof" => {
+        "success" | "close-fails" | "proxy-eof" | "live-renewed" => {
             let output = outcome.process.unwrap();
             assert_eq!(output.exit_code, Some(0));
             assert_eq!(output.stdout, b"finished");
@@ -160,6 +165,7 @@ fn vendor_process_fixture(
     let code = match mode {
         "success" | "close-fails" => "printf started > vendor-started; printf finished",
         "nonzero" => "printf started > vendor-started; exit 7",
+        "live-renewed" => "printf started > vendor-started; /bin/sleep 5; printf finished",
         _ => "printf started > vendor-started; exec /bin/sleep 30",
     };
     let mut spec = conductor_runtime::ProcessSpec {
@@ -191,4 +197,21 @@ async fn inject_vendor_close_failure(mode: &str, root: &Path) {
         .unwrap();
         db.execute("CREATE TRIGGER reject_vendor_close BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.closed' BEGIN SELECT RAISE(FAIL,'fixture'); END").await.unwrap();
     }
+}
+
+async fn renew_past_original_deadline(
+    authority: &tokio::sync::watch::Sender<Option<u64>>,
+    operation: &tokio::task::JoinHandle<crate::BrokerVendorOutcome>,
+    original_deadline: u64,
+) {
+    while continuous_millis().unwrap() <= original_deadline + 250 {
+        authority
+            .send(Some(continuous_millis().unwrap() + 4000))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !operation.is_finished(),
+        "Vendor stopped at the original lease deadline"
+    );
 }
