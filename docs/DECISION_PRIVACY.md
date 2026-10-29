@@ -24,3 +24,11 @@ whose redacted text is identical, oversized input refusal before redaction,
 legacy task/list/page/replay views without record mutation, and legacy decision
 context without authority expansion. Tests use synthetic canaries and no vendor
 credentials or model calls.
+
+Task objective projections also redact credential-shaped text in task, list,
+page, create and command responses, including legacy idempotent replay outcomes.
+The original objective remains authoritative for execution, and the original
+request hash still distinguishes changed inputs that redact to the same display
+text. Reading an old response does not rewrite its historical stored bytes.
+This presentation protection does not claim that original plans, prompts or all
+other privacy surfaces are free of credentials.
