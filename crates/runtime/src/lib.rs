@@ -1,4 +1,8 @@
 //! Execution contracts outside the lifecycle domain. Vendor output never grants authority.
+#[cfg(target_os = "linux")]
+mod linux_sandbox;
+#[cfg(target_os = "linux")]
+pub use linux_sandbox::{LinuxCheckRequest, exec_linux_check};
 #[cfg(unix)]
 mod account_channel;
 #[cfg(unix)]
