@@ -1,3 +1,9 @@
+mod broker_preowner_recovery;
+pub use broker_preowner_recovery::recover_unregistered_broker_from_receipt;
+mod broker_launch;
+pub use broker_launch::{AcknowledgedBroker, prepare_native_broker};
+mod broker_prelaunch;
+pub use broker_prelaunch::record_broker_launch;
 mod broker_ownership;
 pub use broker_ownership::{
     close_broker_from_receipt, record_broker_owner, recover_broker_from_receipt,

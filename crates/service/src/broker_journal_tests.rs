@@ -1417,3 +1417,7 @@ async fn journal_startup_defers_writer_receipt_until_broker_is_resolved() {
             .unwrap()
     );
 }
+
+mod native_launch {
+    include!("broker_native_launch_tests.rs");
+}

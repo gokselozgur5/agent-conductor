@@ -684,3 +684,33 @@ stale-owner diagnostics expose identity and stage without launch metadata.
 Store tests use controlled process identities and generation changes. Actual
 native launcher ordering and ownerless-preparation receipt recovery remain open;
 these primitives do not establish native Codex writer acceptance.
+
+
+## Native service preparation and explicit pre-owner recovery (issue #94)
+
+`prepare_native_broker` now validates the private endpoint and records fresh
+prelaunch intent before creating the independently approved wrapper. It rechecks
+the executable digest, joins endpoint authentication and Ready observation without
+a detached acceptance task, and persists the actual process ACK before returning
+owned runner and journal-stream handles. Journal registration, release and their
+ongoing supervision remain caller responsibilities.
+
+The actual-runner regression uses this API, then registers the journal, persists
+owner identity, releases the broker, writes a real file and verifies shutdown and
+late-write refusal. Initial task/prepared-execution state is fixture-controlled;
+this does not establish native vendor or OS-isolation acceptance. Replay refuses
+creation. ACK-audit failure rolls back ACK and leaves the preparation open;
+dropping acknowledged handles produces NeverReleased without authorizing writing.
+
+`recover_unregistered_broker_from_receipt` reconstructs the expected NeverReleased
+receipt from persisted launch metadata and ACK process identity, validates the
+current machine and private receipt-root identity before/after reading, and calls
+the audit-atomic store recovery operation. Missing ACK or receipt remains unknown.
+Registered brokers require their existing recovery path. Recovery never grants a
+new spawn, execution fence or task acceptance; exact replay adds no new closure.
+
+This is explicit service recovery, not automatic daemon discovery. Pre-ACK
+reconciliation, complete journal/release lifetime ownership, native vendor launch,
+OS denial controls and operational endurance remain open. Host policy must exclude
+untrusted writers and movers from the approved executable and private receipt
+roots; a file digest alone does not approve arbitrary executable behavior.
