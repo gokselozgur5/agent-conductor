@@ -1,3 +1,5 @@
+mod broker_launch;
+pub use broker_launch::{AcknowledgedBroker, prepare_native_broker};
 mod broker_prelaunch;
 pub use broker_prelaunch::record_broker_launch;
 mod broker_ownership;

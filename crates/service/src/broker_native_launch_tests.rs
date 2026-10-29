@@ -1,5 +1,4 @@
 use super::*;
-use agent_conductor_store::{ExecutionProcess, ExecutionUpdate};
 use conductor_runtime::PreparedBrokerRunner;
 use conductor_runtime::{BrokerEndpoint, BrokerRunnerLaunch, broker_root_identity};
 use sha2::{Digest, Sha256};
@@ -14,7 +13,7 @@ struct NativeLaunchSetup {
     endpoint: BrokerEndpoint,
     wrapper: PathBuf,
 }
-async fn native_launch_setup() -> NativeLaunchSetup {
+async fn native_launch_setup(persist: bool) -> NativeLaunchSetup {
     let (root, store, mut binding, mut db) = fixture().await;
     db.execute("UPDATE executions SET state='prepared',wrapper_identity=NULL,process_json=NULL")
         .await
@@ -51,33 +50,35 @@ async fn native_launch_setup() -> NativeLaunchSetup {
         .canonicalize()
         .unwrap();
     let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
-    crate::record_broker_launch(
-        &store,
-        &binding,
-        &launch,
-        &wrapper,
-        &hash,
-        broker_owner_audit("native-prepare"),
-    )
-    .await
-    .unwrap();
-    assert!(
+    if persist {
         crate::record_broker_launch(
             &store,
             &binding,
             &launch,
             &wrapper,
             &hash,
-            broker_owner_audit("native-replay")
+            broker_owner_audit("native-prepare"),
         )
         .await
-        .is_err()
-    );
-    assert!(
-        RegisteredBrokerJournal::register(store.clone(), binding.clone())
+        .unwrap();
+        assert!(
+            crate::record_broker_launch(
+                &store,
+                &binding,
+                &launch,
+                &wrapper,
+                &hash,
+                broker_owner_audit("native-replay")
+            )
             .await
             .is_err()
-    );
+        );
+        assert!(
+            RegisteredBrokerJournal::register(store.clone(), binding.clone())
+                .await
+                .is_err()
+        );
+    }
     NativeLaunchSetup {
         root,
         store,
@@ -97,7 +98,7 @@ async fn service_prelaunch_persists_exact_intent_without_registering() {
         launch,
         endpoint,
         wrapper,
-    } = native_launch_setup().await;
+    } = native_launch_setup(true).await;
     let saved = store.file_broker_launch(&binding).await.unwrap();
     assert_eq!(saved.launch_sha256, launch.sha256().unwrap());
     assert_eq!(saved.wrapper_path, wrapper.to_str().unwrap());
@@ -125,43 +126,20 @@ async fn native_ready_is_acknowledged_before_broker_registration_and_release() {
         launch,
         endpoint,
         wrapper,
-    } = native_launch_setup().await;
-    // Authenticate and retain the connection, but do not register or serve yet.
-    let accept = tokio::spawn(endpoint.accept(Duration::from_secs(10)));
-    let prepared = PreparedBrokerRunner::prepare(&wrapper, &launch)
-        .await
-        .unwrap();
-    let stream = accept.await.unwrap().unwrap();
-    let observed = prepared.identity().clone();
-    let execution = store
+    } = native_launch_setup(false).await;
+    let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+    let acknowledged =
+        crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+            .await
+            .unwrap();
+    let prepared = acknowledged.runner;
+    let stream = acknowledged.journal_stream;
+    let saved = store
         .execution(&binding.execution_token)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        execution.state,
-        agent_conductor_store::ExecutionState::Prepared
-    );
-    store
-        .update_execution(
-            &binding.execution_token,
-            execution.revision,
-            "native-ack",
-            &ExecutionUpdate::Acknowledge {
-                wrapper_identity: binding.invocation_id.clone(),
-                packet_sha256: execution.preparation.packet_sha256,
-                process: Some(ExecutionProcess {
-                    platform: observed.process.host.platform.clone(),
-                    host_id: observed.process.host.host_id.clone(),
-                    boot_id: observed.process.host.boot_id.clone(),
-                    pid: observed.process.pid,
-                    start_marker: observed.process.start_marker.clone(),
-                }),
-            },
-            broker_owner_audit("native-ack"),
-        )
-        .await
-        .unwrap();
+    assert_eq!(saved.process.unwrap().pid, prepared.identity().process.pid);
     release_write_and_close(&store, &binding, &launch, prepared, stream).await;
 }
 

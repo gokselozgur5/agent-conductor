@@ -10,7 +10,7 @@ use std::{
     path::Path,
 };
 
-fn approved_hash(wrapper: &Path, expected: &str) -> Result<(), BrokerError> {
+pub(super) fn approved_hash(wrapper: &Path, expected: &str) -> Result<(), BrokerError> {
     if !wrapper.is_absolute()
         || wrapper.canonicalize().map_err(|_| BrokerError::Refused)? != wrapper
     {
