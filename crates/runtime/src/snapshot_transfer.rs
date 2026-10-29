@@ -6,6 +6,8 @@ use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
 
 const MAGIC: &[u8; 8] = b"ACSNAP01";
 const MANIFEST_LIMIT: u64 = 64 * 1024 * 1024;
+mod receive;
+pub use receive::import_snapshot;
 
 fn validate(manifest: &SnapshotManifest, expected: &str) -> Result<(), SnapshotError> {
     let paths = manifest
