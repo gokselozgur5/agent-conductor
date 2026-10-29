@@ -22,6 +22,8 @@ const LIMIT: u64 = 256 * 1024;
 const WRITE_BUDGET: u64 = 64 * 1024 * 1024;
 
 /// Private contents are deliberately not Debug-formatted.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrokerFileResult {
     Text { contents: String, sha256: String },
     Written { sha256: String },

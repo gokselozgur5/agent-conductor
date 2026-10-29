@@ -294,3 +294,42 @@ These barriers prevent other lifecycle paths from treating unresolved file work
 as settled. They do not prove that a caller's closure assertion stopped a native
 writer. A distinct verified broker shutdown/recovery receipt, private transport
 and OS isolation acceptance remain required before enabling Codex writes.
+
+## Private stream server primitive
+
+`serve_broker_stream` consumes one already-connected Unix stream and the broker,
+so the peer receives no filesystem descriptor or operation callback. The trusted
+host must supply the private endpoint; the primitive does not bind or authenticate
+a named socket. Version-1 newline-framed requests include the existing immutable
+scope and exact sequence. Frames are limited to 1 MiB including the delimiter;
+replies are limited to 2 MiB, allowing bounded UTF-8 content to expand under JSON
+escaping. Malformed, partial, oversized and repeated requests close admission.
+
+Each operation runs on a blocking worker through `execute_recorded`, including
+trusted journal admission and result persistence. Read, operation and reply waits
+are bounded by a validated timeout of at most 30 seconds. Cancellation requests
+revocation immediately and then waits only for the configured settlement interval.
+If the operation remains blocked, the server returns `completed_sequence: None`;
+the worker may still be running and ownership must remain unresolved. Neither
+that timeout nor dropping the async server future proves that writes stopped.
+An RAII owner requests revocation even when the server future is aborted. Normal
+completion returns a local sequence observation only, not a durable receipt.
+
+Nine transport regressions use actual Unix streams: real file write/read and
+reply ordering; invalid/oversized/partial framing; idle timeout and cancellation
+sender loss; stalled admission during cancellation; server-future abort; pipelined
+duplicate refusal; blocked large replies after result recording; operation
+timeout; and a separate-session peer surviving broker shutdown. The last case
+launches an owned Python child with a connected endpoint, observes it alive
+after server termination, then proves its new write request is refused and no
+file appears. This child is unsandboxed and tests protocol revocation, not OS confinement or
+the native MCP proxy. Stalled
+callback tests await destruction of the worker's final journal owner and confirm
+the callback returned normally before asserting no delayed file effect.
+
+The journal here is a trusted synchronous interface. Its stream tests use markers;
+real SQLite/file ordering is separately covered by the store integration tests.
+The server has no production launcher call site yet. MCP JSON-RPC translation,
+private endpoint creation/inheritance, authenticated host wiring, independently
+persisted shutdown/result receipts and actual Codex confinement remain required.
+Do not enable a native writer by treating `BrokerStreamEnd` as a fence receipt.
