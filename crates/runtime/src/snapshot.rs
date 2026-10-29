@@ -15,8 +15,8 @@ use std::{
     path::{Component, Path},
 };
 
-const FILE_LIMIT: u64 = 32 * 1024 * 1024;
-const TOTAL_LIMIT: u64 = 512 * 1024 * 1024;
+pub(crate) const FILE_LIMIT: u64 = 32 * 1024 * 1024;
+pub(crate) const TOTAL_LIMIT: u64 = 512 * 1024 * 1024;
 const PATH_LIMIT: usize = 10_000;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -185,7 +185,7 @@ pub(crate) fn observe_paths(
     Ok(manifest)
 }
 
-fn validate_paths(paths: &[String]) -> Result<BTreeSet<String>, SnapshotError> {
+pub(crate) fn validate_paths(paths: &[String]) -> Result<BTreeSet<String>, SnapshotError> {
     if paths.len() > PATH_LIMIT {
         return Err(SnapshotError::Bounds);
     }
