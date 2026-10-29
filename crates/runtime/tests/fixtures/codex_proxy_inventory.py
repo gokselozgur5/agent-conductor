@@ -98,22 +98,21 @@ server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
 thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
 config = {
     'model_provider': 'fixture', 'model': 'gpt-5.3-codex',
-    'features.shell_tool': False, 'features.shell_snapshot': False,
-    'features.apps': False, 'features.multi_agent': False,
-    'web_search': 'disabled', 'project_doc_max_bytes': 0,
     'model_providers.fixture': {'name': 'local-fixture',
         'base_url': f'http://127.0.0.1:{server.server_port}/v1', 'wire_api': 'responses',
         'env_key': 'CONDUCTOR_FIXTURE_KEY', 'request_max_retries': 0, 'stream_max_retries': 0},
-    'mcp_servers.conductor_files': {'command': str(proxy), 'required': True,
-        'env_vars': ['CONDUCTOR_BROKER_HANDOFF'],
-        'enabled_tools': ['conductor_read_text', 'conductor_write_text']},
 }
-if authorized:
-    config['mcp_servers.conductor_files']['default_tools_approval_mode'] = 'prompt'
-    config['mcp_servers.conductor_files']['tools'] = {name: {'approval_mode': 'approve'} for name in ('conductor_read_text', 'conductor_write_text')}
+policy = json.loads(os.environ['CONDUCTOR_CODEX_BROKER_OPTIONS'])
+assert isinstance(policy, list) and len(policy) == 14
+assert all(isinstance(value, str) for value in policy)
+assert policy[::2] == ['-c'] * 7
 args = [str(binary), '--no-daemon', '-a', 'never']
 for key, value in config.items():
     args += ['-c', key + '=' + toml(value)]
+args += policy
+if not authorized:
+    for name in ('conductor_read_text', 'conductor_write_text'):
+        args += ['-c', f'mcp_servers.conductor_files.tools.{name}.approval_mode="prompt"']
 args += ['exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
          '--skip-git-repo-check', '--json', '-C', str(work),
          'Synthetic local fixture. Execute the supplied file tools, then finish.']

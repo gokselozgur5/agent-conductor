@@ -313,8 +313,18 @@ async fn codex_probe(mode: &str) {
             .unwrap()
     });
     let binary = std::env::var_os("CONDUCTOR_CODEX_BIN").expect("set exact pinned Codex binary");
-    let output = std::env::var_os("CONDUCTOR_CODEX_EVIDENCE")
-        .map_or_else(|| root.path().join("codex"), PathBuf::from);
+    let output = std::env::var_os("CONDUCTOR_CODEX_EVIDENCE").map_or_else(
+        || root.path().join("codex"),
+        |path| PathBuf::from(path).join(mode),
+    );
+    let proxy = PathBuf::from(env!("CARGO_BIN_EXE_conductor-file-proxy"))
+        .canonicalize()
+        .unwrap();
+    let policy = conductor_runtime::codex_broker_tool_options(
+        &proxy,
+        &conductor_runtime::binary_sha256(&proxy).unwrap(),
+    )
+    .unwrap();
     let child = Command::new("/usr/bin/python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -327,6 +337,10 @@ async fn codex_probe(mode: &str) {
         .env("TMPDIR", std::env::var_os("TMPDIR").unwrap())
         .env(BROKER_HANDOFF_ENV, handoff)
         .env("CONDUCTOR_PROXY_CALLS", mode)
+        .env(
+            "CONDUCTOR_CODEX_BROKER_OPTIONS",
+            serde_json::to_string(&policy).unwrap(),
+        )
         .kill_on_drop(true)
         .output()
         .await
