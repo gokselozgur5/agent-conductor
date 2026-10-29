@@ -1566,6 +1566,7 @@ fn hash(v: &str) -> String {
 }
 #[cfg(test)]
 mod effect_tests {
+    include!("broker_authority_tests.rs");
     #[cfg(unix)]
     mod broker_journal_tests {
         include!("broker_journal_tests.rs");
