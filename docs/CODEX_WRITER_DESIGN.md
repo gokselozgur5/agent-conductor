@@ -820,5 +820,33 @@ The measured CLI catalog also contains `view_image`, MCP resource discovery/read
 goal controls and user-input tools. A two-tool MCP allow list is not a two-tool
 whole-model catalog. Their effects and outside-root access still require explicit
 conformance/OS denial controls before native writer admission. The current tests
-assert absence of command tools and correct broker tools; they do not certify all
-remaining built-in tools as harmless.
+assert absence of command tools and correct broker tools. The following controls
+cover selected file-access surfaces; they do not certify all built-ins as harmless.
+
+## Actual CLI file-access denial controls
+
+Opt-in `broker_endpoint` tests use pinned Codex0.163.0, the generated production
+command and a deterministic local provider. A valid PNG inside the workspace
+produces image content in the next model request. The identical valid PNG outside
+the workspace, including access through an in-workspace symlink, is refused with
+an OS permission error and produces no image content. This positive control
+separates permission enforcement from malformed-image decoding failures.
+
+Approved broker tools are separately asked to read and write absolute outside
+paths and relative parent-traversal paths. All four requests receive the exact
+MCP `-32602: invalid file operation` refusal before broker admission. The read
+canary remains unchanged and absent from model requests and captured logs; the
+write target remains absent. The host independently checks zero journal operations
+and zero completed sequence. These are request-validation controls, not evidence
+that an admitted operation can safely follow arbitrary filesystem links.
+
+Run these ignored tests with `CONDUCTOR_CODEX_BIN` set to the pinned executable,
+`CONDUCTOR_CODEX_EVIDENCE` set to a fresh existing parent directory and `TMPDIR`
+set to the private test directory. Each mode creates a new evidence subdirectory;
+existing evidence must not be reused. Execute the `pinned_codex_image` and
+`pinned_codex_broker` filters in the runtime `broker_endpoint` integration target
+with `--ignored --test-threads=1`. Preserve stdout, stderr, tool outputs and receipts.
+
+Control-socket access, credentials, network policy, other built-in effects,
+vendor process supervision, daemon dispatch and full operational acceptance are
+still open. None of these controls enables generic Codex native writer admission.
