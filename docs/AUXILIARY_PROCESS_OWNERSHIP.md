@@ -30,14 +30,22 @@ invocation's proof only under the current runtime generation and same authority;
 it runs before interrupted workflow admission. Direct claim/requeue, reassignment
 and continuation refuse pending auxiliary ownership independently of writer fences.
 
-This remains intermediate issue acceptance. Pre-acknowledgement crashes have no
-persisted observed process identity, so their receipts remain unresolved rather
-than inventing an ACK. Synchronous capture, review preparation and launch-definition failures now
+This remains intermediate issue acceptance. Pre-acknowledgement recovery now
+accepts only a private `never_released` receipt matching the persisted invocation,
+authority, original boot and launch digest, after rechecking the retained wrapper
+pin. The receipt's self-reported process identity remains receipt evidence:
+`process_json` stays NULL and `release_recorded` stays zero. A started/settled
+process receipt cannot substitute for missing acknowledgement. Current authority
+and runtime generation, exact launch binding and atomic settlement/audit are
+required; malformed, missing or nonprivate evidence leaves ownership pending.
+The supervisor's exclusive invocation claim prevents replay from releasing a
+second payload. Recovery never signals a receipt PID or invents a live observation. Synchronous capture, review preparation and launch-definition failures now
 settle an unbound invocation with an `auxiliary.not_launched` audit in the same
 owning runtime. The transaction refuses any launch binding, process identity,
 release authorization or changed generation. It cannot be used as restart proof;
-audit failure preserves pending ownership. Errors after launch binding still
-require the separate supervisor evidence path. Legacy schema-19 verification work and
+audit failure preserves pending ownership. Errors after launch binding require supervisor evidence. A wrapper killed
+before receipt publication, malformed launch input or a failure before it accepts
+the launch still leaves uncertainty; absence is never a no-launch receipt. Legacy schema-19 verification work and
 schema-20 pending invocations lack supervisor metadata and require an explicit
 migration policy before deployment. Complete boundary coverage, operator/invariant reporting and host recovery
 remain required. Actual native crash controls now cover both a running required

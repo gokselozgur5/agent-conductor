@@ -7,7 +7,7 @@ use agent_conductor_store::{
 use conductor_runtime::{
     AuxiliaryEvent, AuxiliaryLaunch, AuxiliaryObservation, AuxiliaryReceipt, AuxiliarySession,
     AuxiliaryStopReason, ChildIdentity, HostEpoch, ProcessError, ProcessOutput, ProcessSpec,
-    read_auxiliary_receipt,
+    read_auxiliary_receipt, read_auxiliary_unreleased_receipt,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -211,6 +211,35 @@ impl<C: Clock> PersistentControlService<C> {
             .await
     }
 
+    async fn accept_auxiliary_unreleased_receipt(
+        &self,
+        input: &AuxiliaryPreparation,
+        binding: &AuxiliaryLaunchBinding,
+    ) -> Result<(), StoreError> {
+        if file_hash(Path::new(&binding.wrapper_path))? != binding.wrapper_sha256 {
+            return Err(invalid());
+        }
+        let receipt = read_auxiliary_unreleased_receipt(
+            Path::new(&binding.receipt_root),
+            &input.invocation_id,
+            &binding.authority_id,
+            u64::try_from(input.boot_generation).map_err(|_| invalid())?,
+            &binding.launch_sha256,
+        )
+        .map_err(|_| invalid())?;
+        let proof = serde_json::to_string(&receipt).map_err(|_| invalid())?;
+        let id = Uuid::now_v7().to_string();
+        self.store
+            .settle_auxiliary_unreleased_proof(
+                input,
+                binding,
+                self.boot_generation,
+                &proof,
+                self.auxiliary_audit(&id, input),
+            )
+            .await
+    }
+
     pub(super) async fn recover_auxiliary_receipts(&self) -> Result<usize, StoreError> {
         let mut count = 0;
         for AuxiliaryInvocation {
@@ -220,13 +249,18 @@ impl<C: Clock> PersistentControlService<C> {
             release_recorded,
         } in self.store.pending_auxiliary_invocations().await?
         {
-            let (Some(binding), Some(process), true) = (binding, process, release_recorded) else {
-                continue;
+            let result = match (binding, process, release_recorded) {
+                (Some(binding), Some(process), true) => {
+                    self.accept_auxiliary_receipt(&preparation, &binding, &process)
+                        .await
+                }
+                (Some(binding), None, false) => {
+                    self.accept_auxiliary_unreleased_receipt(&preparation, &binding)
+                        .await
+                }
+                _ => continue,
             };
-            match self
-                .accept_auxiliary_receipt(&preparation, &binding, &process)
-                .await
-            {
+            match result {
                 Ok(()) => count += 1,
                 Err(StoreError::Integrity(_)) => {}
                 Err(error) => return Err(error),

@@ -3507,8 +3507,122 @@ mod effect_tests {
                     "conductor-check-executor"
                 );
                 assert!(verification.verdict.is_none());
+                assert_auxiliary_preack_recovery(
+                    &service,
+                    &store,
+                    directory.path(),
+                    &workspace.wrapper,
+                )
+                .await;
             }
         }
+    }
+
+    async fn assert_auxiliary_preack_recovery(
+        service: &PersistentControlService<FixedClock>,
+        store: &Store,
+        root: &std::path::Path,
+        wrapper: &std::path::Path,
+    ) {
+        use agent_conductor_store::{AuxiliaryKind, AuxiliaryLaunchBinding, EffectAudit};
+        use conductor_runtime::{AuxiliaryLaunch, AuxiliarySession};
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        let row = store.task("task").await.unwrap().unwrap();
+        let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+        let source = task
+            .verification
+            .as_ref()
+            .unwrap()
+            .source
+            .as_ref()
+            .unwrap()
+            .0
+            .clone();
+        let work = root.join("preack-work");
+        fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let receipts = root.join("preack-receipts");
+        fs::create_dir(&receipts).unwrap();
+        fs::set_permissions(&receipts, fs::Permissions::from_mode(0o700)).unwrap();
+        let input = service
+            .begin_auxiliary(&task, AuxiliaryKind::Check, &source, &work, b"preack-test")
+            .await
+            .unwrap();
+        let executable = std::path::PathBuf::from("/bin/sh").canonicalize().unwrap();
+        let hash = |p: &std::path::Path| format!("{:x}", Sha256::digest(fs::read(p).unwrap()));
+        let launch = AuxiliaryLaunch {
+            version: 1,
+            invocation_id: input.invocation_id.clone(),
+            authority_id: "a".repeat(64),
+            boot_generation: service.boot_generation,
+            receipt_root: receipts.canonicalize().unwrap(),
+            executable_sha256: hash(&executable),
+            executable,
+            arguments: vec!["-c".into(), "echo forbidden > payload-started".into()],
+            directory: work.clone(),
+            environment: std::collections::BTreeMap::new(),
+            timeout_ms: 5000,
+            heartbeat_timeout_ms: 3000,
+            output_limit: 1024,
+        };
+        let wrapper = wrapper.canonicalize().unwrap();
+        let binding = AuxiliaryLaunchBinding {
+            launch_sha256: launch.sha256().unwrap(),
+            authority_id: launch.authority_id.clone(),
+            receipt_root: launch.receipt_root.to_str().unwrap().into(),
+            wrapper_path: wrapper.to_str().unwrap().into(),
+            wrapper_sha256: hash(&wrapper),
+        };
+        store
+            .bind_auxiliary_launch(
+                &input,
+                &binding,
+                EffectAudit {
+                    id: "preack-bind",
+                    actor_id: "test",
+                    correlation_id: &input.invocation_id,
+                    now_ms: 100,
+                },
+            )
+            .await
+            .unwrap();
+        let session = AuxiliarySession::prepare(&wrapper, &launch).await.unwrap();
+        assert_eq!(service.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        // Lose the private parent pipe before the Ready identity is acknowledged.
+        drop(session);
+        let receipt = receipts.join(format!("auxiliary-{}.json", input.invocation_id));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !receipt.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let restarted = PersistentControlService::start_with_reservation(
+            store.clone(),
+            200,
+            FixedClock::new(0),
+            Some((&"a".repeat(64), service.boot_generation + 1)),
+        )
+        .await
+        .unwrap();
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(service.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 1);
+        assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert!(!store.has_pending_auxiliary("task").await.unwrap());
+        let observed:(Option<String>,i64,String)=sqlx::query_as("SELECT process_json,release_recorded,settlement_json FROM auxiliary_invocations WHERE invocation_id=?").bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+        assert!(observed.0.is_none());
+        assert_eq!(observed.1, 0);
+        let proof: serde_json::Value = serde_json::from_str(&observed.2).unwrap();
+        assert_eq!(proof["observation"], "never_released");
+        assert!(!work.join("payload-started").exists());
     }
 
     fn assert_unstarted_binding(

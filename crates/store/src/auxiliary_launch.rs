@@ -175,6 +175,66 @@ impl Store {
         proof: &str,
         audit: EffectAudit<'_>,
     ) -> Result<(), StoreError> {
+        self.settle_auxiliary_receipt(
+            input,
+            binding,
+            process,
+            current_generation,
+            proof,
+            true,
+            audit,
+        )
+        .await
+    }
+
+    /// Settles a trusted never-released receipt without inventing an ACK.
+    /// The service must validate the private receipt and retained wrapper pin.
+    /// Receipt process data remains evidence only, not observed process state.
+    /// # Errors
+    /// Refuses any saved process/release, non-prelaunch outcome or changed scope.
+    pub async fn settle_auxiliary_unreleased_proof(
+        &self,
+        input: &AuxiliaryPreparation,
+        binding: &AuxiliaryLaunchBinding,
+        current_generation: u64,
+        proof: &str,
+        audit: EffectAudit<'_>,
+    ) -> Result<(), StoreError> {
+        if proof.len() > 4096 {
+            return Err(invalid());
+        }
+        let observed: serde_json::Value = serde_json::from_str(proof).map_err(|_| invalid())?;
+        if observed["observation"] != "never_released" {
+            return Err(invalid());
+        }
+        let p = &observed["process"];
+        let process: ExecutionProcess = serde_json::from_value(serde_json::json!({
+            "platform":p["host"]["platform"],"host_id":p["host"]["host_id"],"boot_id":p["host"]["boot_id"],
+            "pid":p["pid"],"start_marker":p["start_marker"]
+        })).map_err(|_| invalid())?;
+        self.settle_auxiliary_receipt(
+            input,
+            binding,
+            &process,
+            current_generation,
+            proof,
+            false,
+            audit,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn settle_auxiliary_receipt(
+        &self,
+        input: &AuxiliaryPreparation,
+        binding: &AuxiliaryLaunchBinding,
+        process: &ExecutionProcess,
+        current_generation: u64,
+        proof: &str,
+        acknowledged: bool,
+        audit: EffectAudit<'_>,
+    ) -> Result<(), StoreError> {
         input.validate()?;
         binding.validate()?;
         process.validate()?;
@@ -202,8 +262,12 @@ impl Store {
             || row.try_get::<Option<String>, _>("launch_binding_json")?
                 != Some(serde_json::to_string(binding).map_err(|_| invalid())?)
             || row.try_get::<Option<String>, _>("process_json")?
-                != Some(serde_json::to_string(process).map_err(|_| invalid())?)
-            || row.try_get::<i64, _>("release_recorded")? != 1
+                != if acknowledged {
+                    Some(serde_json::to_string(process).map_err(|_| invalid())?)
+                } else {
+                    None
+                }
+            || row.try_get::<i64, _>("release_recorded")? != i64::from(acknowledged)
         {
             return Err(invalid());
         }

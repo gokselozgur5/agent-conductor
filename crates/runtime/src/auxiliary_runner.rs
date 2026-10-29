@@ -234,22 +234,59 @@ pub fn read_auxiliary_receipt(
     root: &Path,
     expected: &AuxiliaryReceipt,
 ) -> io::Result<AuxiliaryReceipt> {
-    expected.process.host.validate()?;
-    if expected.version != 1
-        || expected.boot_generation == 0
-        || !valid_digest(&expected.authority_id)
-        || expected.process.pid == 0
-        || expected.process.start_marker.is_empty()
-        || expected.process.start_marker.len() > 128
-        || expected.launch_sha256.len() != 64
-        || !expected
-            .launch_sha256
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit())
+    validate_receipt(expected)?;
+    let receipt = read_private_receipt(root, &expected.invocation_id)?;
+    if &receipt != expected {
+        return Err(invalid());
+    }
+    Ok(receipt)
+}
+
+/// Reads pre-release evidence when no independently observed process was saved.
+/// The receipt's process is evidence only: it must never become an ACK, live
+/// process observation or signaling target. All durable launch scope must match.
+/// # Errors
+/// Refuses released outcomes, mismatched scope and invalid/private-file evidence.
+pub fn read_auxiliary_unreleased_receipt(
+    root: &Path,
+    invocation: &str,
+    authority: &str,
+    boot_generation: u64,
+    launch_sha256: &str,
+) -> io::Result<AuxiliaryReceipt> {
+    let receipt = read_private_receipt(root, invocation)?;
+    if receipt.invocation_id != invocation
+        || receipt.authority_id != authority
+        || receipt.boot_generation != boot_generation
+        || receipt.launch_sha256 != launch_sha256
+        || receipt.observation != AuxiliaryObservation::NeverReleased
     {
         return Err(invalid());
     }
-    let path = receipt_path(root, &expected.invocation_id)?;
+    Ok(receipt)
+}
+
+fn validate_receipt(receipt: &AuxiliaryReceipt) -> io::Result<()> {
+    receipt.process.host.validate()?;
+    if receipt.version != 1
+        || receipt.boot_generation == 0
+        || !valid_digest(&receipt.authority_id)
+        || receipt.process.pid == 0
+        || receipt.process.start_marker.is_empty()
+        || receipt.process.start_marker.len() > 128
+        || receipt.launch_sha256.len() != 64
+        || !receipt.launch_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(invalid());
+    }
+    if !canonical_uuid(&receipt.invocation_id) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn read_private_receipt(root: &Path, invocation: &str) -> io::Result<AuxiliaryReceipt> {
+    let path = receipt_path(root, invocation)?;
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
@@ -279,9 +316,7 @@ pub fn read_auxiliary_receipt(
         return Err(invalid());
     }
     let receipt: AuxiliaryReceipt = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    if &receipt != expected {
-        return Err(invalid());
-    }
+    validate_receipt(&receipt)?;
     Ok(receipt)
 }
 

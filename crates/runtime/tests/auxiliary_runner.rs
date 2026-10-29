@@ -367,3 +367,73 @@ async fn receipt_root_inside_child_workspace_is_refused_before_readiness() {
     assert!(!launch.directory.join("output").exists());
     assert_eq!(fs::read_dir(&launch.receipt_root).unwrap().count(), 0);
 }
+
+#[tokio::test]
+async fn unreleased_proof_needs_launch_scope_but_never_an_invented_observation() {
+    use conductor_runtime::read_auxiliary_unreleased_receipt;
+    let (_dir, launch) = fixture("echo forbidden > output");
+    let hash = launch.sha256().unwrap();
+    let (mut child, writer, reader) = spawn(&launch).await;
+    // Simulate loss before Ready is consumed: no independently observed identity.
+    drop(writer);
+    drop(reader);
+    finish(&mut child).await;
+    let read = || {
+        read_auxiliary_unreleased_receipt(
+            &launch.receipt_root,
+            &launch.invocation_id,
+            &launch.authority_id,
+            launch.boot_generation,
+            &hash,
+        )
+    };
+    let receipt = read().unwrap();
+    assert_eq!(receipt.observation, AuxiliaryObservation::NeverReleased);
+    assert!(!launch.directory.join("output").exists());
+    assert!(
+        read_auxiliary_unreleased_receipt(
+            &launch.receipt_root,
+            &launch.invocation_id,
+            &"b".repeat(64),
+            launch.boot_generation,
+            &hash
+        )
+        .is_err()
+    );
+    assert!(
+        read_auxiliary_unreleased_receipt(
+            &launch.receipt_root,
+            &launch.invocation_id,
+            &launch.authority_id,
+            launch.boot_generation + 1,
+            &hash
+        )
+        .is_err()
+    );
+    assert!(
+        read_auxiliary_unreleased_receipt(
+            &launch.receipt_root,
+            &launch.invocation_id,
+            &launch.authority_id,
+            launch.boot_generation,
+            &"c".repeat(64)
+        )
+        .is_err()
+    );
+    let original = fs::read(receipt_path(&launch)).unwrap();
+    for change in 0..6 {
+        let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        match change {
+            0 => value["observation"] = "owned_group_settled".into(),
+            1 => value["process"]["pid"] = 0.into(),
+            2 => value["process"]["host"]["boot_id"] = "invalid".into(),
+            3 => value["unexpected"] = true.into(),
+            4 => value["invocation_id"] = uuid::Uuid::now_v7().to_string().into(),
+            _ => value["version"] = 2.into(),
+        }
+        fs::write(receipt_path(&launch), serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(read().is_err());
+    }
+    fs::write(receipt_path(&launch), original).unwrap();
+    assert_eq!(read().unwrap(), receipt);
+}

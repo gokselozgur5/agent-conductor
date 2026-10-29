@@ -532,3 +532,148 @@ async fn no_launch_abandonment_requires_current_unbound_owner_and_atomic_audit()
             .unwrap();
     }
 }
+
+#[tokio::test]
+async fn unreleased_recovery_preserves_absent_ack_and_requires_current_authority() {
+    let (_dir, store, input, mut connection) = fixture().await;
+    sqlx::query("UPDATE recovery_authority SET authority_id=?")
+        .bind(binding().authority_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    store
+        .prepare_auxiliary_once(&input, audit("prepare"))
+        .await
+        .unwrap();
+    store
+        .bind_auxiliary_launch(&input, &binding(), audit("bind"))
+        .await
+        .unwrap();
+    let proof = proof(&input).replace("owned_group_settled", "never_released");
+    connection
+        .execute("UPDATE runtime_metadata SET boot_generation=2")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .settle_auxiliary_unreleased_proof(&input, &binding(), 1, &proof, audit("stale"))
+            .await
+            .is_err()
+    );
+    for invalid in [
+        proof.replace("never_released", "owned_group_settled"),
+        proof.replace(&input.invocation_id, &uuid::Uuid::now_v7().to_string()),
+        "{}".into(),
+    ] {
+        assert!(
+            store
+                .settle_auxiliary_unreleased_proof(
+                    &input,
+                    &binding(),
+                    2,
+                    &invalid,
+                    audit("wrong-proof")
+                )
+                .await
+                .is_err()
+        );
+    }
+    sqlx::query("UPDATE recovery_authority SET authority_id=?")
+        .bind("f".repeat(64))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .settle_auxiliary_unreleased_proof(
+                &input,
+                &binding(),
+                2,
+                &proof,
+                audit("wrong-authority")
+            )
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE recovery_authority SET authority_id=?")
+        .bind(binding().authority_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.execute("CREATE TRIGGER reject_unreleased BEFORE INSERT ON audit_events WHEN NEW.kind='auxiliary.proof_settled' BEGIN SELECT RAISE(ABORT,'injected'); END;").await.unwrap();
+    assert!(
+        store
+            .settle_auxiliary_unreleased_proof(&input, &binding(), 2, &proof, audit("rollback"))
+            .await
+            .is_err()
+    );
+    assert!(store.has_pending_auxiliary("task").await.unwrap());
+    connection
+        .execute("DROP TRIGGER reject_unreleased")
+        .await
+        .unwrap();
+    store
+        .settle_auxiliary_unreleased_proof(&input, &binding(), 2, &proof, audit("settle"))
+        .await
+        .unwrap();
+    store
+        .settle_auxiliary_unreleased_proof(&input, &binding(), 2, &proof, audit("replay"))
+        .await
+        .unwrap();
+    assert!(!store.has_pending_auxiliary("task").await.unwrap());
+    let observed: (Option<String>, i64) =
+        sqlx::query_as("SELECT process_json,release_recorded FROM auxiliary_invocations")
+            .fetch_one(store.readers())
+            .await
+            .unwrap();
+    assert_eq!(observed, (None, 0));
+    let changed = proof.replace("linux-start-ticks:12", "linux-start-ticks:13");
+    assert!(
+        store
+            .settle_auxiliary_unreleased_proof(&input, &binding(), 2, &changed, audit("changed"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn unreleased_shortcut_refuses_an_acknowledged_invocation() {
+    let (_dir, store, input, mut connection) = fixture().await;
+    sqlx::query("UPDATE recovery_authority SET authority_id=?")
+        .bind(binding().authority_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    store
+        .prepare_auxiliary_once(&input, audit("prepare"))
+        .await
+        .unwrap();
+    store
+        .bind_auxiliary_launch(&input, &binding(), audit("bind"))
+        .await
+        .unwrap();
+    store
+        .authorize_auxiliary_release(&input, &binding(), &process(), audit("release"))
+        .await
+        .unwrap();
+    let proof = proof(&input).replace("owned_group_settled", "never_released");
+    assert!(
+        store
+            .settle_auxiliary_unreleased_proof(&input, &binding(), 1, &proof, audit("refuse"))
+            .await
+            .is_err()
+    );
+    assert!(store.has_pending_auxiliary("task").await.unwrap());
+    // An acknowledged pre-release failure still uses its independently bound identity.
+    store
+        .settle_auxiliary_proof(
+            &input,
+            &binding(),
+            &process(),
+            1,
+            &proof,
+            audit("observed-settle"),
+        )
+        .await
+        .unwrap();
+}
