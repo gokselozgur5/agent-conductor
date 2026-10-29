@@ -174,6 +174,7 @@ impl<C: Clock> PersistentControlService<C> {
             .map_err(|_| invalid("retained workspace snapshot failed"))?;
         let baseline = GitSnapshot {
             starting_head: packet.contract.starting_head,
+            starting_ref: None,
             status_sha256: manifest
                 .sha256()
                 .map_err(|_| invalid("snapshot hash failed"))?,

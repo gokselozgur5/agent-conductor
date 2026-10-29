@@ -159,3 +159,35 @@ async fn notification_roots_include_linked_worktree_metadata_without_mutation() 
     assert_eq!(fs::read(source.join(".git/index")).unwrap(), index);
     assert_eq!(git(&linked, &["rev-parse", "HEAD"]), head);
 }
+
+#[tokio::test]
+async fn observation_distinguishes_same_commit_branches_and_detached_head() {
+    use conductor_runtime::{discover_advisory, observe_git};
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source");
+    repository(&source);
+    let before = observe_git(&source).await.unwrap();
+    git(&source, &["checkout", "-qb", "external-branch"]);
+    let switched = observe_git(&source).await.unwrap();
+    assert_eq!(before.starting_head, switched.starting_head);
+    assert_eq!(before.manifest, switched.manifest);
+    assert_eq!(before.status_sha256, switched.status_sha256);
+    assert_ne!(before.starting_ref, switched.starting_ref);
+    assert_eq!(
+        switched.starting_ref.as_deref(),
+        Some("refs/heads/external-branch")
+    );
+    assert_eq!(
+        discover_advisory(&switched).unwrap().starting_ref,
+        switched.starting_ref
+    );
+    git(&source, &["checkout", "--detach", "-q"]);
+    let detached = observe_git(&source).await.unwrap();
+    assert_eq!(detached.starting_head, before.starting_head);
+    assert_eq!(detached.starting_ref.as_deref(), Some("HEAD"));
+    let mut legacy = serde_json::to_value(&before).unwrap();
+    legacy.as_object_mut().unwrap().remove("starting_ref");
+    let decoded: conductor_runtime::GitSnapshot = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(decoded.starting_ref, None);
+    assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+}

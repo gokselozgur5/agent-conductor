@@ -283,6 +283,7 @@ fn copy_accepted_source(
     }
     Ok(GitSnapshot {
         starting_head,
+        starting_ref: None,
         status_sha256: copied.sha256().map_err(|_| invalid("input hash failed"))?,
         manifest: copied,
     })

@@ -1228,6 +1228,7 @@ mod tests {
         let plan = plan(root.path().join("project"), root.path().join("artifacts"));
         let baseline = conductor_runtime::GitSnapshot {
             starting_head: "a".repeat(40),
+            starting_ref: None,
             status_sha256: "b".repeat(64),
             manifest: conductor_runtime::SnapshotManifest {
                 version: 1,
