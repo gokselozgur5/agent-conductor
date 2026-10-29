@@ -1,3 +1,5 @@
+mod broker_prelaunch;
+pub use broker_prelaunch::record_broker_launch;
 mod broker_ownership;
 pub use broker_ownership::{
     close_broker_from_receipt, record_broker_owner, recover_broker_from_receipt,
