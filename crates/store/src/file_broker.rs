@@ -1,5 +1,8 @@
 //! Durable broker intents. Replay never grants a second filesystem effect.
+#[path = "file_broker_launch_recovery.rs"]
+mod launch_recovery;
 use crate::{EffectAudit, Store, StoreError};
+pub use launch_recovery::UnreleasedBrokerLaunchProof;
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, SqliteConnection};
 #[path = "file_broker_launch.rs"]
