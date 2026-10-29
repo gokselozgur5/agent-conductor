@@ -76,6 +76,40 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Discover at most 128 ACK-bearing, never-registered open preparations.
+    /// Decode each binding independently so malformed rows cannot hide later work.
+    /// # Errors
+    /// Returns database errors; each malformed candidate retains its own error.
+    pub async fn pending_unregistered_broker_launch_page(
+        &self,
+        after: Option<&str>,
+    ) -> Result<Vec<crate::FileBrokerRecoveryCandidate>, StoreError> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT p.invocation_id,p.execution_token,CASE WHEN length(p.binding_json)<=4096 THEN p.binding_json ELSE '' END FROM file_broker_launches p JOIN executions e ON e.effect_token=p.execution_token WHERE p.state='open' AND e.process_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM file_brokers b WHERE b.execution_token=p.execution_token OR b.invocation_id=p.invocation_id) AND (? IS NULL OR p.invocation_id>?) ORDER BY p.invocation_id LIMIT 128")
+            .bind(after).bind(after).fetch_all(&self.inner.readers).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(invocation_id, execution_token, encoded)| {
+                let binding = (|| {
+                    let binding: FileBrokerBinding =
+                        serde_json::from_str(&encoded).map_err(|_| invalid())?;
+                    if binding.invocation_id != invocation_id
+                        || binding.execution_token != execution_token
+                        || binding.encoded()? != encoded
+                    {
+                        return Err(invalid());
+                    }
+                    Ok(binding)
+                })();
+                crate::FileBrokerRecoveryCandidate {
+                    invocation_id,
+                    binding,
+                }
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +233,73 @@ mod tests {
                 .unwrap()
         );
     }
+    #[tokio::test]
+    async fn discovery_requires_ack_and_preserves_malformed_candidates() {
+        let (_root, store, binding) = fixture().await;
+        sqlx::query("INSERT INTO file_broker_launches VALUES(?,?,?,'{}','open',100,NULL)")
+            .bind(&binding.invocation_id)
+            .bind(&binding.execution_token)
+            .bind(binding.encoded().unwrap())
+            .execute(&mut *store.inner.writer.lock().await)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .pending_unregistered_broker_launch_page(None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .execute("UPDATE executions SET process_json='{}'")
+            .await
+            .unwrap();
+        let page = store
+            .pending_unregistered_broker_launch_page(None)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(
+            page[0].binding.as_ref().unwrap().encoded().unwrap(),
+            binding.encoded().unwrap()
+        );
+        assert!(
+            store
+                .pending_unregistered_broker_launch_page(Some(&binding.invocation_id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .execute("UPDATE file_broker_launches SET binding_json='{}'")
+            .await
+            .unwrap();
+        let page = store
+            .pending_unregistered_broker_launch_page(None)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert!(page[0].binding.is_err());
+        sqlx::query("INSERT INTO file_brokers(invocation_id,execution_token,binding_json,state,created_at_ms) VALUES(?,?,'{}','open',100)")
+            .bind(&binding.invocation_id).bind(&binding.execution_token)
+            .execute(&mut *store.inner.writer.lock().await).await.unwrap();
+        assert!(
+            store
+                .pending_unregistered_broker_launch_page(None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     async fn assert_registered_refused(
         store: &Store,
         binding: &FileBrokerBinding,
