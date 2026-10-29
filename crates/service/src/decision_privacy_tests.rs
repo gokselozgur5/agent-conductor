@@ -71,6 +71,7 @@ async fn decision_privacy_redacts_legacy_views_and_replays_without_rewriting_rec
         CommandKind::OpenDecision { id: "format".into(), question: "Ordinary question".into() }, "legacy");
     let mut outcome = decision_task(service.handle(request.clone()).await.unwrap());
     let secret = decision_canary();
+    outcome.task.objective = format!("Legacy objective {secret}");
     outcome.task.aggregate.decisions[0].question = format!("Legacy {secret}");
     outcome.task.aggregate.decisions[0].resolution = Some(agent_conductor_domain::DecisionResolution {
         rationale: format!("Legacy rationale {secret}"),
@@ -80,6 +81,8 @@ async fn decision_privacy_redacts_legacy_views_and_replays_without_rewriting_rec
     let raw = serde_json::to_string(&outcome.task.aggregate).unwrap();
     let mut db = SqliteConnection::connect(&format!("sqlite:{}", directory.path().join("state.sqlite3").display()))
         .await.unwrap();
+    sqlx::query("UPDATE tasks SET objective=? WHERE id='task'")
+        .bind(&outcome.task.objective).execute(&mut db).await.unwrap();
     sqlx::query("UPDATE tasks SET aggregate_json=? WHERE id='task'")
         .bind(&raw).execute(&mut db).await.unwrap();
     sqlx::query("UPDATE command_idempotency SET outcome_json=? WHERE idempotency_key='legacy'")
@@ -89,9 +92,48 @@ async fn decision_privacy_redacts_legacy_views_and_replays_without_rewriting_rec
         Request::ListTaskPage { project_id: None, after: None }, request] {
         let json = serde_json::to_string(&service.handle(query).await.unwrap()).unwrap();
         assert!(!json.contains(&secret));
+        assert!(json.contains("Legacy objective [redacted]"));
         assert!(json.contains("Legacy [redacted]"));
         assert!(json.contains("Legacy rationale [redacted]"));
         assert!(json.contains("format"));
     }
     assert_eq!(store.task("task").await.unwrap().unwrap().aggregate_json, raw);
+}
+
+#[tokio::test]
+async fn objective_projection_and_legacy_creation_replay_preserve_original_identity() {
+    let (directory, store) = lifecycle_store().await;
+    let service = PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+        .await.unwrap();
+    let secret = decision_canary();
+    let objective = format!("Perform task {secret}");
+    let request = Request::CreateTask {
+        actor_id: "operator".into(), idempotency_key: "objective-create".into(),
+        id: "objective-task".into(), project_id: "project".into(), objective: objective.clone(),
+        priority: 0, authority: serde_json::json!({}), required_checks: vec![],
+    };
+    let mut response = service.handle(request.clone()).await.unwrap();
+    assert!(!serde_json::to_string(&response).unwrap().contains(&secret));
+    assert_eq!(store.task("objective-task").await.unwrap().unwrap().objective, objective);
+    let Response::Task(task) = &mut response else { panic!("task expected") };
+    task.objective.clone_from(&objective);
+    let legacy = serde_json::to_string(&response).unwrap();
+    let mut db = SqliteConnection::connect(&format!("sqlite:{}", directory.path().join("state.sqlite3").display()))
+        .await.unwrap();
+    sqlx::query("UPDATE command_idempotency SET outcome_json=? WHERE idempotency_key='objective-create'")
+        .bind(&legacy).execute(&mut db).await.unwrap();
+    for query in [Request::GetTask { task_id: "objective-task".into() },
+        Request::ListTasks { project_id: None },
+        Request::ListTaskPage { project_id: None, after: None }, request.clone()] {
+        let json = serde_json::to_string(&service.handle(query).await.unwrap()).unwrap();
+        assert!(!json.contains(&secret));
+        assert!(json.contains("Perform task [redacted]"));
+    }
+    let mut different = request;
+    let Request::CreateTask { objective, .. } = &mut different else { unreachable!() };
+    objective.push_str("DifferentSecret");
+    assert!(service.handle(different).await.is_err());
+    let saved: String = sqlx::query_scalar("SELECT outcome_json FROM command_idempotency WHERE idempotency_key='objective-create'")
+        .fetch_one(store.readers()).await.unwrap();
+    assert_eq!(saved, legacy);
 }

@@ -275,7 +275,7 @@ impl<C: Clock> PersistentControlService<C> {
         Ok(TaskResponse {
             lease_observation,
             project_id: row.project_id,
-            objective: row.objective,
+            objective: conductor_runtime::redact_credentials(&row.objective),
             priority: row.priority,
             authority: serde_json::from_str(&row.authority_json).map_err(json_error)?,
             aggregate: Box::new(task),
@@ -495,7 +495,9 @@ impl<C: Clock> PersistentControlService<C> {
             .await
             .map_err(store_error)?
         {
-            return serde_json::from_str(&json).map_err(json_error);
+            return serde_json::from_str(&json)
+                .map(decision_privacy::redact_creation_response)
+                .map_err(json_error);
         }
         let now = self.clock.read(self.boot_generation).wall_unix_ms;
         let kind = match (&project, &agent, &new_task) {
@@ -530,9 +532,9 @@ impl<C: Clock> PersistentControlService<C> {
         };
         match self.store.persist(&batch).await.map_err(store_error)? {
             CommitResult::Applied { .. } => Ok(outcome),
-            CommitResult::Replayed { outcome_json } => {
-                serde_json::from_str(&outcome_json).map_err(json_error)
-            }
+            CommitResult::Replayed { outcome_json } => serde_json::from_str(&outcome_json)
+                .map(decision_privacy::redact_creation_response)
+                .map_err(json_error),
         }
     }
 
@@ -597,7 +599,7 @@ impl<C: Clock> PersistentControlService<C> {
             let mut value: CommandAppliedResponse =
                 serde_json::from_str(&json).map_err(json_error)?;
             value.replayed = true;
-            decision_privacy::redact_task(&mut value.task.aggregate);
+            decision_privacy::redact_task_response(&mut value.task);
             return Ok(value);
         }
         let (batch, response) = self
@@ -609,7 +611,7 @@ impl<C: Clock> PersistentControlService<C> {
                 let mut value: CommandAppliedResponse =
                     serde_json::from_str(&outcome_json).map_err(json_error)?;
                 value.replayed = true;
-                decision_privacy::redact_task(&mut value.task.aggregate);
+                decision_privacy::redact_task_response(&mut value.task);
                 Ok(value)
             }
         }
@@ -646,7 +648,7 @@ impl<C: Clock> PersistentControlService<C> {
             task: TaskResponse {
                 lease_observation: None,
                 project_id: row.project_id,
-                objective: row.objective,
+                objective: conductor_runtime::redact_credentials(&row.objective),
                 priority: row.priority,
                 authority: serde_json::from_str(&row.authority_json).map_err(json_error)?,
                 aggregate: Box::new(applied.task.clone()),
@@ -654,7 +656,7 @@ impl<C: Clock> PersistentControlService<C> {
             replayed: false,
             effect_tokens: effects.iter().map(|e| e.token.clone()).collect(),
         };
-        decision_privacy::redact_task(&mut response.task.aggregate);
+        decision_privacy::redact_task_response(&mut response.task);
         let batch = CommitBatch {
             actor_id: command.actor.id.0.clone(),
             idempotency_key: command.idempotency_key.0.clone(),
