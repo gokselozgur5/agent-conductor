@@ -125,6 +125,59 @@ class ProcessInventory(unittest.TestCase):
             self.assertNotIn('PRIVATE_STORED_TEXT', json.dumps(result))
         db.close()
 
+    def test_recorded_pid_observation_does_not_invent_missing_tag(self):
+        import json
+        import time
+        host = dict(platform='linux', host_id='a' * 64, boot_id='b' * 64)
+        start = 'linux-start-ticks:123'
+        raw = json.dumps(dict(host, pid=42, start_marker=start))
+        db = sqlite3.connect(':memory:')
+        db.execute('create table executions(process_json,packet_sha256,wrapper_identity)')
+        db.execute('insert into executions values(?,?,?)', (raw, PACKET, WRAPPER))
+        for command, classification in [('PRIVATE_ARGV', 'recorded_process_tag_absent_or_invalid'),
+                                         (TAG, 'recorded_process_tag_matches'),
+                                         (TAG.replace(SCOPE, 'c' * 64), 'recorded_process_tag_mismatch')]:
+            with mock.patch.object(inventory, 'ps', return_value=(0, command)), mock.patch.object(inventory, 'process_birth', return_value=start):
+                result = inventory.recorded_observations(db, SCOPE, host, time.monotonic() + 10)
+            item = result['observations'][0]
+            self.assertEqual(item['classification'], classification)
+            self.assertNotIn('wrapper_identity', item)
+            self.assertNotIn('PRIVATE_ARGV', json.dumps(result))
+        for births, classification in [([None], 'recorded_process_unavailable'),
+                                       (['linux-start-ticks:124'], 'recorded_pid_reused_or_marker_mismatch'),
+                                       ([start, None], 'recorded_process_changed_during_read')]:
+            with mock.patch.object(inventory, 'ps', return_value=(0, TAG)), mock.patch.object(inventory, 'process_birth', side_effect=births):
+                result = inventory.recorded_observations(db, SCOPE, host, time.monotonic() + 10)
+            self.assertEqual(result['observations'][0]['classification'], classification)
+        with mock.patch.object(inventory, 'ps') as ps:
+            self.assertEqual(inventory.recorded_observations(db, SCOPE, None, time.monotonic()+10)['status'], 'host_reader_required')
+            foreign = inventory.recorded_observations(db, SCOPE, dict(host, boot_id='c'*64), time.monotonic()+10)
+            self.assertEqual(foreign['other_host_boot_records'], 1)
+            ps.assert_not_called()
+        db.close()
+
+    def test_recorded_candidate_bounds_and_corrupt_metadata_refuse(self):
+        import json
+        import time
+        host = dict(platform='linux', host_id='a' * 64, boot_id='b' * 64)
+        raw = json.dumps(dict(host, pid=42, start_marker='linux-start-ticks:123'))
+        db = sqlite3.connect(':memory:')
+        db.execute('create table executions(process_json,packet_sha256,wrapper_identity)')
+        for bad in ['PRIVATE_'*10000, '{}', '[]', 'null', json.dumps(dict(host, pid=True, start_marker='bad'))]:
+            db.execute('insert into executions values(?,?,?)', (bad, PACKET, WRAPPER))
+        with mock.patch.object(inventory, 'ps') as ps:
+            result = inventory.recorded_observations(db, SCOPE, host, time.monotonic()+10)
+            self.assertEqual(result['invalid_records'], 5)
+            self.assertEqual(result['observations'], [])
+            ps.assert_not_called()
+        db.executemany('insert into executions values(?,?,?)', [(raw, PACKET, WRAPPER)]*129)
+        with self.assertRaisesRegex(ValueError, 'too_many_recorded_candidates'):
+            inventory.recorded_observations(db, SCOPE, host, time.monotonic()+10)
+        db.executemany('insert into executions values(?,?,?)', [('', PACKET, WRAPPER)]*4097)
+        with self.assertRaisesRegex(ValueError, 'too_many_recorded_processes'):
+            inventory.recorded_observations(db, SCOPE, host, time.monotonic()+10)
+        db.close()
+
 
 class BirthObservation(unittest.TestCase):
     def test_linux_parser_handles_parentheses_and_refuses_bad_fields(self):

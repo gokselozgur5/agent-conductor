@@ -261,3 +261,37 @@ or malformed tags and non-wrapper descendants still require separate inventory
 and containment evidence. Arguments can be forged; an observed tagged process is
 not automatically a trusted runner. A matching marker does not pin an OS handle,
 and reparented-wrapper observation is not escaped-worker write-fencing acceptance.
+
+## Recorded PID observations after tag loss
+
+With an explicit trusted `--host-reader`, the diagnostic also reports a separate
+`recorded_process_inventory`. It reads at most 4,096 non-null durable process
+records and observes at most 128 validated records from the current host boot.
+Exceeding either limit refuses the report; historical records are not silently
+truncated. Legacy schemas and missing host readers have explicit unavailable
+statuses. Invalid records and records from other host boots are counted separately.
+
+A stored PID is observed only after its bounded process metadata, packet hash and
+ACK wrapper UUID validate. The current kernel start marker must match the stored
+marker before reading arguments, and must remain unchanged after the read.
+Missing processes, reused PIDs or marker mismatches, changing processes and
+unreadable arguments have distinct classifications. A matching process whose tag
+is absent or malformed is reported as `recorded_process_tag_absent_or_invalid`.
+A contradictory canonical tag is reported as `recorded_process_tag_mismatch`.
+Stored packet and wrapper values are explicitly named `recorded_*`; they never
+become observed tags or entries in the ordinary tagged observation list.
+
+The same ten-second overall deadline and bounded process reads apply. All records
+come from the same read-only SQLite transaction as ordinary tag correlation.
+These remain finite, racy observations rather than pinned handles, current worker
+ownership, release evidence or permission to signal, fence or recover anything.
+ACK-less records without a persisted PID and escaped descendants remain outside
+this additional discovery path.
+
+Native acceptance deliberately execs an owned tagged process into the actual
+renamed runner while discarding its argv tag. The PID, kernel start and stored
+host boot remain equal. The old diagnostic omits it; the new separate inventory
+reports the absent tag without inventing an observed UUID. The synthetic database
+is unchanged, no packet or worker is released, and closing the owned input pipe
+settles the child. This adversarial control does not claim normal production
+runner behavior, escaped-worker containment or write fencing.
