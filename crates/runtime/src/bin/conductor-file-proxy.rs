@@ -2,7 +2,7 @@
 #[cfg(unix)]
 #[tokio::main]
 async fn main() {
-    use conductor_runtime::{BROKER_HANDOFF_ENV, connect_broker_endpoint, serve_broker_mcp};
+    use conductor_runtime::{BROKER_HANDOFF_ENV, connect_broker_endpoint, serve_owned_broker_mcp};
     use std::time::Duration;
     let result = async {
         if std::env::args_os().len() != 1 {
@@ -13,7 +13,7 @@ async fn main() {
             .await
             .map_err(|_| ())?;
         drop(value);
-        serve_broker_mcp(
+        serve_owned_broker_mcp(
             tokio::io::stdin(),
             tokio::io::stdout(),
             stream,
