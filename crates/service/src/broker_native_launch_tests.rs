@@ -404,7 +404,16 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
             .unwrap()
     );
     assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
-    prepare_broker_restart_packet(&root, &binding).await;
+    assert_preowner_restart(&root, &store, &binding).await;
+}
+
+async fn assert_preowner_restart(
+    root: &tempfile::TempDir,
+    store: &Store,
+    binding: &FileBrokerBinding,
+) {
+    prepare_broker_restart_packet(root, binding).await;
+    seed_invalid_preowner_page(root, binding).await;
     let reopened = Store::open(root.path().join("state.sqlite3"))
         .await
         .unwrap();
@@ -418,6 +427,22 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
     .await
     .unwrap();
     assert_eq!(service.recover_interrupted_workflows().await.unwrap(), 0);
+    assert!(service.broker_preowner_cursor.lock().await.is_some());
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        service
+            .clone()
+            .recover_interrupted_workflows()
+            .await
+            .unwrap(),
+        0
+    );
+
     assert!(service.broker_preowner_cursor.lock().await.is_none());
     assert!(std::sync::Arc::ptr_eq(
         &service.broker_preowner_cursor,
@@ -425,8 +450,8 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
     ));
     assert!(
         !crate::recover_unregistered_broker_from_receipt(
-            &store,
-            &binding,
+            store,
+            binding,
             generation,
             broker_owner_audit("preowner-replay")
         )
@@ -438,5 +463,42 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
             .execution_has_unresolved_file_broker(&binding.execution_token)
             .await
             .unwrap()
+    );
+    let first = store
+        .pending_unregistered_broker_launch_page(None)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 128);
+    assert!(first.iter().all(|candidate| candidate.binding.is_err()));
+    let remaining = store
+        .pending_unregistered_broker_launch_page(Some(&first.last().unwrap().invocation_id))
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].binding.is_err());
+}
+
+async fn seed_invalid_preowner_page(root: &tempfile::TempDir, binding: &FileBrokerBinding) {
+    seed_invalid_broker_page(root, binding).await;
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("state.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    let mut tx = db.begin().await.unwrap();
+    sqlx::query("UPDATE executions SET process_json=(SELECT process_json FROM executions WHERE effect_token=?) WHERE effect_token LIKE 'invalid-broker-%'")
+        .bind(&binding.execution_token).execute(&mut *tx).await.unwrap();
+    tx.execute("INSERT INTO file_broker_launches(invocation_id,execution_token,binding_json,launch_json,state,created_at_ms) SELECT invocation_id,execution_token,binding_json,'{}','open',0 FROM file_brokers WHERE execution_token LIKE 'invalid-broker-%'").await.unwrap();
+    tx.execute("DELETE FROM file_broker_owners WHERE invocation_id IN (SELECT invocation_id FROM file_brokers WHERE execution_token LIKE 'invalid-broker-%')").await.unwrap();
+    tx.execute("DELETE FROM file_brokers WHERE execution_token LIKE 'invalid-broker-%'")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        db.fetch_optional("PRAGMA foreign_key_check")
+            .await
+            .unwrap()
+            .is_none()
     );
 }
