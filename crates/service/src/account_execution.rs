@@ -53,6 +53,7 @@ impl<C: Clock> PersistentControlService<C> {
         if record.state != agent_conductor_store::ExecutionState::Started
             || record.wrapper_identity.as_deref() != Some(wrapper_identity)
             || record.preparation.packet_sha256 != connection.packet_sha256()
+            || record.account_result.is_some()
             || record.process.is_some()
             || packet.contract.full_capability.is_none()
             || identity.wrapper_identity != wrapper_identity

@@ -95,6 +95,9 @@ mod capture_eligibility;
 mod source_finalization;
 #[cfg(unix)]
 pub use check_execution::CheckWorkspace;
+mod account_result;
+mod account_source;
+pub use account_result::AccountExecutionOutcome;
 mod account_execution;
 #[cfg(unix)]
 mod execution;
