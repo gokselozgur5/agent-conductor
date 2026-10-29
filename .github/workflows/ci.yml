@@ -49,6 +49,12 @@ jobs:
           CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
         run: cargo test --workspace --all-features
 
+      - name: Exercise a receiving worker under a distinct OS UID
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m unittest discover -s tests -p test_cross_uid_launcher.py -v
+          python3 tools/run_cross_uid_test.py
+
       - name: Check operator recovery and publication refusals
         env:
           CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
