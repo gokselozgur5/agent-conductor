@@ -1,4 +1,4 @@
-//! Recover only independently acknowledged, never-registered broker preparations.
+//! Recover only independently acknowledged, never-released broker preparations.
 use agent_conductor_store::{EffectAudit, FileBrokerBinding, Store, UnreleasedBrokerLaunchProof};
 use conductor_runtime::{
     BrokerError, BrokerReceiptDirectory, BrokerScope, BrokerShutdownObservation,
@@ -21,6 +21,25 @@ pub async fn recover_unregistered_broker_from_receipt(
     let host = HostEpoch::current()
         .await
         .map_err(|_| BrokerError::Refused)?;
+    let proof = verified_proof(store, binding, &host).await?;
+    store
+        .recover_unregistered_broker_launch(binding, &proof, generation, event)
+        .await
+        .map_err(|_| BrokerError::Admission)
+}
+
+/// Recover an ACK-bound preparation, including a registration without release ownership.
+/// # Errors
+/// Refuses unverified receipts, conflicting bindings, owners or any file operation.
+pub async fn recover_unowned_broker_from_receipt(
+    store: &Store,
+    binding: &FileBrokerBinding,
+    generation: i64,
+    event: EffectAudit<'_>,
+) -> Result<bool, BrokerError> {
+    let host = HostEpoch::current()
+        .await
+        .map_err(|_| BrokerError::Refused)?;
     recover_on_host(store, binding, generation, event, &host).await
 }
 
@@ -31,6 +50,18 @@ pub(super) async fn recover_on_host(
     event: EffectAudit<'_>,
     host: &HostEpoch,
 ) -> Result<bool, BrokerError> {
+    let proof = verified_proof(store, binding, host).await?;
+    store
+        .recover_unowned_broker_launch(binding, &proof, generation, event)
+        .await
+        .map_err(|_| BrokerError::Admission)
+}
+
+async fn verified_proof(
+    store: &Store,
+    binding: &FileBrokerBinding,
+    host: &HostEpoch,
+) -> Result<UnreleasedBrokerLaunchProof, BrokerError> {
     let launch = store
         .file_broker_launch(binding)
         .await
@@ -88,19 +119,11 @@ pub(super) async fn recover_on_host(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&receipt).map_err(|_| BrokerError::Invalid)?)
     );
-    store
-        .recover_unregistered_broker_launch(
-            binding,
-            &UnreleasedBrokerLaunchProof {
-                launch,
-                process,
-                shutdown_sha256,
-            },
-            generation,
-            event,
-        )
-        .await
-        .map_err(|_| BrokerError::Admission)
+    Ok(UnreleasedBrokerLaunchProof {
+        launch,
+        process,
+        shutdown_sha256,
+    })
 }
 
 impl<C: crate::Clock> crate::PersistentControlService<C> {
@@ -110,7 +133,7 @@ impl<C: crate::Clock> crate::PersistentControlService<C> {
         let mut cursor = self.broker_preowner_cursor.lock().await;
         let page = self
             .store
-            .pending_unregistered_broker_launch_page(cursor.as_deref())
+            .pending_unowned_broker_launch_page(cursor.as_deref())
             .await?;
         *cursor = if page.len() == 128 {
             page.last().map(|row| row.invocation_id.clone())
