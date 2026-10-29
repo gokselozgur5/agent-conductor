@@ -17,6 +17,8 @@ use tokio::sync::Mutex;
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 mod auxiliary;
+mod legacy_auxiliary_host;
+pub use legacy_auxiliary_host::AuxiliaryHostObservation;
 mod auxiliary_launch;
 mod auxiliary_publication;
 pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
@@ -821,7 +823,7 @@ impl Store {
                 .fetch_one(&self.inner.readers)
                 .await?;
         if legacy_count != 0 {
-            let tasks: Vec<(String,String)> = sqlx::query_as("SELECT substr(task_id,1,256),reason FROM legacy_auxiliary_ownership ORDER BY task_id LIMIT 128")
+            let tasks: Vec<(String,String,String)> = sqlx::query_as("SELECT substr(l.task_id,1,256),l.reason,CASE WHEN w.task_id IS NULL THEN 'native_witness_required' WHEN w.status='observed' THEN 'later_native_boot_required' ELSE 'witness_contradiction' END FROM legacy_auxiliary_ownership l LEFT JOIN legacy_auxiliary_host_witness w ON w.task_id=l.task_id ORDER BY l.task_id LIMIT 128")
                 .fetch_all(&self.inner.readers).await?;
             violations.push(RuntimeInvariantViolation {
                 code: "legacy_auxiliary_ownership_unknown".into(),

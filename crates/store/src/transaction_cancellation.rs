@@ -502,3 +502,77 @@ async fn persist_lost_commit_response_replays_once() {
 async fn publish_lost_commit_response_replays_once() {
     check_lost_commit_response(Owner::Publish).await;
 }
+
+#[tokio::test]
+async fn cancel_legacy_host_witness_and_settlement_rolls_back_all_tables() {
+    for settling in [false, true] {
+        let (_root, store, _) = fixture(Owner::Project).await;
+        {
+            let mut c = store.inner.writer.lock().await;
+            c.execute("INSERT INTO tasks(id,project_id,objective,state,priority,version,authority_json,created_at_ms,updated_at_ms,aggregate_json) VALUES('legacy','seed','fixture','paused',0,1,'{}',0,0,'{}'); INSERT INTO legacy_auxiliary_ownership VALUES('legacy','verification_without_invocation',1)").await.unwrap();
+        }
+        store
+            .start_reserved_runtime(0, &"a".repeat(64), 2)
+            .await
+            .unwrap();
+        let mut host = AuxiliaryHostObservation {
+            authority_id: "a".repeat(64),
+            generation: 2,
+            platform: "macos".into(),
+            host_id: "b".repeat(64),
+            boot_id: "c".repeat(64),
+        };
+        if settling {
+            store
+                .reconcile_legacy_auxiliary_host(&host, 0)
+                .await
+                .unwrap();
+            store
+                .start_reserved_runtime(0, &host.authority_id, 3)
+                .await
+                .unwrap();
+            host.generation = 3;
+            host.boot_id = "d".repeat(64);
+        }
+        let before = snapshot(&mut *store.inner.writer.lock().await).await;
+        let written = Arc::new(AtomicBool::new(false));
+        let observed = written.clone();
+        let (release, wait) = mpsc::channel();
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_update_hook(move |update| {
+                if update.table == "audit_events" {
+                    observed.store(true, Ordering::SeqCst);
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+            });
+        let owned = store.clone();
+        let request =
+            tokio::spawn(async move { owned.reconcile_legacy_auxiliary_host(&host, 0).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !written.load(Ordering::SeqCst) {
+                assert!(!request.is_finished());
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        let mut c = store.inner.writer.lock().await;
+        c.lock_handle().await.unwrap().remove_update_hook();
+        assert_eq!(snapshot(&mut c).await, before);
+        drop(c);
+        assert_eq!(
+            snapshot(&mut store.readers().acquire().await.unwrap()).await,
+            before
+        );
+    }
+}

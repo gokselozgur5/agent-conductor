@@ -3526,6 +3526,50 @@ mod effect_tests {
         }
     }
 
+    #[tokio::test]
+    async fn legacy_host_recovery_reads_native_identity_and_keeps_same_boot_blocked() {
+        use sqlx::{Connection, Executor};
+        let (directory, store) = lifecycle_store().await;
+        let mut c = sqlx::SqliteConnection::connect(&format!(
+            "sqlite://{}",
+            directory.path().join("state.sqlite3").display()
+        ))
+        .await
+        .unwrap();
+        c.execute("INSERT INTO legacy_auxiliary_ownership VALUES('task','verification_without_invocation',0)").await.unwrap();
+        let before = store.task("task").await.unwrap().unwrap().aggregate_json;
+        for generation in [1, 2] {
+            let service = PersistentControlService::start_with_reservation(
+                store.clone(),
+                100,
+                FixedClock::new(0),
+                Some((&"a".repeat(64), generation)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(service.recover_interrupted_workflows().await.unwrap(), 0);
+            assert!(store.has_pending_auxiliary("task").await.unwrap());
+            let row:(String,String,String,i64)=sqlx::query_as("SELECT platform,host_id,boot_id,observed_generation FROM legacy_auxiliary_host_witness").fetch_one(&mut c).await.unwrap();
+            let native = conductor_runtime::HostEpoch::current().await.unwrap();
+            assert_eq!(
+                (row.0, row.1, row.2),
+                (native.platform, native.host_id, native.boot_id)
+            );
+            assert_eq!(row.3, 1);
+            assert_eq!(
+                store.task("task").await.unwrap().unwrap().aggregate_json,
+                before
+            );
+        }
+        let violations = store.check_runtime_invariants().await.unwrap();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.code == "legacy_auxiliary_ownership_unknown"
+                    && v.context_json.contains("later_native_boot_required"))
+        );
+    }
+
     async fn assert_auxiliary_preack_recovery(
         service: &PersistentControlService<FixedClock>,
         store: &Store,

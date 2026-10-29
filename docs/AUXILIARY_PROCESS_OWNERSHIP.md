@@ -62,11 +62,11 @@ the writer is fenced. Reopening the database neither duplicates nor clears them.
 Before upgrading, finish ordinary legacy verification under the old runtime
 where possible. If ownership is already uncertain, preserve the state and
 artifacts: do not delete the marker, fabricate an invocation or treat cancellation
-as settlement. No acknowledgement or clear-marker command is provided. A verified
-legacy settlement/host-recovery procedure is still required before deployment
-can be claimed complete. This barrier prevents unsafe reuse; it does not resolve
-unknown historical processes or certify arbitrary escaped descendants. Complete boundary coverage, operator/invariant reporting and host recovery
-remain required. Actual native crash controls now cover both a running required
+as settlement. No acknowledgement or clear-marker command is provided. The schema 24 native-boot procedure below can resolve eligible legacy ownership;
+its physical reboot acceptance remains outstanding before deployment can be
+claimed complete. The marker alone does not resolve unknown historical processes
+or certify arbitrary escaped descendants. Complete boundary coverage and host
+recovery acceptance remain required. Actual native crash controls now cover both a running required
 check and an independently observed verifier child: after daemon death, private
 settlement is audited before the replacement writer is prepared, and each task
 completes with one automatic continuation. These two boundaries do not cover
@@ -160,3 +160,35 @@ Real-pipe regression peers consume Release and the initial renewal, close stdin,
 and gate terminal output until the parent has attempted renewal or cancellation.
 These are deterministic transport controls, not a claim that every real-worker
 shutdown schedule has been observed.
+
+### Legacy ownership after a native host boot transition
+
+Schema 24 records a first native host/boot witness for each unresolved legacy
+marker under the daemon's existing authority and reserved generation. The
+migration invents no native evidence. First observation and same-boot daemon
+restarts preserve the barrier. Reconciliation runs before automatic continuation
+selection when recovery is enabled; it reads native identity internally and
+accepts no externally supplied host/boot request.
+
+A later boot on the same host and authority, with a strictly newer runtime
+generation, can settle the exact witnessed legacy ownership. The original marker
+and bounded invocation preparation must still match. Unbound invocations must
+still lack launch binding, process identity, release acknowledgment and receipt.
+Contradictions latch and remain blocked; this path never manufactures a PID or
+an auxiliary group receipt. The native-boot proof, audit, invocation settlement
+and marker removal share one transaction. Witness history remains afterward;
+replay writes no duplicate result. Missing native identity does not clear anything.
+
+Each pass handles at most 128 tasks, recording its checked generation so earlier
+same-boot or contradictory rows do not starve later rows. Invariant diagnostics
+separate `native_witness_required`, `later_native_boot_required` and
+`witness_contradiction`. This operation neither changes task aggregates nor
+fences writer executions. Existing source, writer, paused/cancelled-task and
+continuation limits still apply. A host settlement cannot publish a native check
+or verdict: it lacks the released/process-bound group receipt required there.
+
+Tests cover actual old-schema upgrades, same-boot native observation, synthetic
+later-boot settlement, foreign/mutated evidence, rollback, Tokio cancellation,
+replay and multiple batches. Synthetic boot transitions are not physical reboot
+acceptance. No command here reboots the host; the physical recovery experiment remains
+outstanding and requires separate explicit approval.

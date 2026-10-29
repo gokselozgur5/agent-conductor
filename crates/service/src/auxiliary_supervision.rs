@@ -240,8 +240,37 @@ impl<C: Clock> PersistentControlService<C> {
             .await
     }
 
+    async fn recover_legacy_auxiliary_host(&self) -> Result<usize, StoreError> {
+        let generation = i64::try_from(self.boot_generation).map_err(|_| invalid())?;
+        if !self.store.needs_legacy_host_observation(generation).await? {
+            return Ok(0);
+        }
+        let (Some(authority_id), current) = self.store.runtime_authority().await? else {
+            return Ok(0);
+        };
+        if current != self.boot_generation {
+            return Err(invalid());
+        }
+        let Ok(host) = HostEpoch::current().await else {
+            return Ok(0);
+        };
+        let _guard = self.mutations.lock().await;
+        self.store
+            .reconcile_legacy_auxiliary_host(
+                &agent_conductor_store::AuxiliaryHostObservation {
+                    authority_id,
+                    generation,
+                    platform: host.platform,
+                    host_id: host.host_id,
+                    boot_id: host.boot_id,
+                },
+                self.clock.read(self.boot_generation).wall_unix_ms,
+            )
+            .await
+    }
+
     pub(super) async fn recover_auxiliary_receipts(&self) -> Result<usize, StoreError> {
-        let mut count = 0;
+        let mut count = self.recover_legacy_auxiliary_host().await?;
         for AuxiliaryInvocation {
             preparation,
             binding,
