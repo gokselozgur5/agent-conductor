@@ -850,3 +850,38 @@ with `--ignored --test-threads=1`. Preserve stdout, stderr, tool outputs and rec
 Control-socket access, credentials, network policy, other built-in effects,
 vendor process supervision, daemon dispatch and full operational acceptance are
 still open. None of these controls enables generic Codex native writer admission.
+
+## Joint vendor supervision candidate
+
+`NativeBrokerSession::run_vendor` consumes the immutable prepared command, binds
+its exact frozen packet and owns both the controlled vendor process and broker.
+The caller supplies a watch channel of authoritative continuous-clock deadlines.
+A missing deadline, channel loss, expiration or invalid renewal stops the vendor;
+heartbeats never invent lease extensions. `BrokerVendorOutcome` keeps process
+results separate from verified durable broker closure. Neither result accepts a
+task, establishes OS confinement or fences an arbitrary escaped descendant.
+
+A proxy can close before the vendor finishes emitting its final response. On
+renewal failure with live authority, the supervisor verifies broker settlement
+concurrently with continued process supervision. A broker settlement failure
+cancels the vendor. Successful closure permits final output while independent
+lease cancellation remains enforced. Controlled regressions cover normal and
+nonzero exits, initial/live authority loss, expiry, proxy EOF, post-closure
+revocation and audit refusal. Failed closure retains unresolved SQLite ownership.
+
+The opt-in owned Codex test launches a test-only shim that adds deterministic
+local-provider options and then replaces itself with pinned Codex0.163.0 using
+`exec`. Production broker options remain unchanged; the shim's synthetic pin is
+not native admission evidence. The service owns launch, bounded output, shutdown
+and journal settlement. Read/write results, capability non-disclosure, process
+exit and closed SQLite state after reopen are checked independently.
+
+An observed failing run left Git/HTTPS descendants after Codex exited. The fixed
+broker command now disables both plugins and the remote plugin catalog. The
+actual owned test then passed with no Git processes in sampled group observations
+and with the unchanged process-group absence check succeeding. See the
+[official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+for feature controls. Process sampling is diagnostic evidence, not comprehensive
+network or descendant-confinement proof. Existing fence timeouts/refusals remain
+unchanged; prior failure artifacts are retained. Daemon dispatch, cancellation of
+the complete public future and full operational acceptance remain open.
