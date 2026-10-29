@@ -141,3 +141,124 @@ fn audit<'a>(id: &'a str, binding: &'a FileBrokerBinding) -> EffectAudit<'a> {
         now_ms: crate::clock::wall_ms(),
     }
 }
+
+impl RegisteredBrokerJournal {
+    /// Serve journal requests from the trusted wrapper over a separately
+    /// authenticated private stream. This is not the MCP/worker socket. The
+    /// wrapper alone owns file handles; this owner persists hashes and replies
+    /// only after commit. Cancellation/EOF leaves broker ownership open.
+    /// # Errors
+    /// Rejects malformed, reordered, replayed or stale requests, lost peers and
+    /// bounded I/O/store waits. No failure authorizes a retry or execution fence.
+    pub async fn serve_remote(
+        self,
+        stream: UnixStream,
+        mut cancel: watch::Receiver<bool>,
+        wait: Duration,
+    ) -> Result<(), BrokerError> {
+        use conductor_runtime::{BrokerJournalRequest, MAX_JOURNAL_FRAME};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+        if wait.is_zero() || wait > Duration::from_secs(30) {
+            return Err(BrokerError::Invalid);
+        }
+        let mut stream = BufReader::new(stream);
+        let mut completed = 0;
+        let mut pending = None;
+        loop {
+            let mut bytes = Vec::new();
+            let read = async {
+                (&mut stream)
+                    .take(MAX_JOURNAL_FRAME as u64 + 1)
+                    .read_until(b'\n', &mut bytes)
+                    .await
+                    .map_err(|_| BrokerError::Uncertain)?;
+                Ok::<_, BrokerError>(())
+            };
+            tokio::select! {
+                biased;
+                () = journal_cancelled(&mut cancel) => return Err(BrokerError::Revoked),
+                result = tokio::time::timeout(wait, read) => result.map_err(|_|BrokerError::Uncertain)??,
+            }
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            if bytes.last() != Some(&b'\n') {
+                return Err(BrokerError::Invalid);
+            }
+            let request = BrokerJournalRequest::decode(&bytes)?;
+            if request.scope != self.scope
+                || request.sequence != completed + 1
+                || match (&pending, &request.result_sha256) {
+                    (None, None) => false,
+                    (Some(hash), Some(_)) => hash != &request.request_sha256,
+                    _ => true,
+                }
+            {
+                return Err(BrokerError::Refused);
+            }
+            tokio::select! {
+                biased;
+                () = journal_cancelled(&mut cancel) => return Err(BrokerError::Revoked),
+                result = tokio::time::timeout(wait, self.persist_remote(&request, stream.get_mut())) =>
+                    result.map_err(|_|BrokerError::Uncertain)??,
+            }
+            if request.result_sha256.is_some() {
+                completed = request.sequence;
+                pending = None;
+            } else {
+                pending = Some(request.request_sha256);
+            }
+        }
+    }
+
+    async fn persist_remote(
+        &self,
+        request: &conductor_runtime::BrokerJournalRequest,
+        stream: &mut UnixStream,
+    ) -> Result<(), BrokerError> {
+        use tokio::io::AsyncWriteExt;
+        let id = Uuid::now_v7().to_string();
+        let sequence = i64::try_from(request.sequence).map_err(|_| BrokerError::Invalid)?;
+        let fresh = if let Some(result) = &request.result_sha256 {
+            self.store
+                .finish_file_operation(
+                    &self.binding,
+                    sequence,
+                    &request.request_sha256,
+                    result,
+                    audit(&id, &self.binding),
+                )
+                .await
+        } else {
+            self.store
+                .admit_file_operation(
+                    &self.binding,
+                    sequence,
+                    &request.request_sha256,
+                    audit(&id, &self.binding),
+                )
+                .await
+        }
+        .map_err(|_| BrokerError::Uncertain)?;
+        if !fresh {
+            return Err(BrokerError::Refused);
+        }
+        let ack = conductor_runtime::BrokerJournalAck {
+            version: 1,
+            journal_sha256: request.sha256()?,
+        };
+        let mut bytes = serde_json::to_vec(&ack).map_err(|_| BrokerError::Uncertain)?;
+        bytes.push(b'\n');
+        stream
+            .write_all(&bytes)
+            .await
+            .map_err(|_| BrokerError::Uncertain)
+    }
+}
+async fn journal_cancelled(cancel: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow() || cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}

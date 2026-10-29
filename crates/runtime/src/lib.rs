@@ -124,3 +124,8 @@ pub use broker_mcp::*;
 mod broker_endpoint;
 #[cfg(unix)]
 pub use broker_endpoint::*;
+
+#[cfg(unix)]
+mod broker_journal_wire;
+#[cfg(unix)]
+pub use broker_journal_wire::*;

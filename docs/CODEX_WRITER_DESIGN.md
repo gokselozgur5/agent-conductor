@@ -471,3 +471,36 @@ fixture's initial authority; these tests do not prove a native launch or reboot.
 The production native launcher still does not use this bridge. Wiring wrapper
 requests to the daemon owner, independent shutdown evidence, long-lived idle
 handling and OS confinement remain required before enabling Codex writing.
+
+## Separate wrapper journal channel
+
+`RemoteBrokerJournal` supplies the synchronous filesystem worker's journal port
+over an already-authenticated private Unix stream. `RegisteredBrokerJournal`
+can consume its fresh store registration to serve that channel in the daemon.
+This avoids giving the wrapper SQLite write access or multiplexing database waits
+onto its renewal/cancel input. The native runner has not yet been wired to these
+ports; the existing release/watchdog protocol and native admission are unchanged.
+
+Version-1 frames are bounded to 4096 bytes and contain only exact invocation
+scope, operation sequence, request digest and optional completion digest. The
+response hashes the entire canonical request, including phase and result. Both
+ends enforce admission/completion ordering and never accept a duplicate as a
+fresh acknowledgement. A failed response, timeout or invalid phase consumes the
+client connection; there is no reconnect or automatic retry. Synchronous socket
+reads and writes use the remaining total exchange deadline, so partial replies
+cannot keep extending the wait. The daemon bounds each frame and persistence/
+reply operation and cancels independently of runner control.
+
+Three real child-process fixtures own the actual file broker and use the parent
+service's SQLite journal: success writes and records exactly once; failed intent
+audit creates no file; failed result audit retains the file and pending intent.
+Their initial execution acknowledgement and socket handoff are controlled fixture
+setup, not native Codex/OS containment acceptance. Additional controls cover
+malformed/oversized/unknown-scope/phase requests, replay, cancellation after
+admission, incorrect/oversized/missing acknowledgements and slow partial replies.
+
+The host must still authenticate and confine this trusted wrapper channel; never
+expose it to the MCP proxy or vendor. The root binding, native launcher handoff,
+independent durable shutdown receipt and long-lived idle lifecycle remain open.
+EOF or a successful result acknowledgement does not close durable ownership or
+prove that filesystem write capability was revoked.

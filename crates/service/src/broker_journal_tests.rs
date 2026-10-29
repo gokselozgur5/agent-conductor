@@ -3,6 +3,7 @@ use agent_conductor_store::{FileBrokerBinding, FileBrokerStatus};
 use conductor_runtime::{
     BrokerFilesystem, BrokerOperation, BrokerRequest, BrokerScope, continuous_millis,
 };
+use conductor_runtime::{BrokerJournal, RemoteBrokerJournal};
 use sqlx::Connection;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -263,4 +264,178 @@ async fn journal_old_generation_refuses_new_operation() {
 #[tokio::test]
 async fn journal_clean_eof_keeps_durable_ownership_open() {
     round_trip(None, false).await;
+}
+
+#[test]
+fn journal_rpc_child_process() {
+    let Some(config) = std::env::var_os("CONDUCTOR_JOURNAL_TEST_CHILD") else {
+        return;
+    };
+    let (binding, files, socket, failure): (FileBrokerBinding, PathBuf, PathBuf, Option<String>) =
+        serde_json::from_slice(&fs::read(config).unwrap()).unwrap();
+    let req = request(&binding);
+    let broker = BrokerFilesystem::new(
+        &files,
+        req.scope.clone(),
+        continuous_millis().unwrap() + 60000,
+    )
+    .unwrap();
+    let stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    let journal =
+        RemoteBrokerJournal::new(stream, req.scope.clone(), Duration::from_secs(5)).unwrap();
+    let outcome =
+        broker.execute_recorded(&req, |i| journal.admit(i), |i, r| journal.complete(i, r));
+    assert_eq!(outcome.is_ok(), failure.is_none());
+    assert_eq!(broker.revoke().is_ok(), failure.is_none());
+    assert!(
+        broker
+            .execute_recorded(&req, |i| journal.admit(i), |i, r| journal.complete(i, r))
+            .is_err()
+    );
+}
+
+async fn remote_child(failure: Option<&str>) {
+    let (root, store, binding, mut db) = fixture().await;
+    let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
+        .await
+        .unwrap();
+    if let Some(kind) = failure {
+        sqlx::query(&format!("CREATE TRIGGER refuse_rpc BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.{kind}' BEGIN SELECT RAISE(FAIL,'fixture'); END")).execute(&mut db).await.unwrap();
+    }
+    let files = root.path().join("files");
+    fs::create_dir(&files).unwrap();
+    let files = files.canonicalize().unwrap();
+    let socket = root.path().join("journal.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let config = root.path().join("child.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&(&binding, &files, &socket, failure)).unwrap(),
+    )
+    .unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "effect_tests::broker_journal_tests::journal_rpc_child_process",
+            "--nocapture",
+        ])
+        .env("CONDUCTOR_JOURNAL_TEST_CHILD", &config)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let (_cancel, rx) = tokio::sync::watch::channel(false);
+    let result = journal
+        .serve_remote(stream, rx, Duration::from_secs(5))
+        .await;
+    assert_eq!(result.is_ok(), failure.is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    let reopened = Store::open(root.path().join("state.sqlite3"))
+        .await
+        .unwrap();
+    let admitted = i64::from(failure != Some("admitted"));
+    assert_progress(&reopened, &binding, admitted, i64::from(failure.is_none())).await;
+    assert_eq!(files.join("answer").exists(), admitted == 1);
+    if admitted == 1 {
+        assert_eq!(
+            fs::read_to_string(files.join("answer")).unwrap(),
+            "durable answer\n"
+        );
+    }
+    assert!(
+        RegisteredBrokerJournal::register(reopened, binding)
+            .await
+            .is_err()
+    );
+}
+#[tokio::test]
+async fn journal_rpc_child_writes_only_after_durable_parent_admission() {
+    remote_child(None).await;
+}
+#[tokio::test]
+async fn journal_rpc_child_admission_failure_prevents_file_write() {
+    remote_child(Some("admitted")).await;
+}
+#[tokio::test]
+async fn journal_rpc_child_completion_failure_retains_unknown_file_write() {
+    remote_child(Some("completed")).await;
+}
+
+fn wire_request(binding: &FileBrokerBinding) -> conductor_runtime::BrokerJournalRequest {
+    conductor_runtime::BrokerJournalRequest {
+        version: 1,
+        scope: request(binding).scope,
+        sequence: 1,
+        request_sha256: "d".repeat(64),
+        result_sha256: None,
+    }
+}
+#[tokio::test]
+async fn journal_rpc_refuses_scope_phase_unknown_fields_and_oversize() {
+    for case in ["scope", "phase", "unknown", "oversize"] {
+        let (_root, store, binding, _db) = fixture().await;
+        let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
+            .await
+            .unwrap();
+        let mut request = serde_json::to_value(wire_request(&binding)).unwrap();
+        match case {
+            "scope" => request["scope"]["lease_epoch"] = serde_json::json!(2),
+            "phase" => request["result_sha256"] = serde_json::json!("e".repeat(64)),
+            "unknown" => request["extra"] = serde_json::json!(true),
+            _ => request["request_sha256"] = serde_json::json!("x".repeat(4096)),
+        }
+        let (host, mut peer) = tokio::net::UnixStream::pair().unwrap();
+        let (_cancel, rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(journal.serve_remote(host, rx, Duration::from_secs(2)));
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        peer.write_all(&bytes).await.unwrap();
+        assert!(server.await.unwrap().is_err(), "{case}");
+        assert_progress(&store, &binding, 0, 0).await;
+    }
+}
+#[tokio::test]
+async fn journal_rpc_replay_and_cancel_after_admission_preserve_pending_intent() {
+    for duplicate in [false, true] {
+        let (root, store, binding, _db) = fixture().await;
+        let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
+            .await
+            .unwrap();
+        let request = wire_request(&binding);
+        let (host, peer) = tokio::net::UnixStream::pair().unwrap();
+        let (cancel, rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(journal.serve_remote(host, rx, Duration::from_secs(2)));
+        let mut peer = BufReader::new(peer);
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        peer.write_all(&bytes).await.unwrap();
+        let mut ack = String::new();
+        peer.read_line(&mut ack).await.unwrap();
+        let ack: conductor_runtime::BrokerJournalAck = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack.journal_sha256, request.sha256().unwrap());
+        if duplicate {
+            peer.write_all(&bytes).await.unwrap();
+        } else {
+            cancel.send(true).unwrap();
+        }
+        assert!(server.await.unwrap().is_err());
+        let reopened = Store::open(root.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        assert_progress(&reopened, &binding, 1, 0).await;
+        assert!(
+            RegisteredBrokerJournal::register(reopened, binding)
+                .await
+                .is_err()
+        );
+    }
 }
