@@ -44,7 +44,9 @@ mod workflow_assignments;
 mod workflows;
 pub use workflows::WorkflowDispatch;
 
+mod account_execution_peer;
 mod executions;
+pub use account_execution_peer::AccountExecutionPeer;
 pub use executions::{
     ExecutionPreparation, ExecutionProcess, ExecutionRecord, ExecutionState, ExecutionUpdate,
 };

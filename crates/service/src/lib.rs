@@ -95,8 +95,10 @@ mod capture_eligibility;
 mod source_finalization;
 #[cfg(unix)]
 pub use check_execution::CheckWorkspace;
+mod account_execution;
 #[cfg(unix)]
 mod execution;
+pub use account_execution::AccountExecutionIntent;
 pub use clock::SystemClock;
 
 pub trait ControlService: Send + Sync + 'static {
@@ -1580,6 +1582,7 @@ mod effect_tests {
     include!("reassignment_tests.rs");
     include!("unowned_tests.rs");
     include!("full_capture_tests.rs");
+    include!("account_execution_tests.rs");
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
     use agent_conductor_store::{NewAgent, NewProject, NewTask, Store};

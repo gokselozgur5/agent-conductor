@@ -111,6 +111,7 @@ async fn frozen_launch_checks_vendor_identity_and_retains_packet() {
     assert_account_socket_entry(&pin, &packet, "accepted").await;
     assert_account_socket_entry(&pin, &packet, "expired").await;
     assert_account_socket_entry(&pin, &packet, "wrong-pin").await;
+    assert_account_socket_entry(&pin, &packet, "wrong-receiver").await;
     pin.version = "changed".into();
     assert!(conductor_runtime::full_capability_launch(&pin, &packet).is_err());
 }
@@ -143,6 +144,10 @@ async fn assert_account_socket_entry(
     let uid = nix::unistd::geteuid().as_raw();
     let mut child = start_account_receiver(&path, &identity).await;
     let acknowledged = std::sync::atomic::AtomicBool::new(false);
+    let mut expected = identity.clone();
+    if decision == "wrong-receiver" {
+        expected.wrapper_identity = "12345678-1234-1234-1234-123456789abd".into();
+    }
     let connection = AccountRunnerConnection::connect(
         &AccountChannelAddress {
             path,
@@ -151,6 +156,7 @@ async fn assert_account_socket_entry(
             packet_sha256: digest,
         },
         &request,
+        &expected,
         |ack| {
             request.packet.verify_ack(&ack).unwrap();
             acknowledged.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -166,7 +172,7 @@ async fn assert_account_socket_entry(
     .await;
     assert_eq!(
         acknowledged.load(std::sync::atomic::Ordering::SeqCst),
-        decision != "wrong-pin"
+        !matches!(decision, "wrong-pin" | "wrong-receiver")
     );
     let release = decision == "accepted";
     if release {
@@ -183,7 +189,7 @@ async fn assert_account_socket_entry(
             }
         ));
         drop(connection);
-    } else if decision == "wrong-pin" {
+    } else if matches!(decision, "wrong-pin" | "wrong-receiver") {
         assert!(connection.is_err());
     } else {
         assert!(matches!(
@@ -196,7 +202,7 @@ async fn assert_account_socket_entry(
         .unwrap()
         .unwrap();
     assert_eq!(status.success(), release);
-    if !release && decision != "wrong-pin" {
+    if !release && !matches!(decision, "wrong-pin" | "wrong-receiver") {
         let receipt = conductor_runtime::read_unstarted_receipt(&request.packet, &identity);
         assert!(receipt.is_ok());
     }

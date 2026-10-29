@@ -552,6 +552,11 @@ impl<C: Clock> PersistentControlService<C> {
         record: &ExecutionRecord,
         packet: &ResumePacket,
     ) -> Result<Option<String>, StoreError> {
+        // Account workspaces are not coordinator-owned receipt storage. A file
+        // there cannot establish a write fence, even before the peer ACK exists.
+        if record.account_channel {
+            return Ok(None);
+        }
         if let Some(expected) = record.preparation.expected_wrapper_identity.as_deref() {
             if record
                 .wrapper_identity

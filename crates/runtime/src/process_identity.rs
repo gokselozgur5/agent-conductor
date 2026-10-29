@@ -3,7 +3,8 @@ use std::ffi::OsString;
 
 const PREFIX: &str = "--conductor-owner=v1:";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunnerProcessIdentity {
     pub authority_id: String,
     pub packet_sha256: String,
