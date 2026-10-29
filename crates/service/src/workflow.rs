@@ -169,6 +169,7 @@ impl<C: Clock> PersistentControlService<C> {
         untrusted_context.extend(advisory_context);
         let packet = ResumePacket {
             contract: AttemptContract {
+                full_capability: None,
                 version: 1,
                 task_id: plan.task_id.clone(),
                 attempt_id: attempt_id.clone(),
@@ -177,12 +178,7 @@ impl<C: Clock> PersistentControlService<C> {
                 adapter: identity(&worker_pin),
                 workspace: workspace.clone(),
                 starting_head: baseline.starting_head,
-                authority: CapabilityEnvelope {
-                    read_roots: std::iter::once(workspace.clone()).chain(plan.instructions.iter().map(|pin|pin.path.clone())).collect(),
-                    write_roots: vec![workspace],
-                    network: NetworkPolicy::InferenceOnly,
-                    allow_workspace_commands: false,
-                },
+                authority: writer_authority(plan, workspace),
                 instructions: plan.instructions.clone(),
                 checks: plan.checks.clone(),
                 max_runtime_ms: plan.model_timeout_ms,
@@ -720,6 +716,17 @@ fn advisory_context(plan: &NativeWorkflowPlan) -> Result<Option<String>, StoreEr
     conductor_runtime::read_advisory_context(&plan.advisory_sources)
         .map_err(|_| invalid("advisory sources changed or unavailable"))
 }
+fn writer_authority(plan: &NativeWorkflowPlan, workspace: PathBuf) -> CapabilityEnvelope {
+    CapabilityEnvelope {
+        read_roots: std::iter::once(workspace.clone())
+            .chain(plan.instructions.iter().map(|pin| pin.path.clone()))
+            .collect(),
+        write_roots: vec![workspace],
+        network: NetworkPolicy::InferenceOnly,
+        allow_workspace_commands: false,
+    }
+}
+
 pub(super) fn validate_plan(plan: &NativeWorkflowPlan) -> Result<(), StoreError> {
     advisory_context(plan)?;
     conductor_runtime::read_approved_instruction_sources(&plan.instructions)

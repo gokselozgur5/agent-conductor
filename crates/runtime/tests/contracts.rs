@@ -7,6 +7,7 @@ use conductor_runtime::{
 fn packet() -> ResumePacket {
     ResumePacket {
         contract: AttemptContract {
+            full_capability: None,
             version: 1,
             task_id: "task-1".into(),
             attempt_id: "attempt-1".into(),
@@ -145,4 +146,36 @@ fn oversized_and_unknown_protocol_packets_never_acknowledge() {
     candidate = packet();
     candidate.contract.checks[0].argv = vec![];
     assert_eq!(candidate.validate(), Err(ContractError::Check));
+}
+
+#[test]
+fn full_capability_is_explicit_and_account_selection_is_digest_bound() {
+    let mut value = packet();
+    let legacy = value.sha256().unwrap();
+    assert!(
+        !serde_json::to_string(&value)
+            .unwrap()
+            .contains("full_capability")
+    );
+    value.contract.full_capability = Some(conductor_runtime::FullCapabilityProfile {
+        account: conductor_runtime::ExecutionAccount {
+            name: "worker".into(),
+            uid: 501,
+            gid: 20,
+            home: "/Users/worker".into(),
+        },
+        path: "/usr/bin:/bin".into(),
+    });
+    assert_eq!(value.validate(), Err(ContractError::Authority));
+    value.contract.authority.network = NetworkPolicy::Unrestricted;
+    value.contract.authority.allow_workspace_commands = true;
+    value.contract.authority.read_roots = vec!["/".into()];
+    value.contract.authority.write_roots = vec!["/".into()];
+    value.validate().unwrap();
+    let digest = value.sha256().unwrap();
+    assert_ne!(digest, legacy);
+    value.contract.full_capability.as_mut().unwrap().account.uid += 1;
+    assert_ne!(value.sha256().unwrap(), digest);
+    value.contract.full_capability = None;
+    assert_eq!(value.validate(), Err(ContractError::Authority));
 }

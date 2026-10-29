@@ -3,6 +3,14 @@
 use crate::{AdapterKind, ExecutionAccount, ProcessSpec, VendorPin, binary_sha256};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
+/// Frozen account and tool lookup policy for an unrestricted attempt.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FullCapabilityProfile {
+    pub account: ExecutionAccount,
+    pub path: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FullCapabilityError {
     #[error(transparent)]

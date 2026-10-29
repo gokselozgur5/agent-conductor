@@ -30,6 +30,7 @@ pub struct AdapterIdentity {
 pub enum NetworkPolicy {
     Denied,
     InferenceOnly,
+    Unrestricted,
 }
 
 /// Requested authority, not proof that a particular adapter enforces it.
@@ -61,6 +62,8 @@ pub struct CheckDefinition {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptContract {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_capability: Option<crate::FullCapabilityProfile>,
     pub version: u16,
     pub task_id: String,
     pub attempt_id: String,
@@ -121,6 +124,7 @@ impl AttemptContract {
     /// # Errors
     /// Rejects missing identities, unbounded input and escaping write authority.
     pub fn validate(&self) -> Result<(), ContractError> {
+        self.validate_execution_profile()?;
         if self.version != RUNTIME_PROTOCOL_VERSION {
             return Err(ContractError::Version);
         }
@@ -163,11 +167,10 @@ impl AttemptContract {
                 .read_roots
                 .iter()
                 .any(|root| self.workspace.starts_with(root))
-            || self
-                .authority
-                .write_roots
-                .iter()
-                .any(|path| !absolute_clean(path) || !path.starts_with(&self.workspace))
+            || self.authority.write_roots.iter().any(|path| {
+                !absolute_clean(path)
+                    || (self.full_capability.is_none() && !path.starts_with(&self.workspace))
+            })
         {
             return Err(ContractError::Authority);
         }
@@ -203,6 +206,27 @@ impl AttemptContract {
             {
                 return Err(ContractError::Check);
             }
+        }
+        Ok(())
+    }
+
+    fn validate_execution_profile(&self) -> Result<(), ContractError> {
+        if let Some(profile) = &self.full_capability {
+            if !identity(&profile.account.name)
+                || !absolute_clean(&profile.account.home)
+                || profile.path.is_empty()
+                || profile.path.len() > 8192
+                || profile.path.contains('\0')
+                || std::env::split_paths(&profile.path).any(|path| !absolute_clean(&path))
+                || self.authority.network != NetworkPolicy::Unrestricted
+                || !self.authority.allow_workspace_commands
+                || self.authority.read_roots != [PathBuf::from("/")]
+                || self.authority.write_roots != [PathBuf::from("/")]
+            {
+                return Err(ContractError::Authority);
+            }
+        } else if self.authority.network == NetworkPolicy::Unrestricted {
+            return Err(ContractError::Authority);
         }
         Ok(())
     }
