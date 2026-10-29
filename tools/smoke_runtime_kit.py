@@ -13,6 +13,13 @@ import time
 from package_runtime import verify
 
 
+def operator_ready(status):
+    # The registration-only bootstrap also reports ready before exec of the
+    # long-lived daemon. Wait for its configured watcher before signaling it.
+    health = status['health']
+    return health['status'] == 'ready' and health['repository_watcher'] == 'running'
+
+
 def smoke(kit):
     kit = kit.resolve(strict=True)
     verified = verify(kit)
@@ -45,7 +52,7 @@ def smoke(kit):
                                             text=True, timeout=15)
                     if result.returncode == 0:
                         status = json.loads(result.stdout)
-                        if status['health']['status'] == 'ready':
+                        if operator_ready(status):
                             assert status['tasks']['tasks'] == []
                             break
                     if time.monotonic() > deadline:
@@ -61,7 +68,7 @@ def smoke(kit):
                     process.wait(timeout=10)
                     raise RuntimeError('packaged runtime did not stop gracefully') from None
             if process.returncode != 0:
-                raise RuntimeError('packaged runtime exited unsuccessfully')
+                raise RuntimeError(f'packaged runtime exited with status {process.returncode}')
         assert subprocess.check_output(['git', '-C', str(project), 'status', '--porcelain']) == b''
     return dict(verified, health='ready', empty_tasks=True, graceful_stop=True,
                 original_project_unchanged=True, model_calls=False)

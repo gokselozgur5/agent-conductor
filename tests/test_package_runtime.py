@@ -11,6 +11,17 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import package_runtime
+from smoke_runtime_kit import operator_ready
+
+
+class OperatorReadinessTests(unittest.TestCase):
+    def test_registration_bootstrap_is_not_the_running_operator(self):
+        self.assertFalse(operator_ready({'health': {
+            'status': 'ready', 'repository_watcher': 'disabled'}}))
+        self.assertFalse(operator_ready({'health': {
+            'status': 'degraded', 'repository_watcher': 'running'}}))
+        self.assertTrue(operator_ready({'health': {
+            'status': 'ready', 'repository_watcher': 'running'}}))
 
 
 class RuntimePackageTests(unittest.TestCase):
