@@ -1,5 +1,27 @@
 # Product Requirements v1
 
+## Current capability requirement — 2026-10-29
+
+The operator explicitly requires full agent freedom. The intended worker must
+be able to use shell commands, run builds/tests, choose tools and access the
+network needed for its assigned work. A two-file-tool-only worker does not meet
+this requirement. Existing broker restrictions describe a bounded implementation,
+not the final product capability target.
+
+Conductor coordinates task ownership, dependencies, evidence, recovery and
+independent verification. Those responsibilities must not be implemented by
+removing the tools an agent needs to do the task. Tool availability and authority
+to take a particular external action remain separate: existing operator-granted
+authority must be honored without redundant prompts.
+
+The operator selected separate operating-system user accounts with machine-wide
+access under their account permissions, using `codex --yolo` and
+`claude --dangerously-skip-permissions`. Each worker retains its account's home
+and authentication. `$HOME/codex` and `$HOME/claude` are working-directory
+conventions, not confinement boundaries. Do not substitute a file-only profile.
+See [Full-capability execution](FULL_CAPABILITY_EXECUTION.md) for the integration
+changes and acceptance evidence this correction requires.
+
 ## 1. Purpose
 
 Agent Conductor lets one operator provide a project path and entrust a fleet of coding agents to understand that project, continue its active work, keep one shared Kanban board current, recover from interrupted sessions, and stop only after independently verified completion.
