@@ -912,3 +912,7 @@ fn prepared_test_vendor(
     )
     .unwrap()
 }
+
+mod codex_session {
+    include!("broker_codex_session_tests.rs");
+}
