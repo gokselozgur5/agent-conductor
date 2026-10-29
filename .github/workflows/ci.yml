@@ -110,6 +110,7 @@ jobs:
           tar -xzf "target/dist/$KIT_NAME.tar.gz" -C target/kit-verification
           python3 tools/package_runtime.py --verify "target/kit-verification/$KIT_NAME"
           python3 -E -s "target/kit-verification/$KIT_NAME/tools/conductor" --help
+          python3 tools/smoke_runtime_kit.py --kit "target/kit-verification/$KIT_NAME"
 
       - name: Reject committed credential material
         shell: bash
