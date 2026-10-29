@@ -28,3 +28,7 @@ workspace = true
 [[bin]]
 name = "conductor-runner"
 path = "src/bin/conductor-runner.rs"
+
+[[bin]]
+name = "conductor-check-sandbox"
+path = "src/bin/conductor-check-sandbox.rs"

@@ -44,6 +44,10 @@ jobs:
       - name: Build operator integration binaries
         run: cargo build --workspace
 
+      - name: Install Linux check isolation dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
       - name: Run workspace tests
         env:
           CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/debug

@@ -47,6 +47,12 @@ pub fn sandboxed_command(
     network: NetworkPolicy,
     timeout: Duration,
 ) -> Result<ProcessSpec, SandboxError> {
+    #[cfg(target_os = "linux")]
+    if network == NetworkPolicy::Denied {
+        return crate::linux_sandbox::command(
+            workspace, executable, arguments, read_roots, timeout,
+        );
+    }
     if !cfg!(target_os = "macos") || network != NetworkPolicy::Denied {
         return Err(SandboxError::Unsupported);
     }
