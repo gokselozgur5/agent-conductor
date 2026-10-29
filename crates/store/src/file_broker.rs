@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Connection, SqliteConnection};
 #[path = "file_broker_launch.rs"]
 mod launch;
+#[path = "file_broker_launch_prepare.rs"]
+mod launch_prepare;
 pub use launch::FileBrokerLaunchBinding;
 #[path = "file_broker_owner.rs"]
 mod ownership;
