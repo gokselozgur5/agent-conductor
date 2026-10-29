@@ -25,12 +25,21 @@ observed process state accurately.
 
 ## Required integration
 
-- Native workflow construction currently hard-codes `allow_workspace_commands`
-  to false. Replace that assumption with the operator-selected execution profile;
-  preserve the frozen profile through retries and reassignment.
-- `native_writer_launch` currently admits only restricted Claude writers. Add the
-  full-capability route for Codex and Claude under the selected execution boundary.
-  Do not reuse `file_only_tools` as evidence for a command-capable run.
+- Native plans now accept `full_capability` with a frozen OS account and PATH.
+  The worker process must already run as that account. The operator plan command
+  preserves the profile from its accepted template. Cross-account transport and
+  unrestricted interruption recovery still require implementation and acceptance.
+- `native_writer_launch` routes explicit full profiles to Codex `--yolo` or Claude
+  `--dangerously-skip-permissions`. Both use the selected account's own HOME and
+  configuration. Restricted profiles retain their previous behavior.
+- A successful unrestricted exit can publish a source snapshot for independent
+  checks and review. Its execution remains `exited`, not `fenced`. The transactional
+  capture-eligibility view admits auxiliary work only for this exact normally
+  exited attempt, with no other unfenced attempts. This does not permit continuation
+  or claim that arbitrary detached descendants have stopped.
+- Dependent tasks copy only independently accepted source bytes, rechecking the
+  snapshot hash and original execution/profile identity. They do not reuse the
+  predecessor's live working directory.
 - Service-created execution intent, current leases, durable acknowledgement and
   process ownership remain required. They coordinate execution; they do not
   constitute OS containment or prove that all descendants have stopped.
