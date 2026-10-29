@@ -39,6 +39,7 @@ mod transaction_cancellation;
 pub use history::AuditMetadata;
 mod workflow_dependencies;
 pub use workflow_dependencies::WorkflowDependency;
+mod completed_dispatch;
 mod workflow_assignments;
 mod workflows;
 pub use workflows::WorkflowDispatch;
@@ -102,6 +103,7 @@ struct StoreInner {
     writer: Mutex<SqliteConnection>,
     readers: SqlitePool,
     dispatch_changes: tokio::sync::watch::Sender<()>,
+    completed_dispatch_cursor: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +333,7 @@ impl Store {
                 writer: Mutex::new(writer),
                 readers,
                 dispatch_changes: tokio::sync::watch::channel(()).0,
+                completed_dispatch_cursor: Mutex::new(None),
             }),
         })
     }

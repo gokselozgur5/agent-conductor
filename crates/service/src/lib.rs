@@ -174,6 +174,9 @@ impl<C: Clock> PersistentControlService<C> {
         store
             .recover_workflow_dispatch(startup.boot_generation, started_at_ms)
             .await?;
+        store
+            .reconcile_completed_dispatch(startup.boot_generation, started_at_ms)
+            .await?;
         let service = Self {
             store,
             boot_generation: startup.boot_generation,
@@ -1105,6 +1108,13 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
             .await
             .map_err(store_error)?;
         self.recover_fenced_receipts().await.map_err(store_error)?;
+        self.store
+            .reconcile_completed_dispatch(
+                self.boot_generation,
+                self.clock.read(self.boot_generation).wall_unix_ms,
+            )
+            .await
+            .map_err(store_error)?;
         self.reconcile_expired()
             .await
             .map(|_| ())

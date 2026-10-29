@@ -17,10 +17,8 @@ never substitutes for a successful check or verdict. See
 [AUXILIARY_PROCESS_OWNERSHIP.md](AUXILIARY_PROCESS_OWNERSHIP.md) for the contracts,
 fixtures and precise refusal paths.
 
-The schema-25 implementation passes 340 local workspace Rust tests with the recovery
-diagnostic, strict Clippy, formatting and build checks. The earlier schema-25
-implementation passed 73 Python tests; this Rust-only diagnostic did not rerun
-that unchanged Python suite. Positive native boot changes
+The schema-25 candidate passes 345 local workspace Rust tests, 73 Python tests,
+strict Clippy, formatting and build checks. Positive native boot changes
 remain synthetic tests; real same-boot observation and supervisor controls do
 not establish physical reboot acceptance. Hosted CI is currently refused before
 steps by the account payment/spending-limit check. Local tests do not resolve
@@ -31,7 +29,9 @@ publication crash boundaries now pass, with one continuation and no old-result
 publication. Nonlegacy pending ownership from another daemon generation is
 reported by a bounded `auxiliary_recovery_pending` invariant diagnostic, exposed
 through the authenticated board API and recovery panel. Two DOM tests and an
-isolated native HTTP/CLI restart probe pass; visual browser acceptance is separate.
+isolated native HTTP/CLI restart probe pass. Separate real Chrome desktop and
+390-pixel mobile checks verify readable diagnostics, no horizontal overflow and
+clearing on disconnect; they do not establish general browser compatibility.
 
 The [auxiliary fault matrix](AUXILIARY_FAULT_MATRIX.md) identifies exact tested
 boundaries and remaining gaps, separating abrupt process death from cancellation
@@ -39,6 +39,11 @@ and controlled daemon relays. Admission now has abrupt child-process coverage on
 both sides of its transaction for both roles. Result publication adds six real
 child exits at task/link writes and after commit, with exact rollback/replay checks;
 these synthetic store batches do not replace native domain-completion acceptance.
+
+Completed tasks whose dispatch finish write was interrupted are now reconciled
+at startup and maintenance from validated historical acceptance, without relaunch.
+The reproduced native stale-queue fixture repairs across two starts with task and
+ownership records unchanged, no model calls and one reconciliation audit.
 
 Next acceptance work: complete the remaining abrupt-death matrix and operator
 recovery reporting; finish physical host recovery, native

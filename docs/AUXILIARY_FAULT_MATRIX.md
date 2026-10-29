@@ -24,7 +24,7 @@ and run through the workspace test command.
 | During domain publication transaction | Abrupt exits at task and publication-link writes | Same, separate role | Synthetic validated store batch; not a native adapter result |
 | After check result, before verifier accepts launch | Prior check publication preserved in verifier unaccepted-launch fixture | Not applicable | Does not isolate the immediate post-commit scheduling boundary |
 | After verifier result publication, before task completion | Check result has equivalent after-commit exit/replay control | Abrupt store child exit after publication commit; exact batch retained, replay adds nothing | Full domain verdict-to-completion daemon interruption still required |
-| After completed task, before dispatch bookkeeping | Reopened completion is stable in native recovery fixtures | Same workflow outcome | Orderly final restart is not abrupt termination at this exact boundary |
+| After completed task, before dispatch bookkeeping | `completed-dispatch-crash-v1` reproduces stale queue after SIGKILL | Same completed workflow contains independent verdict | Controlled finish-write refusal isolates boundary; `completed-dispatch-repair-v1` repairs it without model calls or task mutation |
 
 `transaction_cancellation::auxiliary_admission_survives_process_death_on_both_sides`
 runs four real child processes, covering both roles and both sides of admission
@@ -64,3 +64,31 @@ Prioritize the remaining domain completion orchestration and filesystem boundari
 Do not aggregate these short native controls into a seven-day run or describe
 synthetic host epochs as physical reboot acceptance. Full operational recovery,
 privacy, supported Linux hosts and release acceptance remain separate gates.
+
+## Completed task / interrupted dispatch repair
+
+A native workflow exposed a stale queue entry: task completion committed, the
+fixture refused the dispatch finish write, and SIGKILL/restart left the completed
+task paired with `needs_recovery`. The task and its acceptance evidence were intact.
+
+Startup and ordinary maintenance now reconcile at most 128 old-generation
+completed dispatches per sweep, sharing a keyset cursor across store clones.
+The task row and bounded aggregate must agree on identity, version and completion;
+required checks, independent verdict, closed decisions and ended lease must match
+the recorded snapshot source. The ended attempt and matching completion audit are
+required. Active leases, unfenced writers, pending auxiliary or legacy ownership
+refuse reconciliation. Malformed entries remain unchanged while later valid rows
+can still be visited.
+
+Only dispatch status/outcome and a distinct `workflow.completed_reconciled` audit
+change, atomically. Task acceptance, original dispatch generation and automatic
+recovery count remain unchanged. The outcome records historical accepted source;
+it does not claim a new filesystem verification. No dispatcher flag, model access,
+new execution or new completion command is needed. Audit failure or cancellation
+rolls back the entire page; replay writes no duplicate audit.
+
+The actual failed native database was preserved separately, then reopened with the
+fix twice: dispatch became `finished`, task/attempt/lease/execution/effect/auxiliary
+records stayed byte-equivalent, with one original completion and one reconciliation
+audit. Both test daemons exited. This closes the observed bookkeeping defect, not
+the separate verdict-to-completion orchestration gap.
