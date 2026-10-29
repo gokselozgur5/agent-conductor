@@ -77,6 +77,7 @@ jobs:
           python3 -m unittest discover -s tests -p test_adapter_pins.py -v
           python3 -m unittest discover -s tests -p 'test_conductor_rpc*.py' -v
           python3 -m unittest discover -s tests -p test_package_launcher.py -v
+          python3 -m unittest discover -s tests -p test_package_runtime.py -v
           python3 -m unittest discover -s tests -p test_restore_publication.py -v
           python3 -m unittest discover -s tests -p test_disaster_recovery.py -v
           python3 -m unittest discover -s tests -p test_host_recovery_integration.py -v
@@ -93,6 +94,24 @@ jobs:
       - name: Check board diagnostic rendering
         run: node --test tests/board_diagnostics.cjs
 
+      - name: Build and test release runtime
+        env:
+          CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/release
+        run: |
+          cargo build --locked --release --workspace
+          cargo test --locked --release --workspace --all-features
+
+      - name: Package and verify native runtime kit
+        env:
+          KIT_NAME: conductor-${{ runner.os }}-${{ runner.arch }}
+        run: |
+          python3 tools/package_runtime.py --bin-dir target/release --destination "target/dist/$KIT_NAME" > target/runtime-kit-receipt.json
+          mkdir target/kit-verification
+          tar -xzf "target/dist/$KIT_NAME.tar.gz" -C target/kit-verification
+          python3 tools/package_runtime.py --verify "target/kit-verification/$KIT_NAME"
+          python3 -E -s "target/kit-verification/$KIT_NAME/tools/conductor" --help
+          python3 tools/smoke_runtime_kit.py --kit "target/kit-verification/$KIT_NAME"
+
       - name: Reject committed credential material
         shell: bash
         run: |
@@ -100,3 +119,14 @@ jobs:
             echo 'Credential-shaped material is committed.' >&2
             exit 1
           fi
+
+      - name: Upload verified native runtime kit
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: conductor-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            target/dist/*.tar.gz
+            target/runtime-kit-receipt.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

@@ -6,6 +6,8 @@ It does not trust a conversation to remain alive and it does not accept a worker
 
 ## Run the local operator workflow
 
+For CI-built native binaries, see [runtime kits](docs/RUNTIME_KITS.md).
+
 Build once, initialize a private runtime for a committed Git project, then run it:
 
 ```sh

@@ -13,7 +13,9 @@ import sqlite3
 import subprocess
 import sys
 import time
-from adapter_pins import accepted_pins
+
+# Runtime kits remain byte-for-byte verifiable after operator commands.
+sys.dont_write_bytecode = True
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -57,6 +59,8 @@ def discovery_command(config, args):
 
 
 def main():
+    from adapter_pins import accepted_pins
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state', type=Path, default=REPO / 'state/operator')
     sub = parser.add_subparsers(dest='command', required=True)
