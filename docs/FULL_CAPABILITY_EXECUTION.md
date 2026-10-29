@@ -122,3 +122,18 @@ This is the receiving entry for daemon integration. Normal workflow selection,
 baseline transfer, account terminal/source import and independent acceptance are
 not yet wired to this entry. A peer terminal event still does not establish local
 child exit or machine-wide write fencing.
+
+The persistent worker also accepts exact baseline staging before native launch.
+`stage_account_snapshot` connects using the independently selected manifest digest,
+streams the archive, and accepts success only after the receiver has validated and
+published the same manifest in a new private destination. The coordinator can then
+put `DESTINATION/tree` in the prepared native packet. No shared writable directory
+or copied login material is required. Existing destinations are refused, and failed
+transfers leave no successful acknowledgement; unpublished partial directories
+must not be reused. Buffered archive bytes are preserved across request dispatch,
+and socket I/O uses an absolute deadline, including slow or silent peers.
+
+Staging authorizes byte delivery to the explicitly selected destination under the
+receiver's OS permissions. It does not acknowledge execution, grant a lease,
+certify a result, or establish fencing. Normal daemon plan selection and the return
+path for candidate source verification remain separate integration work.
