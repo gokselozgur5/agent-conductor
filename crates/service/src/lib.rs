@@ -65,6 +65,7 @@ mod checkpoint;
 mod clock;
 mod decision_privacy;
 mod evidence;
+mod git_source_policy;
 #[cfg(unix)]
 mod instruction_policy;
 mod inventory;
@@ -2695,6 +2696,220 @@ mod effect_tests {
                 .expect("fence status")
         );
     }
+    fn git_identity_command(root: &std::path::Path, args: &[&str]) {
+        assert!(
+            std::process::Command::new("/usr/bin/git")
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null"
+                ])
+                .args(args)
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    async fn git_identity_fixture() -> (
+        tempfile::TempDir,
+        PersistentControlService<FixedClock>,
+        conductor_runtime::ResumePacket,
+    ) {
+        use agent_conductor_store::{EffectAudit, ExecutionPreparation};
+        let (directory, store) = lifecycle_store().await;
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .unwrap();
+        let (_, token) = claim_task(&service).await;
+        store
+            .claim_effect(
+                &token,
+                "runner",
+                10000,
+                EffectAudit {
+                    id: "claim",
+                    actor_id: "runtime",
+                    correlation_id: &token,
+                    now_ms: 100,
+                },
+            )
+            .await
+            .unwrap();
+        let root = directory.path().canonicalize().unwrap().join("source");
+        fs::create_dir(&root).unwrap();
+        git_identity_command(&root, &["init", "-q"]);
+        git_identity_command(&root, &["commit", "--allow-empty", "-qm", "fixture"]);
+        let source = conductor_runtime::observe_git_source(&root).await.unwrap();
+        let mut input = runtime_launch(&root);
+        input.packet.contract.starting_head.clone_from(&source.head);
+        input.packet.contract.git_source = Some(Box::new(source));
+        store
+            .prepare_execution(
+                &ExecutionPreparation {
+                    expected_wrapper_identity: None,
+                    effect_token: token.clone(),
+                    task_id: "task".into(),
+                    attempt_id: "attempt".into(),
+                    lease_epoch: 1,
+                    runner_id: "runner".into(),
+                    packet_json: serde_json::to_string(&input.packet).unwrap(),
+                    packet_sha256: input.packet.sha256().unwrap(),
+                },
+                EffectAudit {
+                    id: "prepare",
+                    actor_id: "runtime",
+                    correlation_id: &token,
+                    now_ms: 100,
+                },
+            )
+            .await
+            .unwrap();
+        (directory, service, input.packet)
+    }
+
+    #[tokio::test]
+    async fn git_identity_invalidation_blocks_only_bound_current_attempt() {
+        for movement in ["unchanged", "branch", "detached", "commit"] {
+            let changed = movement != "unchanged";
+            let (_directory, service, packet) = git_identity_fixture().await;
+            let root = packet.contract.git_source.as_ref().unwrap().root.clone();
+            fs::write(root.join("dirty"), "retained work").unwrap();
+            service.invalidate_instruction_tasks().await.unwrap();
+            assert_eq!(
+                service.workflow_task("task").await.unwrap().state,
+                TaskState::Claimed
+            );
+            let mut stale = packet.clone();
+            stale.contract.attempt_id = "old-attempt".into();
+            assert!(
+                !service
+                    .ensure_git_source_current_locked(&stale)
+                    .await
+                    .unwrap()
+            );
+            match movement {
+                "branch" => git_identity_command(&root, &["checkout", "-qb", "external"]),
+                "detached" => git_identity_command(&root, &["checkout", "--detach", "-q"]),
+                "commit" => {
+                    git_identity_command(&root, &["commit", "--allow-empty", "-qm", "external"]);
+                }
+                _ => (),
+            }
+            service.invalidate_instruction_tasks().await.unwrap();
+            let task = service.workflow_task("task").await.unwrap();
+            assert_eq!(
+                task.state,
+                if changed {
+                    TaskState::Blocked
+                } else {
+                    TaskState::Claimed
+                }
+            );
+            if changed {
+                assert_eq!(task.blocker.unwrap().kind, "git_source_changed");
+            }
+            service.invalidate_instruction_tasks().await.unwrap();
+            assert_eq!(
+                service.workflow_task("task").await.unwrap().version,
+                task.version
+            );
+            assert_eq!(
+                fs::read_to_string(root.join("dirty")).unwrap(),
+                "retained work"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn git_continuation_preserves_frozen_binding_and_refuses_changed_source() {
+        let (_directory, service, packet) = git_identity_fixture().await;
+        let source = packet.contract.git_source.as_ref().unwrap();
+        let baseline = conductor_runtime::observe_git(&source.root).await.unwrap();
+        let pin = serde_json::json!({"kind":"claude","version":"fixture",
+            "executable":"/bin/true","executable_sha256":"a".repeat(64),
+            "conformance_sha256":"b".repeat(64)});
+        let plan: NativeWorkflowPlan = serde_json::from_value(serde_json::json!({
+            "task_id":"task","project":source.root,"objective":"fixture",
+            "artifacts":source.root.join("unused"),"wrapper":"/bin/true",
+            "worker":pin,"verifier":pin,"checks":[],"model_timeout_ms":1000
+        }))
+        .unwrap();
+        let before = service.workflow_task("task").await.unwrap();
+        assert_eq!(
+            service
+                .workflow_git_source(&plan, &baseline, true)
+                .await
+                .unwrap(),
+            packet.contract.git_source
+        );
+        git_identity_command(&source.root, &["checkout", "-qb", "changed-before-resume"]);
+        assert!(
+            service
+                .workflow_git_source(&plan, &baseline, true)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            service.workflow_task("task").await.unwrap().version,
+            before.version
+        );
+    }
+
+    #[tokio::test]
+    async fn git_identity_rejects_changed_packet_and_preserves_operator_stop() {
+        for kind in [CommandKind::Pause, CommandKind::Cancel] {
+            let (_directory, service, packet) = git_identity_fixture().await;
+            let mut changed = packet.clone();
+            changed.contract.git_source.as_mut().unwrap().reference = "HEAD".into();
+            assert!(
+                service
+                    .ensure_git_source_current_locked(&changed)
+                    .await
+                    .is_err()
+            );
+            let before = service.workflow_task("task").await.unwrap();
+            assert_eq!(before.state, TaskState::Claimed);
+            service
+                .workflow_command_locked(
+                    "task",
+                    "operator",
+                    ActorRole::Operator,
+                    kind.clone(),
+                    "operator stops task",
+                )
+                .await
+                .unwrap();
+            let stopped = service.workflow_task("task").await.unwrap();
+            let root = &packet.contract.git_source.as_ref().unwrap().root;
+            git_identity_command(root, &["checkout", "-qb", "after-stop"]);
+            service.invalidate_instruction_tasks().await.unwrap();
+            assert!(
+                !service
+                    .ensure_git_source_current_locked(&packet)
+                    .await
+                    .unwrap()
+            );
+            let after = service.workflow_task("task").await.unwrap();
+            assert_eq!(after.version, stopped.version);
+            assert_eq!(
+                after.state,
+                if matches!(kind, CommandKind::Pause) {
+                    TaskState::Paused
+                } else {
+                    TaskState::Cancelled
+                }
+            );
+        }
+    }
+
     #[tokio::test]
     // Keep persisted invalidation, operator precedence and restart in one scenario.
     #[allow(clippy::too_many_lines)]

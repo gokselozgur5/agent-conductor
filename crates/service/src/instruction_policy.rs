@@ -38,6 +38,9 @@ impl<C: Clock> PersistentControlService<C> {
         &self,
         packet: &ResumePacket,
     ) -> Result<bool, StoreError> {
+        if !self.ensure_git_source_current_locked(packet).await? {
+            return Ok(false);
+        }
         if read_pinned_instructions(packet).is_ok() {
             return Ok(true);
         }

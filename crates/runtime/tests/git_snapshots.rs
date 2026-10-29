@@ -191,3 +191,30 @@ async fn observation_distinguishes_same_commit_branches_and_detached_head() {
     assert_eq!(decoded.starting_ref, None);
     assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
 }
+
+#[tokio::test]
+async fn source_identity_tracks_reference_commit_and_directory_replacement() {
+    use conductor_runtime::observe_git_source;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().canonicalize().unwrap().join("source");
+    repository(&source);
+    let before = observe_git_source(&source).await.unwrap();
+    fs::write(source.join("tracked"), b"dirty work").unwrap();
+    assert_eq!(observe_git_source(&source).await.unwrap(), before);
+    git(&source, &["checkout", "-qb", "identity-branch"]);
+    let branch = observe_git_source(&source).await.unwrap();
+    assert_eq!(branch.head, before.head);
+    assert_ne!(branch.reference, before.reference);
+    git(
+        &source,
+        &["commit", "--allow-empty", "-qm", "external commit"],
+    );
+    assert_ne!(observe_git_source(&source).await.unwrap().head, before.head);
+    fs::rename(&source, directory.path().join("retained")).unwrap();
+    repository(&source);
+    assert_ne!(
+        observe_git_source(&source).await.unwrap().inode,
+        before.inode
+    );
+    assert!(observe_git_source(&source.join(".git")).await.is_err());
+}

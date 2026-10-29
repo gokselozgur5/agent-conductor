@@ -67,14 +67,14 @@ impl<C: Clock> PersistentControlService<C> {
                     worker_auth
                 };
                 let execution = if let Some(version) = job.resume_version {
-                    self.continue_native_workflow(
+                    Box::pin(self.continue_native_workflow(
                         &plan,
                         u64::try_from(version).map_err(|_| {
                             StoreError::Integrity("invalid continuation version".into())
                         })?,
                         worker_auth,
                         verifier_auth,
-                    )
+                    ))
                     .await
                 } else {
                     self.run_native_workflow(&plan, worker_auth, verifier_auth)

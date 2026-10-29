@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     fs::OpenOptions,
     io::Write,
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -123,6 +123,65 @@ pub async fn git_observation_roots(source: &Path) -> Result<Vec<PathBuf>, Snapsh
     Ok(roots)
 }
 
+/// Reads coordinator-side Git identity without scanning or copying workspace files.
+/// This is a repeated observation, not a write fence or worker capability grant.
+/// # Errors
+/// Refuses noncanonical roots, non-repository roots and changing observations.
+pub async fn observe_git_source(root: &Path) -> Result<crate::GitSourceIdentity, SnapshotError> {
+    if root.canonicalize().map_err(|_| SnapshotError::Io)? != root {
+        return Err(SnapshotError::Invalid);
+    }
+    let top = git(root, &["rev-parse", "--show-toplevel"]).await?;
+    if std::str::from_utf8(&top)
+        .map_err(|_| SnapshotError::Unsupported)?
+        .trim_end_matches('\n')
+        != root.to_str().ok_or(SnapshotError::Unsupported)?
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    let before = read_git_source(root).await?;
+    if read_git_source(root).await? != before {
+        return Err(SnapshotError::Changed);
+    }
+    Ok(before)
+}
+
+async fn read_git_source(root: &Path) -> Result<crate::GitSourceIdentity, SnapshotError> {
+    let metadata = std::fs::metadata(root).map_err(|_| SnapshotError::Io)?;
+    let head = String::from_utf8(git(root, &["rev-parse", "--verify", "HEAD"]).await?)
+        .map_err(|_| SnapshotError::Invalid)?
+        .trim_end()
+        .to_owned();
+    if ![40, 64].contains(&head.len()) || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(SnapshotError::Invalid);
+    }
+    let reference = git_reference(root).await?;
+    Ok(crate::GitSourceIdentity {
+        root: root.to_owned(),
+        head,
+        reference,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+async fn git_reference(root: &Path) -> Result<String, SnapshotError> {
+    let symbolic = git_status(root, &["symbolic-ref", "--quiet", "HEAD"]).await?;
+    match symbolic.exit_code {
+        Some(0) => {
+            let reference =
+                String::from_utf8(symbolic.stdout).map_err(|_| SnapshotError::Unsupported)?;
+            let reference = reference.trim_end_matches('\n');
+            if !reference.starts_with("refs/") || reference.contains(['\n', '\r']) {
+                return Err(SnapshotError::Invalid);
+            }
+            Ok(reference.to_owned())
+        }
+        Some(1) => Ok("HEAD".to_owned()),
+        _ => Err(SnapshotError::Io),
+    }
+}
+
 async fn inventory(root: &Path) -> Result<Inventory, SnapshotError> {
     let toplevel = git(root, &["rev-parse", "--show-toplevel"]).await?;
     let top = PathBuf::from(
@@ -148,20 +207,7 @@ async fn inventory(root: &Path) -> Result<Inventory, SnapshotError> {
     if ![40, 64].contains(&head.len()) || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(SnapshotError::Invalid);
     }
-    let symbolic = git_status(root, &["symbolic-ref", "--quiet", "HEAD"]).await?;
-    let head_ref = match symbolic.exit_code {
-        Some(0) => {
-            let reference =
-                String::from_utf8(symbolic.stdout).map_err(|_| SnapshotError::Unsupported)?;
-            let reference = reference.trim_end_matches('\n');
-            if !reference.starts_with("refs/") || reference.contains(['\n', '\r']) {
-                return Err(SnapshotError::Invalid);
-            }
-            reference.to_owned()
-        }
-        Some(1) => "HEAD".to_owned(),
-        _ => return Err(SnapshotError::Io),
-    };
+    let head_ref = git_reference(root).await?;
     let raw = git(
         root,
         &[
