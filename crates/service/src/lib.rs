@@ -1,3 +1,5 @@
+mod broker_session;
+pub use broker_session::NativeBrokerSession;
 mod broker_journal_session;
 pub use broker_journal_session::BrokerJournalSession;
 mod broker_preowner_recovery;

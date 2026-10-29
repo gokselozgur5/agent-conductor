@@ -150,27 +150,19 @@ async fn release_write_and_close(
     prepared: PreparedBrokerRunner,
     stream: tokio::net::UnixStream,
 ) {
-    let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
-        .await
-        .unwrap();
-    let server = journal
-        .start_remote(stream, Duration::from_secs(5))
-        .unwrap();
-    let (store_ref, binding_ref, receipt_root) = (store, binding, &launch.receipt_root);
-    let mut session = prepared
-        .release(|identity| async move {
-            crate::record_broker_owner(
-                store_ref,
-                binding_ref,
-                &identity,
-                receipt_root,
-                broker_owner_audit("native-owner"),
-            )
-            .await?;
-            Ok(continuous_millis().unwrap() + 4000)
-        })
-        .await
-        .unwrap();
+    let mut session = crate::AcknowledgedBroker {
+        runner: prepared,
+        journal_stream: stream,
+    }
+    .release(
+        store.clone(),
+        binding.clone(),
+        continuous_millis().unwrap() + 4000,
+        Duration::from_secs(5),
+        broker_owner_audit("native-owner"),
+    )
+    .await
+    .unwrap();
     let (mut peer, _) =
         conductor_runtime::connect_broker_endpoint(session.proxy_handoff(), Duration::from_secs(2))
             .await
@@ -190,18 +182,11 @@ async fn release_write_and_close(
         "durable answer\n"
     );
     session.cancel().await.unwrap();
-    let receipt = session.finish().await.unwrap();
-    assert!(server.finish().await.is_ok());
+    let receipt = session
+        .finish(broker_owner_audit("native-close"))
+        .await
+        .unwrap();
     assert_late_write_refused(peer, binding, &launch.root).await;
-    crate::close_broker_from_receipt(
-        store,
-        binding,
-        &receipt,
-        &launch.receipt_root,
-        broker_owner_audit("native-close"),
-    )
-    .await
-    .unwrap();
     assert!(
         !store
             .execution_has_unresolved_file_broker(&binding.execution_token)
