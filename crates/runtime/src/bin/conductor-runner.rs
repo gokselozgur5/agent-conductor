@@ -31,6 +31,8 @@ async fn main() {
         } else {
             Err(())
         }
+    } else if arguments.get(1).is_some_and(|v| v == "--account-worker") {
+        serve_account_worker(&arguments).await
     } else if arguments.get(1).is_some_and(|v| v == "--account-listen") {
         serve_account_channel(&arguments).await
     } else if arguments.get(1).is_some_and(|v| v == "--account-native") {
@@ -97,6 +99,7 @@ async fn serve(account_native: bool) -> Result<(), ()> {
         account_native,
         false,
         identity,
+        None,
         BufReader::new(tokio::io::stdin()),
         tokio::io::stdout(),
     )
@@ -123,14 +126,63 @@ async fn serve_account_channel(arguments: &[String]) -> Result<(), ()> {
         .await
         .map_err(|_| ())?;
     let (input, output) = stream.into_split();
-    serve_io(true, true, Some(identity), BufReader::new(input), output).await
+    serve_io(
+        true,
+        true,
+        Some(identity),
+        None,
+        BufReader::new(input),
+        output,
+    )
+    .await
+}
+
+async fn serve_account_worker(arguments: &[String]) -> Result<(), ()> {
+    if arguments.len() != 4 {
+        return Err(());
+    }
+    let coordinator_uid = arguments[3].parse::<u32>().map_err(|_| ())?;
+    let mut endpoint = conductor_runtime::AccountWorkerListener::bind(
+        std::path::Path::new(&arguments[2]),
+        coordinator_uid,
+    )
+    .map_err(|_| ())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|_| ())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|_| ())?;
+    loop {
+        // Finish the bounded current task before shutdown; never detach its
+        // supervision future by dropping it in a signal race.
+        let admitted = tokio::select! {
+            biased;
+            _ = interrupt.recv() => return Ok(()),
+            _ = terminate.recv() => return Ok(()),
+            admitted = endpoint.accept(Duration::from_secs(30)) => admitted,
+        };
+        let Ok((stream, digest)) = admitted else {
+            continue;
+        };
+        let (input, output) = stream.into_split();
+        // A protocol failure closes this connection; no automatic attempt replay.
+        let _ = serve_io(
+            true,
+            true,
+            None,
+            Some(digest),
+            BufReader::new(input),
+            output,
+        )
+        .await;
+    }
 }
 
 #[allow(clippy::too_many_lines)]
 async fn serve_io(
     account_native: bool,
     account_channel: bool,
-    identity: Option<conductor_runtime::RunnerProcessIdentity>,
+    mut identity: Option<conductor_runtime::RunnerProcessIdentity>,
+    admitted_packet: Option<String>,
     mut input: impl AsyncBufRead + Unpin,
     writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
 ) -> Result<(), ()> {
@@ -144,8 +196,17 @@ async fn serve_io(
     let launch: RunnerLaunch = if account_channel {
         let request: conductor_runtime::AccountRunnerRequest =
             serde_json::from_slice(&bytes).map_err(|_| ())?;
-        if identity.as_ref() != Some(&request.identity) {
-            return Err(());
+        if let Some(expected) = identity.as_ref() {
+            if expected != &request.identity {
+                return Err(());
+            }
+        } else {
+            if admitted_packet.as_deref() != Some(request.identity.packet_sha256.as_str())
+                || request.identity.argument().is_err()
+            {
+                return Err(());
+            }
+            identity = Some(request.identity.clone());
         }
         request.launch.prepare().map_err(|_| ())?
     } else if account_native {
