@@ -203,3 +203,42 @@ This repeated synthetic control exercises the real daemon's lease boundary besid
 native work. It does not repeatedly crash native workers or replace the separate
 actual-native prior-lease recovery proof. It cannot establish arbitrary descendant
 fencing, unobserved mutation absence or full fault-matrix acceptance.
+
+## Auxiliary invocation correspondence
+
+New auxiliary supervisors carry `--conductor-aux-owner=v1:AUTHORITY:INVOCATION:HASH`
+alongside their invocation argument. The trusted supervisor checks that tag
+against validated launch input before its private claim or Ready. Only public
+identities and the already-recorded launch digest appear in argv; no raw payload,
+source, credential or command text is added. Tags remain forgeable observations,
+never authority to signal, release work or settle ownership.
+
+The inspector discovers renamed tagged processes, takes independent start-marker
+reads, and correlates bounded preparation, launch, admission-host and process
+records. It also observes recorded PIDs independently so tag loss cannot silently
+hide a current process. Pending disappearance, PID reuse, wrong launch/binding,
+unacknowledged launch, settled-but-still-observed process and historical absence
+remain distinct. Other-authority tags are excluded. Legacy schema or malformed
+records cannot count as healthy integrated coverage. Legacy untagged processes
+cannot be assigned an authority from argv alone; there is no claim of universal
+untagged orphan detection.
+
+The guard uses its configured finite grace for contradictory/uncertain auxiliary
+observations, keyed by invocation so changing classifications cannot reset the
+window. Only matching observations and unavailable historical settled processes
+are clean; disappearance never settles a pending invocation. Reports expose
+bounded identities/classifications, not stored JSON or host command lines. The
+unattended monitor pins the auxiliary inventory module with its other sources.
+
+Native `aux-observation-native-v1` failed with a 10-second grace during verifier
+preparation. The separate v2 run uses an explicitly selected 60-second grace;
+no default or invariant was relaxed. Samples recorded about 19.54 seconds from
+first to last pre-ACK observation, including about 9.39 seconds with a visible
+supervisor. Source performs executable validation before spawn and before Ready;
+these samples do not isolate hashing cost or establish a universal timing bound.
+V2 completes Claude writing, isolated checks and Codex review with 332 samples,
+both auxiliary roles observed live, matching board projection and one completion.
+Independent verification binds recorded PIDs/start markers and settlement scope.
+A real additional scoped process without a database record is detected; only the
+test harness terminates its own process. All owned daemons are stopped. This is
+short sampled acceptance, not an uninterrupted seven-day run.

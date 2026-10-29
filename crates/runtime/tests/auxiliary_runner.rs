@@ -58,8 +58,24 @@ async fn event(reader: &mut BufReader<ChildStdout>) -> AuxiliaryEvent {
     serde_json::from_str(&line).unwrap()
 }
 async fn spawn(launch: &AuxiliaryLaunch) -> (Child, ChildStdin, BufReader<ChildStdout>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_conductor-runner"))
-        .args(["--auxiliary", &launch.invocation_id])
+    let tag = conductor_runtime::auxiliary_process_tag(
+        &launch.authority_id,
+        &launch.invocation_id,
+        &format!("{:x}", Sha256::digest(serde_json::to_vec(launch).unwrap())),
+    )
+    .unwrap();
+    spawn_tagged(launch, Some(&tag)).await
+}
+async fn spawn_tagged(
+    launch: &AuxiliaryLaunch,
+    tag: Option<&str>,
+) -> (Child, ChildStdin, BufReader<ChildStdout>) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_conductor-runner"));
+    command.args(["--auxiliary", &launch.invocation_id]);
+    if let Some(tag) = tag {
+        command.arg(tag);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -436,4 +452,57 @@ async fn unreleased_proof_needs_launch_scope_but_never_an_invented_observation()
     }
     fs::write(receipt_path(&launch), original).unwrap();
     assert_eq!(read().unwrap(), receipt);
+}
+
+#[tokio::test]
+async fn observation_tag_mismatch_refuses_before_claim_or_payload() {
+    for variant in 0..4 {
+        let (_root, launch) = fixture("echo payload > marker");
+        let hash = launch.sha256().unwrap();
+        let tag = match variant {
+            0 => conductor_runtime::auxiliary_process_tag(
+                &"b".repeat(64),
+                &launch.invocation_id,
+                &hash,
+            )
+            .unwrap(),
+            1 => conductor_runtime::auxiliary_process_tag(
+                &launch.authority_id,
+                &uuid::Uuid::now_v7().to_string(),
+                &hash,
+            )
+            .unwrap(),
+            2 => conductor_runtime::auxiliary_process_tag(
+                &launch.authority_id,
+                &launch.invocation_id,
+                &"c".repeat(64),
+            )
+            .unwrap(),
+            _ => "--conductor-aux-owner=invalid".into(),
+        };
+        let (mut child, writer, mut reader) = spawn_tagged(&launch, Some(&tag)).await;
+        drop(writer);
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!status.success());
+        let mut line = String::new();
+        assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
+        assert_eq!(fs::read_dir(&launch.receipt_root).unwrap().count(), 0);
+        assert!(!launch.directory.join("marker").exists());
+    }
+}
+
+#[tokio::test]
+async fn legacy_auxiliary_transport_remains_explicitly_untagged() {
+    let (_root, launch) = fixture("echo payload > marker");
+    let (mut child, writer, mut reader) = spawn_tagged(&launch, None).await;
+    let _receipt = ready(&launch, &child, &mut reader).await;
+    drop(writer);
+    tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!launch.directory.join("marker").exists());
 }

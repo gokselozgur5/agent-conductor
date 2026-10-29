@@ -48,7 +48,7 @@ class EscapedRunnerTests(unittest.TestCase):
          assert observe(child_pid)==birth and not (workspace/'escaped-write').exists()
          database=root/'state.sqlite3'
          with sqlite3.connect(database) as db:
-          db.executescript('create table recovery_authority(singleton,authority_id);create table runtime_metadata(singleton,boot_generation);create table executions(task_id,attempt_id,lease_epoch,state,wrapper_identity,packet_sha256,process_json,expected_wrapper_identity);create table leases(task_id,status);')
+          db.executescript('create table recovery_authority(singleton,authority_id);create table runtime_metadata(singleton,boot_generation);create table executions(task_id,attempt_id,lease_epoch,state,wrapper_identity,packet_sha256,process_json,expected_wrapper_identity);create table leases(task_id,status);create table auxiliary_invocations(invocation_id,task_id,execution_token,boot_generation,state,release_recorded,preparation_json,launch_binding_json,process_json);create table auxiliary_host_evidence(invocation_id,host_json);')
           db.execute('insert into recovery_authority values(1,?)',('a'*64,));db.execute('insert into runtime_metadata values(1,1)')
          guard=NativeObservationGuard(database,host_epoch(bins/'conductor-daemon'),[workspace])
          assert guard.sample({'healthy':True})['healthy']

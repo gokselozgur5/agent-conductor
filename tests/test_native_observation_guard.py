@@ -24,7 +24,8 @@ class NativeGuardTests(unittest.TestCase):
         self.host = dict(platform='linux', host_id='a'*64, boot_id='b'*64)
         self.report = dict(boot_generation='1', authority_id='a'*64, changed_process_observations=0,
                            unavailable_process_observations=0, observations=[],
-                           recorded_process_inventory=dict(status='observed', invalid_records=0, observations=[]))
+                           recorded_process_inventory=dict(status='observed', invalid_records=0, observations=[]),
+                           auxiliary_process_inventory=dict(status='observed', invalid_records=0, observations=[]))
         self.patch = mock.patch.object(guard, 'inspect', side_effect=lambda *args: self.report)
         self.patch.start()
 
@@ -79,6 +80,25 @@ class NativeGuardTests(unittest.TestCase):
         monitor.uncertain_since -= 2
         with self.assertRaisesRegex(guard.Violation, 'native_inventory_uncertain'):
             monitor.sample({'healthy': True})
+
+    def test_auxiliary_mismatch_grace_and_missing_coverage_fail_closed(self):
+        monitor = self.monitor(grace_seconds=1)
+        auxiliary = self.report['auxiliary_process_inventory']
+        auxiliary['observations'] = [dict(invocation_id='invocation', pid=42, classification='awaiting_ack')]
+        self.assertFalse(monitor.sample({'healthy': True})['healthy'])
+        auxiliary['observations'][0]['classification'] = 'matching_record'
+        self.assertTrue(monitor.sample({'healthy': True})['healthy'])
+        auxiliary['observations'][0]['classification'] = 'no_matching_record'
+        monitor.sample({'healthy': True})
+        monitor.suspects = {key: time.monotonic()-2 for key in monitor.suspects}
+        with self.assertRaisesRegex(guard.Violation, 'persistent_process_contradiction'):
+            monitor.sample({'healthy': True})
+        auxiliary['invalid_records'] = 1
+        with self.assertRaisesRegex(guard.Violation, 'native_auxiliary_inventory_unavailable'):
+            self.monitor().sample({'healthy': True})
+        del self.report['auxiliary_process_inventory']
+        with self.assertRaisesRegex(guard.Violation, 'native_auxiliary_inventory_unavailable'):
+            self.monitor().sample({'healthy': True})
 
     def test_duplicate_lease_runtime_failure_and_observation_gap(self):
         with self.assertRaisesRegex(guard.Violation, 'runtime_invariant_failure'):

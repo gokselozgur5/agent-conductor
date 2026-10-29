@@ -182,7 +182,13 @@ class NativeObservationGuard:
         require(self.uncertain_since is None or now-self.uncertain_since < self.grace, 'native_inventory_uncertain')
         records = report['recorded_process_inventory']
         require(records['status'] == 'observed' and records['invalid_records'] == 0, 'native_recorded_inventory_unavailable')
+        auxiliary = report.get('auxiliary_process_inventory', {})
+        require(auxiliary.get('status') == 'observed' and auxiliary.get('invalid_records') == 0,
+                'native_auxiliary_inventory_unavailable')
         suspects = set()
+        for item in auxiliary['observations']:
+            if item['classification'] not in ('matching_record', 'historical_process_unavailable', 'historical_pid_reused_or_marker_mismatch', 'historical_other_host_boot'):
+                suspects.add(('auxiliary', item['invocation_id']))
         for item in report['observations']:
             if item['classification'] != 'matching_record' or item['recorded_process_binding'] != 'matching_observation':
                 suspects.add(('tag', item['pid'], item['process_start_observation']))
@@ -201,6 +207,8 @@ class NativeObservationGuard:
         self.boot, self.authority = report['boot_generation'], report['authority_id']
         self.samples += 1
         return dict(sample=self.samples, boot=self.boot, tagged_observations=len(report['observations']),
+                    auxiliary_observations=len(auxiliary['observations']),
+                    auxiliary_matching_invocations=sorted({i['invocation_id'] for i in auxiliary['observations'] if i['classification'] == 'matching_record'}),
                     recorded_observations=len(records['observations']), pending_contradictions=len(suspects),
                     protected_surfaces=len(self.roots), verification_surfaces=len(self.verification_surfaces), board_projection=board, inventory_uncertain=uncertain,
                     healthy=not suspects and not uncertain, full_v1_accepted=False)

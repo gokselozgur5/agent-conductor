@@ -46,6 +46,7 @@ def run_native_monitor(guard, invariant_reader, output, *, duration_seconds,
     require(0 < len(pinned_files) <= 8, 'runtime_pins_required')
     sources = [Path(__file__), Path(__file__).with_name('native_observation_guard.py'),
                Path(__file__).with_name('inspect_runner_processes.py'),
+               Path(__file__).with_name('auxiliary_process_inventory.py'),
                Path(__file__).with_name('process_birth.py'),
                Path(__file__).with_name('native_resource_guard.py'),
                Path(__file__).with_name('verification_surface.py'),

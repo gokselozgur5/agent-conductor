@@ -50,8 +50,9 @@ impl AuxiliarySession {
     /// Refuses mismatched launch/native identity or bounded protocol failures.
     pub async fn prepare(wrapper: &Path, launch: &AuxiliaryLaunch) -> io::Result<Self> {
         let hash = launch.sha256()?;
+        let tag = crate::auxiliary_process_tag(&launch.authority_id, &launch.invocation_id, &hash)?;
         let mut child = Command::new(wrapper)
-            .args(["--auxiliary", &launch.invocation_id])
+            .args(["--auxiliary", &launch.invocation_id, &tag])
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

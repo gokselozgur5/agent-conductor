@@ -4,7 +4,17 @@ For the current requirement-by-requirement delivery gaps, see
 [Delivery acceptance audit](DELIVERY_ACCEPTANCE.md). Later sections retain
 historical evidence and must not be read as current feature inventories.
 
-## Current result
+## Local integration candidate
+
+The separate `codex/delivery-integration` branch combines the auxiliary ownership
+and native-observation candidates. It adds scoped auxiliary process observation,
+with 348 Rust and 112 Python tests and a real monitored Claude/check/Codex workflow.
+Both auxiliary roles are observed while live; an actual scoped orphan is detected.
+The first 10-second-grace probe failed and is retained; the separate accepted probe
+uses the existing configurable 60-second observation grace. This candidate is not
+installed into the operator runtime or accepted as the full product.
+
+## Published auxiliary candidate
 
 Draft [PR #90](https://github.com/gokselozgur5/agent-conductor/pull/90), tracked by
 [issue #89](https://github.com/gokselozgur5/agent-conductor/issues/89), adds the

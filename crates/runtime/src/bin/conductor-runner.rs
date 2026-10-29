@@ -13,10 +13,13 @@ use tokio::{
 async fn main() {
     let arguments: Vec<String> = std::env::args().collect();
     let result = if arguments.get(1).is_some_and(|v| v == "--auxiliary") {
-        if arguments.len() == 3 {
-            conductor_runtime::serve_auxiliary(&arguments[2])
-                .await
-                .map_err(|_| ())
+        if matches!(arguments.len(), 3 | 4) {
+            conductor_runtime::serve_auxiliary_tagged(
+                &arguments[2],
+                arguments.get(3).map(String::as_str),
+            )
+            .await
+            .map_err(|_| ())
         } else {
             Err(())
         }

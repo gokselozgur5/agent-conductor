@@ -64,9 +64,8 @@ or bypass repository policy to produce a green delivery indicator.
 
 ## Required acceptance sequence
 
-1. Extend native process observation to auxiliary invocations, then validate the
-   combined candidate with real monitored native work; preserve source/binary/
-   evidence identities.
+1. Preserve the combined auxiliary/native-observation acceptance evidence below,
+   then complete the remaining lifecycle/effect and long-running acceptance.
 2. Close capability gaps for Codex writing and Linux isolation using explicit
    design and real denied-action/fencing evidence before admitting them.
 3. Audit every failure case listed in REQUIREMENTS section 6 against exact tests;
@@ -82,22 +81,25 @@ React/TypeScript and SSE/WebSocket. That implementation-plan discrepancy is not
 resolved by the native recovery tests. The final audit must distinguish functional
 operator acceptance from unfinished or superseded design choices explicitly.
 
-## Integration finding: auxiliary processes are outside the current guard
+## Auxiliary observation integration
 
-The two branches merge cleanly, but their process-observation scopes do not yet
-match. `AuxiliarySession::prepare` launches a runner with `--auxiliary INVOCATION`.
-`inspect_runner_processes.parse_tag` recognizes only `--conductor-owner=v1:...`,
-and its recorded inventory queries `executions`, not `auxiliary_invocations`.
-The guard consumes those writer observations; it does not reject the separate
-`unscoped_runners_on_host` count. Consequently a healthy guard sample does not
-establish auxiliary process correspondence. Database ownership invariants and
-private settlement checks do not supply the missing live observation coverage.
+The initial integration audit found writer-only live observation: auxiliary argv
+had only an invocation UUID and the inspector queried only `executions`. The
+candidate now emits a scoped auxiliary observation tag and correlates live tags
+and stored auxiliary process identities. Supplied tags must match the validated
+private launch before the runner claims the invocation or emits Ready. Legacy
+untagged transport remains accepted by the runner, but does not become matching
+live observation merely because it has a PID.
 
-Next implementation: correlate bounded auxiliary invocation tags and recorded
-process identity with the matching launch/admission scope, using independent
-start-marker reads and the existing finite uncertainty window. Unknown records,
-PID reuse and concurrent observation must remain distinct. Do not flag unrelated
-runtimes merely because an unscoped process exists, disclose raw command lines,
-signal observed PIDs, or infer fencing from process absence. Add discriminating
-positive, orphan, mismatch, disappearance/race and privacy controls, followed by
-a real native workflow using the combined source.
+The combined candidate passes 348 Rust and 112 Python tests, strict Clippy,
+formatting and build checks. The first native guard run stopped when its 10-second
+observation grace elapsed during verifier preparation; that failed run is retained.
+A separate run using the existing configurable 60-second grace completed with
+332 samples, matching live observations for both auxiliary roles, sampled board
+correspondence, an unchanged original project and one completion. Independent
+SQLite checks bind those observations to the two settled invocations. A separately
+spawned scoped orphan is detected without database mutation or observer signaling.
+
+This closes the identified live auxiliary observation gap for the tested scenario,
+not every failure interleaving, escaped descendant containment, Linux operation or
+seven-day acceptance. See NATIVE_OBSERVATION_GUARD for policy and evidence limits.

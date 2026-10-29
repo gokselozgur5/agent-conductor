@@ -396,11 +396,31 @@ async fn supervise(
     operation.await
 }
 
+/// Bounded public observation metadata; never launch or signaling authority.
+/// # Errors
+/// Rejects malformed authority, invocation or launch digest identities.
+pub fn auxiliary_process_tag(authority: &str, invocation: &str, hash: &str) -> io::Result<String> {
+    if !valid_digest(authority) || !canonical_uuid(invocation) || !valid_digest(hash) {
+        return Err(invalid());
+    }
+    Ok(format!(
+        "--conductor-aux-owner=v1:{authority}:{invocation}:{hash}"
+    ))
+}
+
 /// Entrypoint for the existing trusted runner's `--auxiliary UUID` mode.
 /// The parent commits the launch digest before spawn and identity before Release.
 /// # Errors
 /// Protocol/identity/receipt failures remain unknown; private input is not logged.
 pub async fn serve_auxiliary(invocation: &str) -> io::Result<()> {
+    serve_auxiliary_tagged(invocation, None).await
+}
+
+/// Serves auxiliary input with an optional legacy-compatible observation tag.
+/// A supplied tag must match the validated private launch before any claim or Ready.
+/// # Errors
+/// Rejects mismatched metadata without publishing a receipt or releasing payload.
+pub async fn serve_auxiliary_tagged(invocation: &str, tag: Option<&str>) -> io::Result<()> {
     if !canonical_uuid(invocation) {
         return Err(invalid());
     }
@@ -413,6 +433,10 @@ pub async fn serve_auxiliary(invocation: &str) -> io::Result<()> {
         return Err(invalid());
     }
     let hash = launch.sha256()?;
+    let expected = auxiliary_process_tag(&launch.authority_id, invocation, &hash)?;
+    if tag.is_some_and(|tag| tag != expected) {
+        return Err(invalid());
+    }
     // Durable exclusive wrapper claim: even a caller replay cannot release two
     // wrappers with the same invocation identity. A killed wrapper stays unknown.
     let marker = launch
