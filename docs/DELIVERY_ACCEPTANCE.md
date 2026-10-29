@@ -5,6 +5,16 @@ remains the complete workflow and all gates in [REQUIREMENTS.md](REQUIREMENTS.md
 No local test count, short native fixture, or successful refusal substitutes for
 that scope. Read this current audit before the historical paragraphs in STATUS.
 
+## Capability correction
+
+The current acceptance target includes full shell, build/test, tool and network
+capability for the worker, per the operator's explicit direction. The execution
+boundary remains undecided. Existing file-only broker and restricted-writer
+acceptance must not be presented as completion of that target. The critical
+user-visible scenario is a normal CLI-created task dispatched to a full-capability
+agent, followed by independent verification and exactly-once completion, including
+interruption and recovery. See [the integration plan](FULL_CAPABILITY_EXECUTION.md).
+
 ## Candidate identity
 
 Main at `7f24b10c3432867779681e85939ddc6f670a550a` includes merged PR #113
