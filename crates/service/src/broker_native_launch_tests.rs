@@ -912,3 +912,7 @@ mod vendor_supervision {
 mod owned_codex {
     include!("broker_owned_codex_tests.rs");
 }
+
+mod vendor_cancel {
+    include!("broker_vendor_cancel_tests.rs");
+}
