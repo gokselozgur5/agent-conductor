@@ -147,8 +147,27 @@ impl Store {
         &self,
         after: Option<&str>,
     ) -> Result<Vec<crate::FileBrokerRecoveryCandidate>, StoreError> {
-        let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT p.invocation_id,p.execution_token,CASE WHEN length(p.binding_json)<=4096 THEN p.binding_json ELSE '' END FROM file_broker_launches p JOIN executions e ON e.effect_token=p.execution_token WHERE p.state='open' AND e.process_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM file_brokers b WHERE b.execution_token=p.execution_token OR b.invocation_id=p.invocation_id) AND (? IS NULL OR p.invocation_id>?) ORDER BY p.invocation_id LIMIT 128")
-            .bind(after).bind(after).fetch_all(&self.inner.readers).await?;
+        self.pending_preowner_launch_page(after, false).await
+    }
+
+    /// Discover ACK-bearing open preparations without release ownership or operations.
+    /// Registered candidates still require independent receipt and binding validation.
+    /// # Errors
+    /// Returns database errors; malformed bindings remain individual candidate errors.
+    pub async fn pending_unowned_broker_launch_page(
+        &self,
+        after: Option<&str>,
+    ) -> Result<Vec<crate::FileBrokerRecoveryCandidate>, StoreError> {
+        self.pending_preowner_launch_page(after, true).await
+    }
+
+    async fn pending_preowner_launch_page(
+        &self,
+        after: Option<&str>,
+        allow_registration: bool,
+    ) -> Result<Vec<crate::FileBrokerRecoveryCandidate>, StoreError> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT p.invocation_id,p.execution_token,CASE WHEN length(p.binding_json)<=4096 THEN p.binding_json ELSE '' END FROM file_broker_launches p JOIN executions e ON e.effect_token=p.execution_token WHERE p.state='open' AND e.process_json IS NOT NULL AND (? OR NOT EXISTS(SELECT 1 FROM file_brokers b WHERE b.execution_token=p.execution_token OR b.invocation_id=p.invocation_id)) AND NOT EXISTS(SELECT 1 FROM file_broker_owners o WHERE o.invocation_id=p.invocation_id) AND NOT EXISTS(SELECT 1 FROM file_operations o WHERE o.invocation_id=p.invocation_id) AND (? IS NULL OR p.invocation_id>?) ORDER BY p.invocation_id LIMIT 128")
+            .bind(allow_registration).bind(after).bind(after).fetch_all(&self.inner.readers).await?;
         Ok(rows
             .into_iter()
             .map(|(invocation_id, execution_token, encoded)| {
@@ -436,6 +455,106 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn unowned_discovery_includes_registration_but_excludes_activity() {
+        let (_root, store, binding) = fixture().await;
+        sqlx::query("INSERT INTO file_broker_launches VALUES(?,?,?,'{}','open',100,NULL)")
+            .bind(&binding.invocation_id)
+            .bind(&binding.execution_token)
+            .bind(binding.encoded().unwrap())
+            .execute(&mut *store.inner.writer.lock().await)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO file_brokers VALUES(?,?,?,'open',100,NULL)")
+            .bind(&binding.invocation_id)
+            .bind(&binding.execution_token)
+            .bind(binding.encoded().unwrap())
+            .execute(&mut *store.inner.writer.lock().await)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .pending_unowned_broker_launch_page(None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .execute("UPDATE executions SET process_json='{}'")
+            .await
+            .unwrap();
+        let page = store
+            .pending_unowned_broker_launch_page(None)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(
+            page[0].binding.as_ref().unwrap().encoded().unwrap(),
+            binding.encoded().unwrap()
+        );
+        assert!(
+            store
+                .pending_unregistered_broker_launch_page(None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .pending_unowned_broker_launch_page(Some(&binding.invocation_id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for activity in [
+            "INSERT INTO file_broker_owners SELECT invocation_id,'{}',100,NULL FROM file_brokers",
+            "INSERT INTO file_operations SELECT invocation_id,1,printf('%064d',0),NULL,100,NULL FROM file_brokers",
+            "INSERT INTO file_operations SELECT invocation_id,1,printf('%064d',0),printf('%064d',1),100,101 FROM file_brokers",
+        ] {
+            store
+                .inner
+                .writer
+                .lock()
+                .await
+                .execute(activity)
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .pending_unowned_broker_launch_page(None)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            store
+                .inner
+                .writer
+                .lock()
+                .await
+                .execute("DELETE FROM file_broker_owners; DELETE FROM file_operations")
+                .await
+                .unwrap();
+        }
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .execute("UPDATE file_broker_launches SET binding_json='{}'")
+            .await
+            .unwrap();
+        let page = store
+            .pending_unowned_broker_launch_page(None)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert!(page[0].binding.is_err());
     }
 
     async fn assert_registered_refused(
