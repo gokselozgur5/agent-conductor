@@ -4,31 +4,24 @@ For the current requirement-by-requirement delivery gaps, see
 [Delivery acceptance audit](DELIVERY_ACCEPTANCE.md). Later sections retain
 historical evidence and must not be read as current feature inventories.
 
-## Current baseline and broker recovery
+## Current baseline and broker vendor candidate
 
-PRs #93, #95 and #97 are merged. Main at
-`af36e843e41d7c154a61a22aea3ea550206bc2e6` passed post-merge CI on macOS and
-Linux. The delivered operator bundle and existing runtimes remain unchanged.
+Main at `5e0327aa4b02354dda8440c02c9b322ed4e439f9` includes merged PRs #99
+and #101: registered pre-owner recovery and owned journal/release/shutdown
+sessions. Their exact pre-merge CI passed on macOS and Linux. User-facing bundles
+and existing runtimes remain unchanged.
 
-The service persists fresh prelaunch intent, observes the actual wrapper Ready,
-and records its ACK before returning runner and journal handles. Opt-in workflow
-recovery scans bounded pages of ACK-bearing preparations and verifies private
-NeverReleased receipts before closing unresolved launch ownership.
+The issue #102 candidate prepares a pinned, command-free Codex broker command
+before Release, keeps direct filesystem access read-only and issues one
+environment-only handoff from an exact frozen-packet/session match. The real
+Codex0.163.0 local-provider control exercises actual runner and SQLite operation
+journaling, private receipt closure and database reopen. This is a candidate
+service integration, not enabled native daemon writer admission.
 
-The issue #98 candidate extends recovery to registered brokers without release
-ownership or any file operation. Registration and preparation close atomically;
-contradictory evidence remains unresolved. The real-runner regression registers
-then drops before Release, reopens the store at a new generation and recovers
-beyond 129 malformed preparations. This does not fence the execution or accept a
-task. See [the broker design](CODEX_WRITER_DESIGN.md) for proof boundaries.
-
-The issue #100 candidate adds a consuming service session owning journal tasks,
-release and verified shutdown. Actual-runner drop/cancelled-finish and audit-failure
-controls retain unresolved ownership until independent receipt verification.
-
-Pre-ACK reconciliation, integration into vendor/daemon supervision, native vendor
-admission, OS denial controls and operational acceptance remain incomplete.
-This candidate does not enable native Codex writers or establish full acceptance.
+Pre-ACK reconciliation, vendor/daemon lifecycle integration, real OS confinement,
+live-model behavior and operational acceptance remain incomplete. See
+[the broker design](CODEX_WRITER_DESIGN.md) for proof boundaries and
+[the delivery audit](DELIVERY_ACCEPTANCE.md) for the original full scope.
 
 ## Historical auxiliary candidate evidence
 
