@@ -12,6 +12,23 @@ from package_local import launcher
 
 
 class PackageLauncherTests(unittest.TestCase):
+    def test_snapshot_transfer_uses_bundled_cli_without_operator_state(self):
+        with tempfile.TemporaryDirectory(prefix='transfer bundle ') as directory:
+            root = Path(directory)
+            (root / 'bin').mkdir()
+            binary = root / 'bin/conductorctl'
+            binary.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            binary.chmod(0o700)
+            command = root / 'conductor'
+            command.write_text(launcher(Path(sys.executable).resolve()))
+            command.chmod(0o700)
+            arguments = ['transfer-snapshot', 'import', '--destination', '/account home/new',
+                         '--expected-sha256', 'a' * 64]
+            result = subprocess.run([str(command), *arguments], check=True,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.stdout.splitlines(), arguments)
+            self.assertFalse((root / 'state').exists())
+
     def test_pinned_python_survives_broken_path_and_preserves_arguments(self):
         with tempfile.TemporaryDirectory(prefix="bundle 'quoted ") as directory:
             root = Path(directory)
