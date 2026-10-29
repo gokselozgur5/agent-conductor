@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -156,8 +156,8 @@ impl BrokerRequest {
 /// spawning deferred work. This primitive alone is not a persisted write fence.
 pub struct FileBrokerGate {
     scope: BrokerScope,
-    deadline_ms: u64,
-    closed: AtomicBool,
+    deadline: Arc<BrokerLeaseDeadline>,
+    closed: Arc<AtomicBool>,
     uncertain: AtomicBool,
     completed: Mutex<u64>,
 }
@@ -172,27 +172,27 @@ impl FileBrokerGate {
         if crate::continuous_millis().map_err(|_| BrokerError::Clock)? >= deadline_ms {
             return Err(BrokerError::Revoked);
         }
+        let closed = Arc::new(AtomicBool::new(false));
+        let deadline = Arc::new(BrokerLeaseDeadline {
+            deadline_ms: Mutex::new(deadline_ms),
+            maximum_ms: deadline_ms,
+            closed: Arc::clone(&closed),
+        });
         Ok(Self {
             scope,
-            deadline_ms,
-            closed: AtomicBool::new(false),
+            deadline,
+            closed,
             uncertain: AtomicBool::new(false),
             completed: Mutex::new(0),
         })
     }
     fn check_open(&self) -> Result<(), BrokerError> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(BrokerError::Revoked);
-        }
-        let now = crate::continuous_millis().map_err(|_| {
-            self.closed.store(true, Ordering::SeqCst);
-            BrokerError::Clock
-        })?;
-        if now >= self.deadline_ms {
-            self.closed.store(true, Ordering::SeqCst);
-            return Err(BrokerError::Revoked);
-        }
-        Ok(())
+        self.deadline.check()
+    }
+    /// Return only deadline/revocation control, never the filesystem operation path.
+    #[must_use]
+    pub fn lease_control(&self) -> Arc<BrokerLeaseDeadline> {
+        Arc::clone(&self.deadline)
     }
     /// Commit the exact intent, then run one synchronous operation while holding
     /// the gate. Recheck revocation after admission: a committed but unexecuted
@@ -264,5 +264,65 @@ impl FileBrokerGate {
             return Err(BrokerError::Uncertain);
         }
         Ok(*completed)
+    }
+}
+
+/// Shared control for one gate's lease. It cannot extend the original hard
+/// deadline or reopen a revoked/expired gate and contains no file descriptor.
+pub struct BrokerLeaseDeadline {
+    deadline_ms: Mutex<u64>,
+    maximum_ms: u64,
+    closed: Arc<AtomicBool>,
+}
+impl BrokerLeaseDeadline {
+    /// Close admission immediately without waiting for any filesystem operation.
+    pub fn revoke(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn clock(&self) -> Result<u64, BrokerError> {
+        crate::continuous_millis().map_err(|_| {
+            self.closed.store(true, Ordering::SeqCst);
+            BrokerError::Clock
+        })
+    }
+    fn check(&self) -> Result<(), BrokerError> {
+        let deadline = self
+            .deadline_ms
+            .lock()
+            .map_err(|_| BrokerError::Uncertain)?;
+        if self.closed.load(Ordering::SeqCst) || self.clock()? >= *deadline {
+            self.closed.store(true, Ordering::SeqCst);
+            return Err(BrokerError::Revoked);
+        }
+        Ok(())
+    }
+    /// Apply a controller-authorized renewal while the prior lease is still live.
+    /// The deadline lock is never held during file operations or journal I/O.
+    /// # Errors
+    /// Refuses stale/expired/revoked leases, hard-deadline extension and bad clocks.
+    pub fn renew(&self, next: u64) -> Result<(), BrokerError> {
+        let mut deadline = self
+            .deadline_ms
+            .lock()
+            .map_err(|_| BrokerError::Uncertain)?;
+        let previous = *deadline;
+        let now = self.clock()?;
+        if self.closed.load(Ordering::SeqCst)
+            || now >= previous
+            || next <= now
+            || next > self.maximum_ms
+        {
+            self.closed.store(true, Ordering::SeqCst);
+            return Err(BrokerError::Revoked);
+        }
+        *deadline = next;
+        // An execution cannot observe the new value during this final check.
+        let checked = self.clock()?;
+        if self.closed.load(Ordering::SeqCst) || checked >= previous || checked >= next {
+            self.closed.store(true, Ordering::SeqCst);
+            return Err(BrokerError::Revoked);
+        }
+        Ok(())
     }
 }

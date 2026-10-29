@@ -504,3 +504,42 @@ expose it to the MCP proxy or vendor. The root binding, native launcher handoff,
 independent durable shutdown receipt and long-lived idle lifecycle remain open.
 EOF or a successful result acknowledgement does not close durable ownership or
 prove that filesystem write capability was revoked.
+
+## Actual broker runner mode and lease gate
+
+`conductor-runner --file-broker` now owns the concrete filesystem broker in its
+own process. A bounded private stdin launch binds the scope, canonical task root
+identity, private proxy directory, authenticated journal handoff and hard runtime
+deadline. It opens/pins the root, checks its digest, connects to the separate
+journal channel and emits Ready over the private controller pipe. Ready contains
+a bearer proxy handoff and must never enter logs, model context or persisted
+launch records. The runner serves no operations until an exact launch-hash
+Release arrives with a live lease. This mode does not yet spawn a vendor.
+
+Root identity hashes a versioned domain, descriptor device/inode and canonical
+pathname. It identifies the opened root, not its contents, and is not a substitute
+for host exclusion of other writers/directory movers. Only the filesystem worker
+holds file handles. The watchdog receives shared deadline/revocation control
+without file access. It handles renewal/cancel separately from journal I/O.
+
+The gate checks the minimum of lease and heartbeat expiry before admission and
+again after durable admission, before file effects. Renewal cannot extend the
+original hard deadline or revive an expired/revoked gate. Its short deadline lock
+is never held over filesystem or journal operations. Control loss, bad renewal,
+heartbeat or lease expiry closes admission before waiting for settlement. Terminal
+output explicitly flushes before process exit; the initial unflushed implementation
+showed an EOF in a process test and is retained in local failure evidence.
+
+Tests use the actual built runner, authenticated endpoints, parent SQLite and
+real files. They cover root mismatch before Ready, write/record/cancel, live renewal
+past the first deadline, wrong/expired/missing release, control EOF, heartbeat and
+lease expiry, wrong renewal and rejected writes after exit. Initial execution
+acknowledgement remains synthetic fixture setup. Separate gate controls cover
+expiry while admission is delayed, late renewal, hard limits and root replacement.
+
+Stopped carries only a local completion watermark; it is not an independent
+durable shutdown receipt, and the store remains open. Production native launch
+admission still requires binding the observed process identity before release,
+persisted shutdown/restart evidence, vendor configuration/OS confinement and
+long-lived idle handling. The existing Claude workflow and Codex writer refusal
+remain unchanged.

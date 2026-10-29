@@ -12,7 +12,15 @@ use tokio::{
 #[tokio::main]
 async fn main() {
     let arguments: Vec<String> = std::env::args().collect();
-    let result = if arguments.get(1).is_some_and(|v| v == "--auxiliary") {
+    let result = if arguments.get(1).is_some_and(|v| v == "--file-broker") {
+        if arguments.len() == 2 {
+            conductor_runtime::serve_broker_runner()
+                .await
+                .map_err(|_| ())
+        } else {
+            Err(())
+        }
+    } else if arguments.get(1).is_some_and(|v| v == "--auxiliary") {
         if matches!(arguments.len(), 3 | 4) {
             conductor_runtime::serve_auxiliary_tagged(
                 &arguments[2],

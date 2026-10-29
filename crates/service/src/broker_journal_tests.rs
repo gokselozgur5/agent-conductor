@@ -439,3 +439,336 @@ async fn journal_rpc_replay_and_cancel_after_admission_preserve_pending_intent()
         );
     }
 }
+
+async fn runner_frame(
+    output: &mut BufReader<tokio::process::ChildStdout>,
+) -> conductor_runtime::BrokerRunnerEvent {
+    let mut bytes = String::new();
+    tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(&bytes).unwrap()
+}
+async fn runner_send(input: &mut tokio::process::ChildStdin, value: &impl serde::Serialize) {
+    let mut bytes = serde_json::to_vec(value).unwrap();
+    bytes.push(b'\n');
+    input.write_all(&bytes).await.unwrap();
+}
+async fn runner_fixture(mismatch: bool, heartbeat: u64) -> BrokerRunnerFixture {
+    use conductor_runtime::{BrokerEndpoint, BrokerRunnerLaunch, broker_root_identity};
+    use std::{os::unix::fs::PermissionsExt, process::Stdio};
+    let (root, store, mut binding, _db) = fixture().await;
+    let base = root.path().canonicalize().unwrap();
+    let files = base.join("files");
+    fs::create_dir(&files).unwrap();
+    let journal_dir = base.join("j");
+    let proxy_dir = base.join("p");
+    for dir in [&journal_dir, &proxy_dir] {
+        fs::create_dir(dir).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    binding.root_identity_sha256 = broker_root_identity(&files).unwrap();
+    let scope = request(&binding).scope;
+    let endpoint = BrokerEndpoint::bind(&journal_dir, scope.clone()).unwrap();
+    let launch = BrokerRunnerLaunch {
+        scope: scope.clone(),
+        root: files.clone(),
+        root_identity_sha256: if mismatch {
+            "0".repeat(64)
+        } else {
+            binding.root_identity_sha256.clone()
+        },
+        endpoint_directory: proxy_dir,
+        journal_handoff: endpoint.environment_value().unwrap(),
+        maximum_deadline_ms: continuous_millis().unwrap() + 60000,
+        heartbeat_timeout_ms: heartbeat,
+    };
+    let hash = launch.sha256().unwrap();
+    let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
+        .await
+        .unwrap();
+    let (hold, rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let stream = endpoint.accept(Duration::from_secs(5)).await.unwrap();
+        journal
+            .serve_remote(stream, rx, Duration::from_secs(5))
+            .await
+    });
+    let bin = PathBuf::from(
+        std::env::var_os("CONDUCTOR_TEST_BIN_DIR")
+            .expect("build workspace and set CONDUCTOR_TEST_BIN_DIR"),
+    )
+    .join("conductor-runner");
+    let mut child = tokio::process::Command::new(bin)
+        .arg("--file-broker")
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let output = BufReader::new(child.stdout.take().unwrap());
+    runner_send(&mut input, &launch).await;
+    BrokerRunnerFixture {
+        root,
+        store,
+        binding,
+        files,
+        hash,
+        child,
+        input,
+        output,
+        server,
+        hold,
+    }
+}
+struct BrokerRunnerFixture {
+    root: tempfile::TempDir,
+    store: Store,
+    binding: FileBrokerBinding,
+    files: PathBuf,
+    hash: String,
+    child: tokio::process::Child,
+    input: tokio::process::ChildStdin,
+    output: BufReader<tokio::process::ChildStdout>,
+    server: tokio::task::JoinHandle<Result<(), conductor_runtime::BrokerError>>,
+    hold: tokio::sync::watch::Sender<bool>,
+}
+async fn real_broker_runner(renew: bool) {
+    use conductor_runtime::{BrokerRunnerControl, BrokerRunnerEvent, connect_broker_endpoint};
+    let BrokerRunnerFixture {
+        root: _root,
+        store,
+        binding,
+        files,
+        hash,
+        mut child,
+        mut input,
+        mut output,
+        server,
+        hold: _hold,
+    } = runner_fixture(false, 5000).await;
+    let scope = request(&binding).scope;
+    let BrokerRunnerEvent::Ready {
+        launch_sha256,
+        root_identity_sha256,
+        proxy_handoff,
+    } = runner_frame(&mut output).await
+    else {
+        panic!("expected ready");
+    };
+    assert_eq!(launch_sha256, hash);
+    assert_eq!(root_identity_sha256, binding.root_identity_sha256);
+    assert_progress(&store, &binding, 0, 0).await;
+    let now = continuous_millis().unwrap();
+    let first_deadline = now + if renew { 1000 } else { 4000 };
+    runner_send(
+        &mut input,
+        &BrokerRunnerControl::Release {
+            launch_sha256: hash.clone(),
+            lease_deadline_ms: first_deadline,
+        },
+    )
+    .await;
+    if renew {
+        runner_send(
+            &mut input,
+            &BrokerRunnerControl::Renew {
+                launch_sha256: hash.clone(),
+                lease_deadline_ms: now + 4000,
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(continuous_millis().unwrap() > first_deadline);
+    }
+    let (peer, actual_scope) = connect_broker_endpoint(&proxy_handoff, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(actual_scope == scope);
+    let mut peer = BufReader::new(peer);
+    let req = request(&binding);
+    let mut bytes = serde_json::to_vec(&req).unwrap();
+    bytes.push(b'\n');
+    peer.write_all(&bytes).await.unwrap();
+    let mut reply = String::new();
+    tokio::time::timeout(Duration::from_secs(5), peer.read_line(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!reply.is_empty());
+    assert_progress(&store, &binding, 1, 1).await;
+    runner_send(&mut input, &BrokerRunnerControl::Cancel).await;
+    let BrokerRunnerEvent::Stopped {
+        launch_sha256,
+        completed_sequence,
+    } = runner_frame(&mut output).await
+    else {
+        panic!("expected stop");
+    };
+    assert_eq!(launch_sha256, hash);
+    assert_eq!(completed_sequence, Some(1));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(server.await.unwrap().is_ok());
+    assert_late_write_refused(peer, &binding, &files).await;
+    assert_progress(&store, &binding, 1, 1).await;
+}
+async fn assert_late_write_refused(
+    mut peer: BufReader<tokio::net::UnixStream>,
+    binding: &FileBrokerBinding,
+    files: &Path,
+) {
+    let mut late = request(binding);
+    late.sequence = 2;
+    late.operation = BrokerOperation::WriteText {
+        path: "late".into(),
+        expected_sha256: None,
+        contents: "forbidden".into(),
+    };
+    let mut bytes = serde_json::to_vec(&late).unwrap();
+    bytes.push(b'\n');
+    let _ = peer.write_all(&bytes).await;
+    let mut reply = String::new();
+    let read = peer.read_line(&mut reply).await;
+    assert!(matches!(read, Ok(0) | Err(_)));
+    assert!(!files.join("late").exists());
+    assert_eq!(
+        fs::read_to_string(files.join("answer")).unwrap(),
+        "durable answer\n"
+    );
+}
+#[tokio::test]
+async fn journal_actual_runner_pins_root_writes_and_revokes_before_exit() {
+    real_broker_runner(false).await;
+}
+#[tokio::test]
+async fn journal_actual_runner_accepts_timely_renewal_beyond_initial_deadline() {
+    real_broker_runner(true).await;
+}
+
+#[tokio::test]
+async fn journal_actual_runner_refuses_wrong_root_before_ready_or_journal_connection() {
+    let BrokerRunnerFixture {
+        root: _root,
+        store,
+        binding,
+        files,
+        mut child,
+        input,
+        mut output,
+        server,
+        hold: _hold,
+        ..
+    } = runner_fixture(true, 5000).await;
+    drop(input);
+    let mut bytes = String::new();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    assert!(!child.wait().await.unwrap().success());
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    assert_progress(&store, &binding, 0, 0).await;
+    assert!(!files.join("answer").exists());
+}
+#[tokio::test]
+async fn journal_actual_runner_requires_release_and_stops_on_control_or_lease_loss() {
+    use conductor_runtime::{BrokerRunnerControl, BrokerRunnerEvent, connect_broker_endpoint};
+    for mode in [
+        "wrong_release",
+        "expired_release",
+        "eof_before",
+        "eof_after",
+        "heartbeat",
+        "lease",
+        "wrong_renew",
+    ] {
+        let BrokerRunnerFixture {
+            root: _root,
+            store,
+            binding,
+            files,
+            hash,
+            mut child,
+            mut input,
+            mut output,
+            server,
+            hold: _hold,
+        } = runner_fixture(false, if mode == "heartbeat" { 100 } else { 5000 }).await;
+        let BrokerRunnerEvent::Ready { proxy_handoff, .. } = runner_frame(&mut output).await else {
+            panic!("expected ready");
+        };
+        let released = !matches!(mode, "wrong_release" | "expired_release" | "eof_before");
+        if mode != "eof_before" {
+            let now = continuous_millis().unwrap();
+            runner_send(
+                &mut input,
+                &BrokerRunnerControl::Release {
+                    launch_sha256: if mode == "wrong_release" {
+                        "0".repeat(64)
+                    } else {
+                        hash.clone()
+                    },
+                    lease_deadline_ms: if mode == "expired_release" {
+                        now - 1
+                    } else {
+                        now + if mode == "lease" { 100 } else { 4000 }
+                    },
+                },
+            )
+            .await;
+        }
+        if mode == "wrong_renew" {
+            runner_send(
+                &mut input,
+                &BrokerRunnerControl::Renew {
+                    launch_sha256: "0".repeat(64),
+                    lease_deadline_ms: continuous_millis().unwrap() + 4000,
+                },
+            )
+            .await;
+        }
+        let retained = if mode.starts_with("eof") {
+            drop(input);
+            None
+        } else {
+            Some(input)
+        };
+        if released {
+            let BrokerRunnerEvent::Stopped {
+                completed_sequence, ..
+            } = runner_frame(&mut output).await
+            else {
+                panic!("expected stop");
+            };
+            assert_eq!(completed_sequence, Some(0), "{mode}");
+        }
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.success(), released, "{mode}");
+        drop(retained);
+        assert!(server.await.unwrap().is_ok());
+        assert!(
+            connect_broker_endpoint(&proxy_handoff, Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        assert_progress(&store, &binding, 0, 0).await;
+        assert!(!files.join("answer").exists());
+    }
+}

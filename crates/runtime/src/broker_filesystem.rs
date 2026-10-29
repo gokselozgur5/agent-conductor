@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -61,6 +64,15 @@ impl BrokerFilesystem {
         };
         broker.check_root()?;
         Ok(broker)
+    }
+
+    /// Digest the pinned root descriptor and canonical pathname, not its contents.
+    /// The caller still has to exclude external writers and directory movers.
+    /// # Errors
+    /// Refuses a root that no longer names the pinned directory.
+    pub fn root_identity_sha256(&self) -> Result<String, BrokerError> {
+        self.check_root()?;
+        root_digest(&self.root, &self.path)
     }
 
     /// Execute one bounded operation after trusted durable intent admission.
@@ -165,6 +177,12 @@ impl BrokerFilesystem {
         }
     }
 
+    /// Give the independent watchdog deadline control without giving it file access.
+    #[must_use]
+    pub fn lease_control(&self) -> std::sync::Arc<crate::BrokerLeaseDeadline> {
+        self.gate.lease_control()
+    }
+
     /// Close admission immediately; does not acknowledge completion of writes.
     pub fn request_revocation(&self) {
         self.gate.request_revocation();
@@ -264,6 +282,35 @@ fn read(parent: &File, name: &str) -> Result<Option<(String, u32)>, BrokerError>
     let text = String::from_utf8(bytes).map_err(|_| BrokerError::Refused)?;
     // Preserve ordinary executable bits, never setuid/setgid/sticky privileges.
     Ok(Some((text, before.mode() & 0o777)))
+}
+
+/// Pin the identity the trusted launcher expects the broker process to open.
+/// # Errors
+/// Refuses noncanonical roots, links, unavailable directories and replacement.
+pub fn broker_root_identity(root: &Path) -> Result<String, BrokerError> {
+    if !root.is_absolute() || root.canonicalize().map_err(|_| BrokerError::Refused)? != root {
+        return Err(BrokerError::Refused);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(root)
+        .map_err(|_| BrokerError::Refused)?;
+    let pinned = file.metadata().map_err(|_| BrokerError::Refused)?;
+    let current = root.symlink_metadata().map_err(|_| BrokerError::Refused)?;
+    if !current.is_dir() || current.dev() != pinned.dev() || current.ino() != pinned.ino() {
+        return Err(BrokerError::Refused);
+    }
+    root_digest(&file, root)
+}
+fn root_digest(file: &File, path: &Path) -> Result<String, BrokerError> {
+    let meta = file.metadata().map_err(|_| BrokerError::Refused)?;
+    let mut hash = Sha256::new();
+    hash.update(b"conductor-broker-root-v1\0");
+    hash.update(meta.dev().to_be_bytes());
+    hash.update(meta.ino().to_be_bytes());
+    hash.update(path.as_os_str().as_bytes());
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 #[cfg(test)]
