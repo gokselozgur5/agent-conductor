@@ -7,9 +7,9 @@ that scope. Read this current audit before the historical paragraphs in STATUS.
 
 ## Candidate identity
 
-Main at `a58ae7f41fa89f191ab3c969ac3a81185cabd778` includes merged PR #109
+Main at `7f24b10c3432867779681e85939ddc6f670a550a` includes merged PR #113
 and the preceding broker, auxiliary and native-observation changes. Schema is 29.
-PR #109 CI and its post-merge run passed on macOS and Linux. These results cover
+PR #113 CI and its post-merge run passed on macOS and Linux. These results cover
 the configured CI checks, not Linux native sandbox support or full acceptance.
 Delivered bundles, existing runtimes and the separate endurance fixture retain
 their own pinned versions; repository merges do not upgrade them.

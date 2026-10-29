@@ -56,22 +56,33 @@ async fn run_owned_codex(delay: u64) {
     tokio::time::sleep(Duration::from_millis(500)).await;
     provider.start_kill().unwrap();
     provider.wait().await.unwrap();
-    fs::write(evidence.join("outcome.json"), serde_json::to_vec_pretty(&serde_json::json!({
-        "process": outcome.process.as_ref().map(|p| p.exit_code).map_err(ToString::to_string),
-        "broker": outcome.broker.as_ref().map(|_| "verified_closed").map_err(ToString::to_string),
-    })).unwrap()).unwrap();
-    let output = outcome.process.expect("actual vendor process failed");
+    fs::write(
+        evidence.join("outcome.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "process": outcome.output().exit_code,
+            "broker": "verified_closed",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = outcome.output();
     fs::write(evidence.join("stdout.log"), &output.stdout).unwrap();
     fs::write(evidence.join("stderr.log"), &output.stderr).unwrap();
     assert_eq!(output.exit_code, Some(0));
-    let candidate = conductor_runtime::interpret_vendor_output(&packet, &output)
-        .expect("successful broker vendor must yield a bounded candidate");
+    let candidate = outcome.candidate();
+    assert_eq!(candidate.packet_sha256, packet.sha256().unwrap());
+    assert!(outcome.binding() == &setup.binding);
+    assert!(matches!(
+        outcome.receipt().observation,
+        conductor_runtime::BrokerShutdownObservation::Revoked {
+            completed_sequence: 2
+        }
+    ));
     assert_eq!(candidate.text, "Fixture done.");
     assert!(
         !candidate.file_only_tools,
         "broker output is not a Claude fence"
     );
-    assert!(outcome.broker.is_ok());
     assert_owned_process_observations(&home);
     if delay != 0 {
         let proof: serde_json::Value =
@@ -240,13 +251,13 @@ async fn drive_owned_codex(
     service: &PersistentControlService<FixedClock>,
     session: crate::NativeBrokerSession,
     prepared: conductor_runtime::PreparedBrokerVendor,
-) -> crate::BrokerVendorOutcome {
+) -> crate::BrokerCandidate {
     // Advance the injected service clock from real elapsed host time. A frozen
     // test clock would manufacture lease extensions on every authority refresh.
     let started = continuous_millis().unwrap();
     let operation = tokio::time::timeout(
         Duration::from_secs(65),
-        Box::pin(service.run_broker_vendor(
+        Box::pin(service.run_broker_candidate(
             session,
             prepared,
             broker_owner_audit("owned-codex-close"),
