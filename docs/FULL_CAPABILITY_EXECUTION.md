@@ -137,3 +137,15 @@ Staging authorizes byte delivery to the explicitly selected destination under th
 receiver's OS permissions. It does not acknowledge execution, grant a lease,
 certify a result, or establish fencing. Normal daemon plan selection and the return
 path for candidate source verification remain separate integration work.
+
+Candidate return uses two explicit operations. `capture_account_candidate` asks the
+worker to create a new snapshot from a selected source and baseline inventory,
+binding the response to the selected packet digest. Its receipt is a peer claim
+about captured bytes, not evidence of process exit, fencing or acceptance.
+`fetch_account_snapshot` then imports that separately selected snapshot digest into
+a new coordinator-owned directory. The worker revalidates manifest and file bytes
+while exporting; changed content cannot publish a successful local manifest.
+
+The coordinator must establish execution/lease eligibility separately, then run
+required checks and independent review against the imported copy. These transport
+operations do not themselves advance task state or wire normal daemon dispatch.

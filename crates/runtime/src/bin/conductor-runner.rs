@@ -190,6 +190,29 @@ async fn dispatch_account_request(
         .await
         .map_err(|_| ());
     }
+    if let Ok(request) = serde_json::from_slice::<conductor_runtime::AccountCaptureRequest>(&bytes)
+    {
+        if !reader.buffer().is_empty() {
+            return Err(());
+        }
+        return conductor_runtime::serve_account_capture(reader.into_inner(), request, &digest)
+            .await
+            .map_err(|_| ());
+    }
+    if let Ok(request) =
+        serde_json::from_slice::<conductor_runtime::AccountSnapshotFetchRequest>(&bytes)
+    {
+        if !reader.buffer().is_empty() {
+            return Err(());
+        }
+        return conductor_runtime::serve_account_snapshot_fetch(
+            reader.into_inner(),
+            request,
+            &digest,
+        )
+        .await
+        .map_err(|_| ());
+    }
     // BufReader can have read payload/control bytes past the JSON newline.
     // Replay that exact prefix into the existing native protocol, losing none.
     bytes.extend_from_slice(reader.buffer());

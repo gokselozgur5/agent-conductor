@@ -104,13 +104,13 @@ pub async fn receive_account_snapshot(
 
 // A fresh timeout on every read would allow a slow peer to retain a worker
 // indefinitely. All socket I/O shares one absolute transfer deadline.
-struct DeadlineStream {
+pub(crate) struct DeadlineStream {
     stream: UnixStream,
     prefetched: io::Cursor<Vec<u8>>,
     deadline: Instant,
 }
 impl DeadlineStream {
-    fn new(
+    pub(crate) fn new(
         stream: tokio::net::UnixStream,
         prefetched: Vec<u8>,
     ) -> Result<Self, AccountSnapshotError> {

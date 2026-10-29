@@ -5,6 +5,10 @@ mod account_channel;
 mod account_snapshot;
 #[cfg(unix)]
 pub use account_snapshot::*;
+#[cfg(unix)]
+mod account_capture;
+#[cfg(unix)]
+pub use account_capture::*;
 mod contract;
 #[cfg(unix)]
 pub use account_channel::*;
