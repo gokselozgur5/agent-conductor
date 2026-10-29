@@ -17,7 +17,7 @@ never substitutes for a successful check or verdict. See
 [AUXILIARY_PROCESS_OWNERSHIP.md](AUXILIARY_PROCESS_OWNERSHIP.md) for the contracts,
 fixtures and precise refusal paths.
 
-The schema-25 implementation passes 338 local workspace Rust tests with the recovery
+The schema-25 implementation passes 339 local workspace Rust tests with the recovery
 diagnostic, strict Clippy, formatting and build checks. The earlier schema-25
 implementation passed 73 Python tests; this Rust-only diagnostic did not rerun
 that unchanged Python suite. Positive native boot changes
@@ -32,6 +32,11 @@ publication. Nonlegacy pending ownership from another daemon generation is
 reported by a bounded `auxiliary_recovery_pending` invariant diagnostic, exposed
 through the authenticated board API and recovery panel. Two DOM tests and an
 isolated native HTTP/CLI restart probe pass; visual browser acceptance is separate.
+
+The [auxiliary fault matrix](AUXILIARY_FAULT_MATRIX.md) identifies exact tested
+boundaries and remaining gaps, separating abrupt process death from cancellation
+and controlled daemon relays. Admission now has abrupt child-process coverage on
+both sides of its transaction for both roles.
 
 Next acceptance work: complete the remaining abrupt-death matrix and operator
 recovery reporting; finish physical host recovery, native

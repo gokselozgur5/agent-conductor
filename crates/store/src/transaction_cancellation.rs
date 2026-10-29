@@ -701,3 +701,146 @@ async fn cancel_auxiliary_origin_admission_observation_and_settlement() {
         );
     }
 }
+
+#[tokio::test]
+async fn auxiliary_admission_survives_process_death_on_both_sides() {
+    const MODE: &str = "CONDUCTOR_AUXILIARY_CRASH_MODE";
+    const CONTROL: &str = "CONDUCTOR_AUXILIARY_CRASH_CONTROL";
+    if let Ok(mode) = std::env::var(MODE) {
+        let control = std::path::PathBuf::from(std::env::var(CONTROL).unwrap());
+        crash_auxiliary_admission(&mode, &control).await;
+    }
+    for mode in [
+        "check_before_commit",
+        "verifier_before_commit",
+        "check_after_commit",
+        "verifier_after_commit",
+    ] {
+        let control = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "transaction_cancellation::auxiliary_admission_survives_process_death_on_both_sides", "--nocapture"])
+            .env(MODE, mode).env(CONTROL, control.path()).env("TMPDIR", control.path())
+            .spawn().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("crash fixture timed out: {mode}");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(status.code(), Some(77), "{mode}");
+        let path = std::fs::read_to_string(control.path().join("database")).unwrap();
+        let store = Store::open(path).await.unwrap();
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(store.readers())
+            .await
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        if mode.ends_with("before_commit") {
+            let before: Vec<(String, String)> =
+                serde_json::from_slice(&std::fs::read(control.path().join("before.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                snapshot(&mut *store.inner.writer.lock().await).await,
+                before
+            );
+        } else {
+            let input: AuxiliaryPreparation =
+                serde_json::from_slice(&std::fs::read(control.path().join("input.json")).unwrap())
+                    .unwrap();
+            let row: (String, String, i64, Option<String>, Option<String>) = sqlx::query_as("SELECT preparation_json,state,release_recorded,process_json,launch_binding_json FROM auxiliary_invocations WHERE invocation_id=?")
+                .bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<AuxiliaryPreparation>(&row.0).unwrap(),
+                input
+            );
+            assert_eq!(
+                (row.1, row.2, row.3, row.4),
+                ("pending".into(), 0, None, None)
+            );
+            for table in ["auxiliary_host_evidence", "auxiliary_invocations"] {
+                let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                    .fetch_one(store.readers())
+                    .await
+                    .unwrap();
+                assert_eq!(count, 1);
+            }
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE id='crash-admission'")
+                    .fetch_one(store.readers())
+                    .await
+                    .unwrap();
+            assert_eq!(count, 1);
+            let host: AuxiliaryHostObservation =
+                serde_json::from_slice(&std::fs::read(control.path().join("host.json")).unwrap())
+                    .unwrap();
+            let stored: (String, String, Option<String>) = sqlx::query_as(
+                "SELECT kind,host_json,ownership_json FROM auxiliary_host_evidence WHERE invocation_id=?",
+            ).bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+            assert_eq!(stored.0, "admission");
+            assert_eq!(
+                serde_json::from_str::<AuxiliaryHostObservation>(&stored.1).unwrap(),
+                host
+            );
+            assert!(stored.2.is_none());
+            assert!(store.has_pending_auxiliary("task").await.unwrap());
+        }
+    }
+}
+
+async fn crash_auxiliary_admission(mode: &str, control: &std::path::Path) -> ! {
+    let (root, store, mut input, host) = auxiliary_origin_fixture("admit").await;
+    if mode.starts_with("verifier") {
+        input.kind = AuxiliaryKind::Verifier;
+    }
+    let before = snapshot(&mut *store.inner.writer.lock().await).await;
+    std::fs::write(
+        control.join("before.json"),
+        serde_json::to_vec(&before).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        control.join("database"),
+        root.path().join("state.sqlite3").to_str().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        control.join("input.json"),
+        serde_json::to_vec(&input).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        control.join("host.json"),
+        serde_json::to_vec(&host).unwrap(),
+    )
+    .unwrap();
+    if mode.ends_with("before_commit") {
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_update_hook(|update| {
+                if update.table == "audit_events" {
+                    // Exit in the SQLite worker without unwinding or closing its transaction.
+                    std::process::exit(77);
+                }
+            });
+    }
+    assert!(
+        store
+            .prepare_auxiliary_with_host(&input, &host, execution_audit("crash-admission"))
+            .await
+            .unwrap()
+    );
+    assert!(mode.ends_with("after_commit"));
+    std::process::exit(77);
+}
