@@ -2,7 +2,7 @@
 use crate::{ProcessSpec, SandboxError};
 use nix::{
     fcntl::{FcntlArg, FdFlag, SealFlag, fcntl},
-    sys::memfd::{MemFdCreateFlag, memfd_create},
+    sys::memfd::{MFdFlags, memfd_create},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -151,10 +151,7 @@ fn filter() -> Result<Vec<u8>, SandboxError> {
 /// There is no unrestricted execution fallback.
 pub fn exec_linux_check(request: &LinuxCheckRequest) -> Result<(), Box<dyn std::error::Error>> {
     request.validate()?;
-    let fd = memfd_create(
-        c"conductor-check-seccomp",
-        MemFdCreateFlag::MFD_ALLOW_SEALING,
-    )?;
+    let fd = memfd_create(c"conductor-check-seccomp", MFdFlags::MFD_ALLOW_SEALING)?;
     let mut program = File::from(fd);
     program.write_all(&filter()?)?;
     program.rewind()?;
