@@ -67,10 +67,42 @@ impl Store {
         input: &AuxiliaryPreparation,
         audit: EffectAudit<'_>,
     ) -> Result<bool, StoreError> {
+        self.prepare_auxiliary_internal(input, None, audit).await
+    }
+
+    /// Commits native host evidence together with the pre-effect invocation.
+    /// The trusted caller obtains native identity; replay never backfills evidence.
+    /// # Errors
+    /// Refuses missing/rebound authority, generation mismatch and changed replay.
+    pub async fn prepare_auxiliary_with_host(
+        &self,
+        input: &AuxiliaryPreparation,
+        host: &crate::AuxiliaryHostObservation,
+        audit: EffectAudit<'_>,
+    ) -> Result<bool, StoreError> {
+        self.prepare_auxiliary_internal(input, Some(host), audit)
+            .await
+    }
+
+    async fn prepare_auxiliary_internal(
+        &self,
+        input: &AuxiliaryPreparation,
+        host: Option<&crate::AuxiliaryHostObservation>,
+        audit: EffectAudit<'_>,
+    ) -> Result<bool, StoreError> {
         input.validate()?;
         let encoded = serde_json::to_string(input).map_err(|_| invalid())?;
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin().await?;
+        let host_json = if let Some(host) = host {
+            crate::auxiliary_host::require_owner(&mut tx, host).await?;
+            if host.generation != input.boot_generation {
+                return Err(invalid());
+            }
+            Some(serde_json::to_string(host).map_err(|_| invalid())?)
+        } else {
+            None
+        };
         if let Some(existing) = sqlx::query_scalar::<_, String>(
             "SELECT preparation_json FROM auxiliary_invocations WHERE invocation_id=?",
         )
@@ -80,6 +112,12 @@ impl Store {
         {
             if existing != encoded {
                 return Err(StoreError::IdempotencyCollision);
+            }
+            if let Some(expected) = &host_json {
+                let existing:Option<String>=sqlx::query_scalar("SELECT host_json FROM auxiliary_host_evidence WHERE invocation_id=? AND kind='admission'").bind(&input.invocation_id).fetch_optional(&mut *tx).await?;
+                if existing.as_ref() != Some(expected) {
+                    return Err(StoreError::IdempotencyCollision);
+                }
             }
             tx.commit().await?;
             return Ok(false);
@@ -98,6 +136,10 @@ impl Store {
             .bind(audit.now_ms)
             .execute(&mut *tx)
             .await?;
+        if let Some(host_json) = host_json {
+            sqlx::query("INSERT INTO auxiliary_host_evidence(invocation_id,kind,host_json) VALUES(?,'admission',?)")
+                .bind(&input.invocation_id).bind(host_json).execute(&mut *tx).await?;
+        }
         append_audit(&mut tx, input, "auxiliary.prepared", &audit).await?;
         tx.commit().await?;
         Ok(true)

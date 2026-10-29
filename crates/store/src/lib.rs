@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 mod auxiliary;
+mod auxiliary_host;
 mod legacy_auxiliary_host;
 pub use legacy_auxiliary_host::AuxiliaryHostObservation;
 mod auxiliary_launch;

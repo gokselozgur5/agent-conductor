@@ -3,7 +3,7 @@ use crate::{AuxiliaryPreparation, Store, StoreError};
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, Row, SqliteConnection};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuxiliaryHostObservation {
     pub authority_id: String,
@@ -13,7 +13,7 @@ pub struct AuxiliaryHostObservation {
     pub boot_id: String,
 }
 impl AuxiliaryHostObservation {
-    fn validate(&self) -> Result<(), StoreError> {
+    pub(crate) fn validate(&self) -> Result<(), StoreError> {
         if self.generation <= 0
             || !matches!(self.platform.as_str(), "macos" | "linux")
             || [&self.authority_id, &self.host_id, &self.boot_id]

@@ -3604,6 +3604,7 @@ mod effect_tests {
             .begin_auxiliary(&task, AuxiliaryKind::Check, &source, &work, b"preack-test")
             .await
             .unwrap();
+        assert_native_auxiliary_origin(store, &input).await;
         let executable = std::path::PathBuf::from("/bin/sh").canonicalize().unwrap();
         let hash = |p: &std::path::Path| format!("{:x}", Sha256::digest(fs::read(p).unwrap()));
         let launch = AuxiliaryLaunch {
@@ -3656,6 +3657,30 @@ mod effect_tests {
         .await
         .unwrap();
         assert_paged_auxiliary_recovery(service, store, root, &input, &receipt, &work).await;
+    }
+
+    async fn assert_native_auxiliary_origin(
+        store: &Store,
+        input: &agent_conductor_store::AuxiliaryPreparation,
+    ) {
+        let row:(String,String,Option<String>)=sqlx::query_as("SELECT kind,host_json,ownership_json FROM auxiliary_host_evidence WHERE invocation_id=?").bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+        assert_eq!(row.0, "admission");
+        assert!(row.2.is_none());
+        let host: agent_conductor_store::AuxiliaryHostObservation =
+            serde_json::from_str(&row.1).unwrap();
+        let native = conductor_runtime::HostEpoch::current().await.unwrap();
+        assert_eq!(host.generation, input.boot_generation);
+        assert_eq!(host.authority_id, "a".repeat(64));
+        assert_eq!(
+            (host.platform, host.host_id, host.boot_id),
+            (native.platform, native.host_id, native.boot_id)
+        );
+        let state:(Option<String>,Option<String>,i64)=sqlx::query_as("SELECT launch_binding_json,process_json,release_recorded FROM auxiliary_invocations WHERE invocation_id=?").bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+        assert_eq!(
+            state,
+            (None, None, 0),
+            "native host must be durable before launch binding or Release"
+        );
     }
 
     async fn assert_paged_auxiliary_recovery(

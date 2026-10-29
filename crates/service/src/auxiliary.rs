@@ -80,6 +80,26 @@ impl<C: Clock> PersistentControlService<C> {
         .await
     }
 
+    pub(super) async fn current_auxiliary_host(
+        &self,
+    ) -> Result<agent_conductor_store::AuxiliaryHostObservation, StoreError> {
+        let (authority, generation) = self.store.runtime_authority().await?;
+        if generation != self.boot_generation {
+            return Err(invalid());
+        }
+        let authority_id = authority.ok_or_else(invalid)?;
+        let native = conductor_runtime::HostEpoch::current()
+            .await
+            .map_err(|_| invalid())?;
+        Ok(agent_conductor_store::AuxiliaryHostObservation {
+            authority_id,
+            generation: i64::try_from(generation).map_err(|_| invalid())?,
+            platform: native.platform,
+            host_id: native.host_id,
+            boot_id: native.boot_id,
+        })
+    }
+
     pub(super) async fn begin_auxiliary(
         &self,
         task: &Task,
@@ -106,11 +126,13 @@ impl<C: Clock> PersistentControlService<C> {
             definition_sha256: format!("{:x}", Sha256::digest(definition)),
             workspace: workspace.to_str().ok_or_else(invalid)?.into(),
         };
+        let host = self.current_auxiliary_host().await?;
         let id = Uuid::now_v7().to_string();
         if !self
             .store
-            .prepare_auxiliary_once(
+            .prepare_auxiliary_with_host(
                 &input,
+                &host,
                 EffectAudit {
                     id: &id,
                     actor_id: "conductor-runtime",

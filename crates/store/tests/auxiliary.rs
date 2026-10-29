@@ -958,3 +958,327 @@ async fn pending_recovery_remains_bounded_without_refusing_large_inventory() {
             .unwrap();
     assert_eq!(count, 130);
 }
+
+fn origin_host(generation: i64, boot: char) -> agent_conductor_store::AuxiliaryHostObservation {
+    let p = process();
+    agent_conductor_store::AuxiliaryHostObservation {
+        authority_id: binding().authority_id,
+        generation,
+        platform: p.platform,
+        host_id: p.host_id,
+        boot_id: boot.to_string().repeat(64),
+    }
+}
+async fn bind_origin_authority(c: &mut SqliteConnection) {
+    sqlx::query("UPDATE recovery_authority SET authority_id=?")
+        .bind(binding().authority_id)
+        .execute(c)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn native_origin_admission_is_atomic_and_replay_cannot_backfill_or_rebind() {
+    let (_dir, store, input, mut c) = fixture().await;
+    bind_origin_authority(&mut c).await;
+    c.execute("CREATE TRIGGER reject_origin BEFORE INSERT ON auxiliary_host_evidence BEGIN SELECT RAISE(ABORT,'injected'); END").await.unwrap();
+    assert!(
+        store
+            .prepare_auxiliary_with_host(&input, &origin_host(1, 'b'), audit("fail"))
+            .await
+            .is_err()
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auxiliary_invocations")
+        .fetch_one(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    c.execute("DROP TRIGGER reject_origin").await.unwrap();
+    assert!(
+        store
+            .prepare_auxiliary_with_host(&input, &origin_host(1, 'b'), audit("prepare"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .prepare_auxiliary_with_host(&input, &origin_host(1, 'b'), audit("replay"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .prepare_auxiliary_with_host(&input, &origin_host(1, 'c'), audit("changed"))
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .prepare_auxiliary_with_host(&input, &origin_host(2, 'b'), audit("stale"))
+            .await
+            .is_err()
+    );
+    let (_dir, store, input, mut c) = fixture().await;
+    bind_origin_authority(&mut c).await;
+    store
+        .prepare_auxiliary_once(&input, audit("legacy"))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .prepare_auxiliary_with_host(&input, &origin_host(1, 'b'), audit("late"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn origin_boot_settlement_handles_each_missing_receipt_boundary_without_a_result() {
+    for stage in 0..3 {
+        let (_dir, store, input, mut c) = fixture().await;
+        bind_origin_authority(&mut c).await;
+        let aggregate = store.task("task").await.unwrap().unwrap().aggregate_json;
+        store
+            .prepare_auxiliary_with_host(&input, &origin_host(1, 'b'), audit("prepare"))
+            .await
+            .unwrap();
+        if stage >= 1 {
+            store
+                .bind_auxiliary_launch(&input, &binding(), audit("bind"))
+                .await
+                .unwrap();
+        }
+        if stage == 2 {
+            store
+                .authorize_auxiliary_release(&input, &binding(), &process(), audit("release"))
+                .await
+                .unwrap();
+        }
+        store
+            .start_reserved_runtime(0, &binding().authority_id, 2)
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .reconcile_auxiliary_host(&input, &origin_host(2, 'b'), audit("sameboot"))
+                .await
+                .unwrap()
+        );
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        store
+            .start_reserved_runtime(0, &binding().authority_id, 3)
+            .await
+            .unwrap();
+        c.execute("CREATE TRIGGER reject_host_settle BEFORE INSERT ON audit_events WHEN NEW.kind='auxiliary.host_settled' BEGIN SELECT RAISE(ABORT,'injected'); END").await.unwrap();
+        assert!(
+            store
+                .reconcile_auxiliary_host(&input, &origin_host(3, 'c'), audit("rollback"))
+                .await
+                .is_err()
+        );
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        c.execute("DROP TRIGGER reject_host_settle").await.unwrap();
+        assert!(
+            store
+                .reconcile_auxiliary_host(&input, &origin_host(3, 'c'), audit("settle"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .reconcile_auxiliary_host(&input, &origin_host(3, 'c'), audit("replay"))
+                .await
+                .unwrap()
+        );
+        assert!(!store.has_pending_auxiliary("task").await.unwrap());
+        let row: (Option<String>, i64, String) = sqlx::query_as(
+            "SELECT process_json,release_recorded,settlement_json FROM auxiliary_invocations",
+        )
+        .fetch_one(&mut c)
+        .await
+        .unwrap();
+        assert_eq!(row.0.is_some(), stage == 2);
+        assert_eq!(row.1, i64::from(stage == 2));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&row.2).unwrap()["observation"],
+            "native_host_boot_transition"
+        );
+        assert_eq!(
+            store.task("task").await.unwrap().unwrap().aggregate_json,
+            aggregate
+        );
+        assert!(
+            store
+                .persist_auxiliary_publication(&input, &publication(&input, "not-a-result"))
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn historical_origin_absence_requires_a_witness_unless_process_boot_is_recorded() {
+    for released in [false, true] {
+        let (_dir, store, input, mut c) = fixture().await;
+        bind_origin_authority(&mut c).await;
+        store
+            .prepare_auxiliary_once(&input, audit("old"))
+            .await
+            .unwrap();
+        store
+            .bind_auxiliary_launch(&input, &binding(), audit("bind"))
+            .await
+            .unwrap();
+        if released {
+            store
+                .authorize_auxiliary_release(&input, &binding(), &process(), audit("release"))
+                .await
+                .unwrap();
+        }
+        store
+            .start_reserved_runtime(0, &binding().authority_id, 2)
+            .await
+            .unwrap();
+        if !released {
+            c.execute("CREATE TRIGGER reject_observation BEFORE INSERT ON audit_events WHEN NEW.kind='auxiliary.host_observed' BEGIN SELECT RAISE(ABORT,'injected'); END").await.unwrap();
+            assert!(
+                store
+                    .reconcile_auxiliary_host(
+                        &input,
+                        &origin_host(2, 'c'),
+                        audit("fail-observation")
+                    )
+                    .await
+                    .is_err()
+            );
+            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auxiliary_host_evidence")
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+            assert_eq!(n, 0);
+            c.execute("DROP TRIGGER reject_observation").await.unwrap();
+        }
+        assert_eq!(
+            store
+                .reconcile_auxiliary_host(&input, &origin_host(2, 'c'), audit("first"))
+                .await
+                .unwrap(),
+            released
+        );
+        if !released {
+            assert!(store.has_pending_auxiliary("task").await.unwrap());
+            assert!(
+                !store
+                    .reconcile_auxiliary_host(&input, &origin_host(2, 'c'), audit("repeat"))
+                    .await
+                    .unwrap()
+            );
+            store
+                .start_reserved_runtime(0, &binding().authority_id, 3)
+                .await
+                .unwrap();
+            assert!(
+                !store
+                    .reconcile_auxiliary_host(&input, &origin_host(3, 'c'), audit("daemon-restart"))
+                    .await
+                    .unwrap()
+            );
+            store
+                .start_reserved_runtime(0, &binding().authority_id, 4)
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .reconcile_auxiliary_host(&input, &origin_host(4, 'd'), audit("later-boot"))
+                    .await
+                    .unwrap()
+            );
+        }
+        let kind: String = sqlx::query_scalar("SELECT kind FROM auxiliary_host_evidence")
+            .fetch_one(&mut c)
+            .await
+            .unwrap();
+        assert_eq!(
+            kind,
+            if released {
+                "recorded_process"
+            } else {
+                "recovery_observation"
+            }
+        );
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE kind='auxiliary.host_settled'",
+        )
+        .fetch_one(&mut c)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+    }
+}
+
+#[tokio::test]
+async fn origin_settlement_refuses_foreign_changed_and_contradictory_evidence() {
+    for case in [
+        "host",
+        "authority",
+        "generation",
+        "process_boot",
+        "preparation",
+        "binding",
+        "release",
+    ] {
+        let (_dir, store, input, mut c) = fixture().await;
+        bind_origin_authority(&mut c).await;
+        store
+            .prepare_auxiliary_with_host(&input, &origin_host(1, 'b'), audit("prepare"))
+            .await
+            .unwrap();
+        store
+            .bind_auxiliary_launch(&input, &binding(), audit("bind"))
+            .await
+            .unwrap();
+        store
+            .authorize_auxiliary_release(&input, &binding(), &process(), audit("release"))
+            .await
+            .unwrap();
+        store
+            .start_reserved_runtime(0, &binding().authority_id, 2)
+            .await
+            .unwrap();
+        let mut current = origin_host(2, 'c');
+        match case {
+            "host" => current.host_id = "f".repeat(64),
+            "authority" => current.authority_id = "f".repeat(64),
+            "generation" => current.generation = 1,
+            "process_boot" => {
+                sqlx::query("UPDATE auxiliary_invocations SET process_json=json_set(process_json,'$.boot_id',?)").bind("d".repeat(64)).execute(&mut c).await.unwrap();
+            }
+            "preparation" => {
+                c.execute("UPDATE auxiliary_invocations SET preparation_json=json_set(preparation_json,'$.workspace','/changed')").await.unwrap();
+            }
+            "binding" => {
+                sqlx::query("UPDATE auxiliary_invocations SET launch_binding_json=json_set(launch_binding_json,'$.authority_id',?)").bind("f".repeat(64)).execute(&mut c).await.unwrap();
+            }
+            "release" => {
+                c.execute("UPDATE auxiliary_invocations SET release_recorded=0")
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            store
+                .reconcile_auxiliary_host(&input, &current, audit("refuse"))
+                .await
+                .is_err()
+        );
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE kind='auxiliary.host_settled'",
+        )
+        .fetch_one(&mut c)
+        .await
+        .unwrap();
+        assert_eq!(n, 0);
+    }
+}

@@ -576,3 +576,128 @@ async fn cancel_legacy_host_witness_and_settlement_rolls_back_all_tables() {
         );
     }
 }
+
+async fn auxiliary_origin_fixture(
+    mode: &str,
+) -> (
+    tempfile::TempDir,
+    Store,
+    AuxiliaryPreparation,
+    AuxiliaryHostObservation,
+) {
+    let (root, store, _) = fixture(Owner::Update).await;
+    store
+        .start_reserved_runtime(0, &"a".repeat(64), 2)
+        .await
+        .unwrap();
+    let source = format!("snapshot:{}", "b".repeat(64));
+    {
+        let mut c = store.inner.writer.lock().await;
+        c.execute("UPDATE executions SET state='fenced';UPDATE tasks SET state='verifying'")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET aggregate_json=?")
+            .bind(
+                serde_json::json!({"attempt":{"id":"attempt"},"verification":{"source":source}})
+                    .to_string(),
+            )
+            .execute(&mut *c)
+            .await
+            .unwrap();
+    }
+    let input = AuxiliaryPreparation {
+        invocation_id: uuid::Uuid::now_v7().to_string(),
+        task_id: "task".into(),
+        execution_token: "token".into(),
+        attempt_id: "attempt".into(),
+        task_version: 2,
+        boot_generation: 2,
+        kind: AuxiliaryKind::Check,
+        source,
+        definition_sha256: "c".repeat(64),
+        workspace: "/workspace".into(),
+    };
+    let mut host = AuxiliaryHostObservation {
+        authority_id: "a".repeat(64),
+        generation: 2,
+        platform: "macos".into(),
+        host_id: "d".repeat(64),
+        boot_id: "e".repeat(64),
+    };
+    if mode != "admit" {
+        if mode == "settle" {
+            store
+                .prepare_auxiliary_with_host(&input, &host, execution_audit("origin-prepare"))
+                .await
+                .unwrap();
+        } else {
+            store
+                .prepare_auxiliary_once(&input, execution_audit("origin-prepare"))
+                .await
+                .unwrap();
+        }
+        store
+            .start_reserved_runtime(0, &host.authority_id, 3)
+            .await
+            .unwrap();
+        host.generation = 3;
+        host.boot_id = "f".repeat(64);
+    }
+    (root, store, input, host)
+}
+
+#[tokio::test]
+async fn cancel_auxiliary_origin_admission_observation_and_settlement() {
+    for mode in ["admit", "observe", "settle"] {
+        let (_root, store, input, host) = auxiliary_origin_fixture(mode).await;
+        let before = snapshot(&mut *store.inner.writer.lock().await).await;
+        let written = Arc::new(AtomicBool::new(false));
+        let observed = written.clone();
+        let (release, wait) = mpsc::channel();
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_update_hook(move |update| {
+                if update.table == "audit_events" {
+                    observed.store(true, Ordering::SeqCst);
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+            });
+        let owned = store.clone();
+        let request = tokio::spawn(async move {
+            if mode == "admit" {
+                owned
+                    .prepare_auxiliary_with_host(&input, &host, execution_audit("cancelled"))
+                    .await
+            } else {
+                owned
+                    .reconcile_auxiliary_host(&input, &host, execution_audit("cancelled"))
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !written.load(Ordering::SeqCst) {
+                assert!(!request.is_finished());
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        let mut c = store.inner.writer.lock().await;
+        c.lock_handle().await.unwrap().remove_update_hook();
+        assert_eq!(snapshot(&mut c).await, before);
+        drop(c);
+        assert_eq!(
+            snapshot(&mut store.readers().acquire().await.unwrap()).await,
+            before
+        );
+    }
+}

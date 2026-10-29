@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from conductor import ConductorError, ConductorStore
 
@@ -121,7 +123,11 @@ class StoreTest(unittest.TestCase):
         project = self.store.register_project(project_root)
         self.store.create_task("resume me", project_id=project["id"])
 
-        context = self.store.project_context(project["id"])
+        # Temporary directories may live inside a developer's outer repository.
+        # This fixture deliberately starts without Git ownership of its own.
+        ceiling = {"GIT_CEILING_DIRECTORIES": str(project_root.parent.resolve())}
+        with patch.dict("os.environ", ceiling):
+            context = self.store.project_context(project["id"])
         canonical_root = project_root.resolve()
 
         self.assertIn(
@@ -136,6 +142,9 @@ class StoreTest(unittest.TestCase):
         )
         self.assertFalse(context["git"]["available"])
         self.assertEqual(context["board"]["queued"][0]["title"], "resume me")
+        subprocess.run(["git", "init", "--quiet", str(project_root)], check=True)
+        with patch.dict("os.environ", ceiling):
+            self.assertTrue(self.store.project_context(project["id"])["git"]["available"])
 
     def test_event_delivery_is_idempotent_and_does_not_echo_source(self) -> None:
         self.store.subscribe("worker", "file.*", "src/*")

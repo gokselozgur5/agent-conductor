@@ -275,6 +275,19 @@ impl<C: Clock> PersistentControlService<C> {
         // each other's sweep. Cursor movement is observation, never settlement.
         let mut cursor = self.auxiliary_recovery_cursor.lock().await;
         let page = self.store.pending_auxiliary_page(cursor.as_deref()).await?;
+        let host = if page.iter().any(|row| {
+            row.invocation.as_ref().is_ok_and(|v| {
+                u64::try_from(v.preparation.boot_generation).is_ok_and(|g| g < self.boot_generation)
+            })
+        }) {
+            match self.current_auxiliary_host().await {
+                Ok(host) => Some(host),
+                Err(StoreError::Integrity(_)) => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
         *cursor = if page.len() == 128 {
             page.last().map(|row| row.invocation_id.clone())
         } else {
@@ -300,11 +313,28 @@ impl<C: Clock> PersistentControlService<C> {
                     self.accept_auxiliary_unreleased_receipt(&preparation, &binding)
                         .await
                 }
-                _ => continue,
+                _ => Err(invalid()),
             };
             match result {
                 Ok(()) => count += 1,
-                Err(StoreError::Integrity(_)) => {}
+                Err(StoreError::Integrity(_)) => {
+                    if let Some(host) = &host {
+                        let id = Uuid::now_v7().to_string();
+                        match self
+                            .store
+                            .reconcile_auxiliary_host(
+                                &preparation,
+                                host,
+                                self.auxiliary_audit(&id, &preparation),
+                            )
+                            .await
+                        {
+                            Ok(settled) => count += usize::from(settled),
+                            Err(StoreError::Integrity(_)) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
                 Err(error) => return Err(error),
             }
         }

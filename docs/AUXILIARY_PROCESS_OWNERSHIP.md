@@ -213,3 +213,34 @@ Tests retain a 130-row inventory, malformed/rebound/oversized first rows and
 page boundaries. A real supervisor pre-ACK receipt is recovered after 128 invalid
 rows; non-private proof and stale authority still refuse, service clones share
 the sweep, and the invalid rows remain pending after the healthy receipt settles.
+
+### Native origin evidence for missing receipts
+
+Schema 25 adds auxiliary host evidence without backfilling historical identity.
+Before capture, launch binding or spawn, the service reads native host identity
+and commits it atomically with the invocation under the current authority and
+generation. A changed or late replay cannot invent admission evidence.
+
+Receipt recovery still prefers the private supervisor receipt. If it is absent
+or invalid for an older invocation, native host reconciliation may establish
+settlement after a verified same-host boot transition under the same authority.
+Admission evidence covers crashes before launch binding, before acknowledgment,
+and after Release without a terminal receipt. Persisted launch/process metadata
+must remain internally consistent; an acknowledged process must match the
+admission boot. Task state, source, missing PID/ACK fields and result records are
+not rewritten by host settlement.
+
+For older records without admission evidence, an already acknowledged process
+with matching launch authority supplies its recorded native boot. Without that
+process evidence, the runtime records a first recovery observation and an exact
+bounded ownership snapshot. That observation alone never settles anything: a
+later native boot and unchanged snapshot are required. Legacy markers continue
+through their separate schema 24 path. Foreign authority/host, stale generation,
+changed scope and contradictory release/process state refuse settlement.
+
+Observation/audit/settlement are cancellation-safe transactions. Host settlement
+has its own audit and proof type; it cannot pass the native result publication
+gate, which still requires a released invocation and owned-group receipt.
+Synthetic positive transitions test this logic; physical reboot acceptance is
+still outstanding. Same-boot daemon restart and missing PID/receipt are not boot
+transition evidence. No recovery path executes a host reboot.

@@ -13,7 +13,7 @@ pub struct AuxiliaryLaunchBinding {
     pub wrapper_sha256: String,
 }
 impl AuxiliaryLaunchBinding {
-    fn validate(&self) -> Result<(), StoreError> {
+    pub(crate) fn validate(&self) -> Result<(), StoreError> {
         let hash = |s: &str| {
             s.len() == 64
                 && s.bytes()
