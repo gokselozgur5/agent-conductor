@@ -6,22 +6,28 @@ historical evidence and must not be read as current feature inventories.
 
 ## Current baseline and broker vendor candidate
 
-Main at `5e0327aa4b02354dda8440c02c9b322ed4e439f9` includes merged PRs #99
-and #101: registered pre-owner recovery and owned journal/release/shutdown
-sessions. Their exact pre-merge CI passed on macOS and Linux. User-facing bundles
-and existing runtimes remain unchanged.
+Main at `4a2ec6f415995603af7304ae170655945687f87b` includes merged PRs #103
+and #105: prepared broker vendor commands, exact session handoff and selected
+actual Codex file-access controls. Their exact pre-merge and post-merge CI passed
+on macOS and Linux. Delivered bundles and existing runtimes remain unchanged.
 
-The issue #102 candidate prepares a pinned, command-free Codex broker command
-before Release, keeps direct filesystem access read-only and issues one
-environment-only handoff from an exact frozen-packet/session match. The real
-Codex0.163.0 local-provider control exercises actual runner and SQLite operation
-journaling, private receipt closure and database reopen. This is a candidate
-service integration, not enabled native daemon writer admission.
+The joint supervision candidate owns the prepared vendor process and broker in
+one future, monitors authoritative lease deadlines and preserves separate process
+and durable closure results. Normal proxy EOF can precede final vendor output;
+verified broker closure permits that tail while lease cancellation remains active.
+Invalid renewal bounds and failed settlement stop the vendor. Controlled tests
+cover future abort, independent receipt recovery and valid lease updates.
 
-Pre-ACK reconciliation, vendor/daemon lifecycle integration, real OS confinement,
-live-model behavior and operational acceptance remain incomplete. See
-[the broker design](CODEX_WRITER_DESIGN.md) for proof boundaries and
-[the delivery audit](DELIVERY_ACCEPTANCE.md) for the original full scope.
+The actual pinned Codex0.163.0 test uses a provider-only exec shim and synthetic
+conformance identity. It verifies two SQLite operations, exact file bytes, process
+exit, private receipt closure and closed state after reopen. Plugin/catalog
+features are disabled to remove observed background Git descendants; process-fence
+conditions remain unchanged. This is not enabled native daemon writer admission.
+
+Pre-ACK reconciliation, daemon lifecycle integration, long idle inference,
+complete OS confinement, live-model behavior and operational acceptance remain
+incomplete. See [the broker design](CODEX_WRITER_DESIGN.md) for proof boundaries
+and [the delivery audit](DELIVERY_ACCEPTANCE.md) for the original full scope.
 
 ## Historical auxiliary candidate evidence
 
