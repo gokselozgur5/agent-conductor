@@ -83,7 +83,7 @@ impl<C: Clock> PersistentControlService<C> {
             .await?;
         Ok(manifest)
     }
-    async fn publish_captured_source(
+    pub(super) async fn publish_captured_source(
         &self,
         packet: &ResumePacket,
         token: &str,

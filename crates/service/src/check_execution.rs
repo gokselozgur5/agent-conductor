@@ -127,6 +127,17 @@ impl<C: Clock> PersistentControlService<C> {
         let task: Task =
             serde_json::from_str(&row.aggregate_json).map_err(|_| invalid("invalid task"))?;
         let (definition, source, digest) = bound_check(&task, &packet, check_id)?;
+        if record.account_channel
+            && record
+                .account_result
+                .as_ref()
+                .and_then(|r| r.snapshot_sha256.as_deref())
+                != Some(digest.as_str())
+        {
+            return Err(invalid(
+                "check source differs from imported account candidate",
+            ));
+        }
         Ok(CheckContext {
             task,
             definition,

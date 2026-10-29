@@ -116,6 +116,8 @@ pub struct ExecutionRecord {
     pub process: Option<ExecutionProcess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_peer: Option<crate::AccountExecutionPeer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_result: Option<crate::AccountExecutionResult>,
     pub checkpoint_json: Option<String>,
     pub exit_code: Option<i32>,
 }
@@ -123,6 +125,15 @@ pub struct ExecutionRecord {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionUpdate {
+    ReportAccount {
+        wrapper_identity: String,
+        output_sha256: String,
+    },
+    CaptureAccount {
+        wrapper_identity: String,
+        output_sha256: String,
+        snapshot_sha256: String,
+    },
     AcknowledgeAccount {
         wrapper_identity: String,
         packet_sha256: String,
@@ -339,6 +350,7 @@ impl Store {
                 wrapper_identity: None,
                 process: None,
                 account_peer: None,
+                account_result: None,
                 checkpoint_json: None,
                 exit_code: None,
             },
@@ -392,6 +404,8 @@ impl Store {
             ExecutionUpdate::Acknowledge { .. }
                 | ExecutionUpdate::AcknowledgeAccount { .. }
                 | ExecutionUpdate::Checkpoint { .. }
+                | ExecutionUpdate::ReportAccount { .. }
+                | ExecutionUpdate::CaptureAccount { .. }
         ) {
             require_live(&mut tx, &record.preparation, audit.now_ms).await?;
         }
@@ -410,12 +424,20 @@ impl Store {
         if let ExecutionUpdate::AcknowledgeAccount { peer, .. } = update {
             crate::account_execution_peer::validate_ack(&mut tx, &record, peer).await?;
         }
+        if matches!(
+            update,
+            ExecutionUpdate::ReportAccount { .. } | ExecutionUpdate::CaptureAccount { .. }
+        ) {
+            let peer = record.account_peer.as_ref().ok_or_else(invalid)?;
+            crate::account_execution_peer::validate_ack(&mut tx, &record, peer).await?;
+        }
         let kind = apply_update(&mut record, update)?;
         record.revision = record.revision.checked_add(1).ok_or_else(invalid)?;
-        sqlx::query("UPDATE executions SET revision = ?, state = ?, wrapper_identity = ?, process_json = ?, account_peer_json = ?, checkpoint_json = ?, exit_code = ?, updated_at_ms = ? WHERE effect_token = ?")
+        sqlx::query("UPDATE executions SET revision = ?, state = ?, wrapper_identity = ?, process_json = ?, account_peer_json = ?, account_result_json = ?, checkpoint_json = ?, exit_code = ?, updated_at_ms = ? WHERE effect_token = ?")
             .bind(record.revision).bind(record.state.as_str()).bind(&record.wrapper_identity)
             .bind(record.process.as_ref().map(serde_json::to_string).transpose().map_err(|_| invalid())?)
             .bind(record.account_peer.as_ref().map(serde_json::to_string).transpose().map_err(|_| invalid())?)
+            .bind(record.account_result.as_ref().map(serde_json::to_string).transpose().map_err(|_| invalid())?)
             .bind(&record.checkpoint_json).bind(record.exit_code).bind(audit.now_ms).bind(token)
             .execute(&mut *tx).await?;
         append_audit(
@@ -439,6 +461,23 @@ fn apply_update(
     update: &ExecutionUpdate,
 ) -> Result<&'static str, StoreError> {
     match update {
+        ExecutionUpdate::ReportAccount {
+            wrapper_identity,
+            output_sha256,
+        } => {
+            require_wrapper(record, wrapper_identity)?;
+            crate::account_execution_result::report(record, output_sha256)?;
+            Ok("execution.account_reported")
+        }
+        ExecutionUpdate::CaptureAccount {
+            wrapper_identity,
+            output_sha256,
+            snapshot_sha256,
+        } => {
+            require_wrapper(record, wrapper_identity)?;
+            crate::account_execution_result::capture(record, output_sha256, snapshot_sha256)?;
+            Ok("execution.account_captured")
+        }
         ExecutionUpdate::AcknowledgeAccount {
             wrapper_identity,
             packet_sha256,
@@ -614,6 +653,9 @@ fn decode(row: sqlx::sqlite::SqliteRow) -> Result<ExecutionRecord, StoreError> {
         wrapper_identity: row.try_get("wrapper_identity")?,
         process: decode_process(row.try_get("process_json")?)?,
         account_peer: crate::account_execution_peer::decode(row.try_get("account_peer_json")?)?,
+        account_result: crate::account_execution_result::decode(
+            row.try_get("account_result_json")?,
+        )?,
         checkpoint_json: row.try_get("checkpoint_json")?,
         exit_code: row.try_get("exit_code")?,
     })

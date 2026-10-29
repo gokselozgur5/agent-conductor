@@ -20,8 +20,36 @@ impl<C: Clock> PersistentControlService<C> {
             && record.state == ExecutionState::Exited
             && record.exit_code == Some(0)
             && record.wrapper_identity.is_some();
+        let imported_account = record.account_channel
+            && record.state == ExecutionState::Started
+            && record.process.is_none()
+            && record.account_peer.is_some()
+            && record.wrapper_identity.is_some()
+            && packet.contract.full_capability.is_some()
+            && record
+                .account_result
+                .as_ref()
+                .is_some_and(|r| r.snapshot_sha256.is_some());
+        if imported_account {
+            let selected = record
+                .account_result
+                .as_ref()
+                .and_then(|r| r.snapshot_sha256.as_ref())
+                .ok_or_else(|| StoreError::Integrity("account snapshot binding missing".into()))?;
+            let task = self.workflow_task(&packet.contract.task_id).await?;
+            if task
+                .verification
+                .as_ref()
+                .and_then(|v| v.source.as_ref())
+                .is_some_and(|source| source.0 != format!("snapshot:{selected}"))
+            {
+                return Err(StoreError::Integrity(
+                    "verification source differs from imported account snapshot".into(),
+                ));
+            }
+        }
         if !identity_matches
-            || !(record.state == ExecutionState::Fenced || exited_full)
+            || !(record.state == ExecutionState::Fenced || exited_full || imported_account)
             || self
                 .store
                 .has_other_unfenced_execution(

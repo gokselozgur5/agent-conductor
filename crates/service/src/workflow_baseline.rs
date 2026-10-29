@@ -173,6 +173,7 @@ mod tests {
             account_channel: false,
             process: None,
             account_peer: None,
+            account_result: None,
             preparation: ExecutionPreparation {
                 expected_wrapper_identity: None,
                 effect_token: "token".into(),
