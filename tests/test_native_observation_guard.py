@@ -92,6 +92,25 @@ class NativeGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(guard.Violation, 'duplicate_live_lease'):
             self.monitor().sample({'healthy': True})
 
+    def test_bound_verification_surface_cannot_be_mutated_or_rebound(self):
+        import hashlib
+        root=self.root/'snapshot';root.mkdir();(root/'tree').mkdir()
+        file=root/'tree/value';file.write_bytes(b'one')
+        raw=json.dumps(dict(version=1,entries=[dict(path='value',sha256=hashlib.sha256(b'one').hexdigest(),bytes=3,executable=False)]),separators=(',',':')).encode()
+        (root/'manifest.json').write_bytes(raw)
+        source='snapshot:'+hashlib.sha256(raw).hexdigest()
+        monitor=self.monitor();monitor.bind_verification_surface(root,source)
+        self.assertEqual(monitor.sample({'healthy':True})['verification_surfaces'],1)
+        file.write_bytes(b'two')
+        with self.assertRaisesRegex(guard.Violation,'verification_file_changed'):
+            monitor.sample({'healthy':True})
+        self.assertTrue(monitor.failed)
+        file.write_bytes(b'one')
+        monitor=self.monitor();monitor.bind_verification_surface(root,source)
+        with self.assertRaisesRegex(guard.Violation,'verification_binding_changed'):
+            monitor.bind_verification_surface(root,'snapshot:'+'a'*64)
+        self.assertTrue(monitor.failed)
+
     def test_surface_symlink_and_added_file_refuse_without_contents(self):
         monitor = self.monitor()
         (self.surface/'added').write_text('PRIVATE')

@@ -130,6 +130,7 @@ class NativeObservationGuard:
         self.roots = tuple(Path(p) for p in protected_roots)
         self.baseline = [protected_digest(p, time.monotonic()+5) for p in self.roots]
         self.suspects = {}
+        self.verification_surfaces = {}
         self.last = time.monotonic()
         self.last_wall = time.time()
         self.boot = None
@@ -137,6 +138,22 @@ class NativeObservationGuard:
         self.samples = 0
         self.failed = False
         self.uncertain_since = None
+
+    def bind_verification_surface(self, root, expected_source):
+        """Caller supplies a snapshot path and source from trusted durable state."""
+        from verification_surface import verify_snapshot
+        require(not self.failed, 'native_monitor_already_failed')
+        try:
+            root = Path(root)
+            if root in self.verification_surfaces:
+                require(self.verification_surfaces[root][0] == expected_source, 'verification_binding_changed')
+                return
+            require(len(self.verification_surfaces) < 16, 'verification_surface_limit')
+            baseline = verify_snapshot(root, expected_source, time.monotonic()+5)
+            self.verification_surfaces[root] = (expected_source, baseline)
+        except Exception:
+            self.failed = True
+            raise
 
     def sample(self, invariant):
         require(not self.failed, 'native_monitor_already_failed')
@@ -176,11 +193,14 @@ class NativeObservationGuard:
         require(all(now-first < self.grace for first in self.suspects.values()), 'persistent_process_contradiction')
         for path, baseline in zip(self.roots, self.baseline):
             require(protected_digest(path, time.monotonic()+5) == baseline, 'protected_surface_changed')
+        from verification_surface import verify_snapshot
+        for root, (source, baseline) in self.verification_surfaces.items():
+            require(verify_snapshot(root, source, time.monotonic()+5) == baseline, 'verification_surface_changed')
         require(time.monotonic()-now <= self.max_gap, 'native_sample_duration')
         self.last, self.last_wall = now, wall
         self.boot, self.authority = report['boot_generation'], report['authority_id']
         self.samples += 1
         return dict(sample=self.samples, boot=self.boot, tagged_observations=len(report['observations']),
                     recorded_observations=len(records['observations']), pending_contradictions=len(suspects),
-                    protected_surfaces=len(self.roots), board_projection=board, inventory_uncertain=uncertain,
+                    protected_surfaces=len(self.roots), verification_surfaces=len(self.verification_surfaces), board_projection=board, inventory_uncertain=uncertain,
                     healthy=not suspects and not uncertain, full_v1_accepted=False)

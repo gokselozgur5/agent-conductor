@@ -47,6 +47,7 @@ def run_native_monitor(guard, invariant_reader, output, *, duration_seconds,
                Path(__file__).with_name('inspect_runner_processes.py'),
                Path(__file__).with_name('process_birth.py'),
                Path(__file__).with_name('native_resource_guard.py'),
+               Path(__file__).with_name('verification_surface.py'),
                Path(__file__).with_name('soak_control_plane.py')]
     files = {str(Path(p).resolve(strict=True)): pin(p) for p in [*pinned_files, *sources]}
     output = Path(output)

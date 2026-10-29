@@ -57,6 +57,7 @@ jobs:
           python3 -m unittest discover -s tests -p test_run_native_monitor.py -v
           python3 -m unittest discover -s tests -p test_native_resource_guard.py -v
           python3 -m unittest discover -s tests -p test_escaped_runner.py -v
+          python3 -m unittest discover -s tests -p test_verification_surface.py -v
 
       - name: Reject committed credential material
         shell: bash

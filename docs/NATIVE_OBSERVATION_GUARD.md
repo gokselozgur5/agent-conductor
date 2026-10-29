@@ -160,3 +160,27 @@ The negative guard control uses synthetic durable scope and runtime-health input
 It proves detection for a selected protected workspace, not discovery of every
 untagged descendant or containment of arbitrary native commands. The real native
 workflow acceptance remains restricted to the admitted file-writer capability.
+
+## Durable verification-source bindings
+
+Call `guard.bind_verification_surface(snapshot_root, source_identity)` only after
+reading the source identity from trusted task state and selecting its authorized
+snapshot path. The method verifies the exact manifest bytes against the durable
+`snapshot:<sha256>` identity before accepting a baseline. It validates the bounded
+manifest schema, sorted unique relative paths, declared deletions, file hashes,
+sizes and executable bits, and rejects links, escapes and extra files.
+
+Every later sample repeats manifest/content verification and compares the framed
+tree digest. A binding cannot be replaced with a new source to excuse a changed
+tree. Binding or observation errors permanently latch failure. Up to 16 explicitly
+selected snapshots can be watched; source/path discovery remains the harness's
+responsibility. An absent binding is visible as zero `verification_surfaces` and
+must not be claimed as verification-tree coverage.
+
+The native harness reads the task's persisted verification source, binds the
+published `artifacts/source` snapshot, and binds `review-input/source` only after
+its later review-baseline publication marker exists. This avoids treating an
+unfinished snapshot copy as a completed published source. Both roots remain
+watched after task completion. No baseline is accepted solely because it was the
+first version observed. These checks are sampled integrity observations, not a
+kernel write fence or proof that mutations restored between reads cannot occur.
