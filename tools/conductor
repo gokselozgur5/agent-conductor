@@ -90,6 +90,10 @@ def main():
     ctl = sub.add_parser('ctl', help='forward a command to the existing Rust CLI')
     ctl.add_argument('--json', action='store_true')
     ctl.add_argument('arguments', nargs=argparse.REMAINDER)
+    rpc = sub.add_parser('rpc', help='send a JSON control request from an account with an operator credential')
+    rpc.add_argument('--address', required=True, help='numeric loopback host:port')
+    rpc.add_argument('--token-file', type=Path, required=True)
+    rpc.add_argument('--request-file', type=Path, help='payload JSON file; defaults to stdin')
     plan = sub.add_parser('plan', help='prepare a plan from previously accepted adapter pins')
     plan.add_argument('--from-plan', type=Path, required=True)
     plan.add_argument('--task', required=True)
@@ -107,6 +111,18 @@ def main():
     submit.add_argument('--path-prefix')
     args = parser.parse_args()
     os.umask(0o077)
+    if args.command == 'rpc':
+        from conductor_rpc import send, exit_code
+        if args.request_file:
+            with args.request_file.open('rb') as stream:
+                data = stream.read(1024 * 1024 + 1)
+        else:
+            data = sys.stdin.buffer.read(1024 * 1024 + 1)
+        if len(data) > 1024 * 1024:
+            raise ValueError('request exceeds frame limit')
+        response = send(args.address, private_read(args.token_file).strip(), json.loads(data))
+        print(json.dumps(response, indent=2))
+        sys.exit(exit_code(response))
     if args.command == 'verify-backup':
         from operator_backup import verify
         print(json.dumps(verify(args.destination, external=args.external), indent=2))

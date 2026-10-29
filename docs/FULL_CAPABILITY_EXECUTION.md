@@ -27,8 +27,10 @@ observed process state accurately.
 
 - Native plans now accept `full_capability` with a frozen OS account and PATH.
   The worker process must already run as that account. The operator plan command
-  preserves the profile from its accepted template. Cross-account transport and
-  unrestricted interruption recovery still require implementation and acceptance.
+  preserves the profile from its accepted template. Authenticated loopback RPC
+  permits control-plane clients in another account without sharing the private
+  daemon directory. Native cross-account launch/artifact transport and started
+  unrestricted worker recovery still require implementation and acceptance.
 - `native_writer_launch` routes explicit full profiles to Codex `--yolo` or Claude
   `--dangerously-skip-permissions`. Both use the selected account's own HOME and
   configuration. Restricted profiles retain their previous behavior.

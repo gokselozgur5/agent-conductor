@@ -1,5 +1,6 @@
 //! Authenticated loopback operator access to the existing control service.
 mod controls;
+mod rpc;
 mod workflows;
 use axum::{
     Router,
@@ -98,6 +99,7 @@ impl OperatorBoard {
             .route("/api/health", get(health::<S>))
             .route("/api/invariants", get(invariants::<S>))
             .route("/api/control", post(controls::apply::<S>))
+            .route("/api/rpc", post(rpc::apply::<S>))
             .route("/api/workflows/continue", post(workflows::resume::<S>))
             .route("/api/workflows/reassign", post(workflows::reassign::<S>))
             .route(
@@ -453,3 +455,5 @@ mod tests {
 mod controls_tests;
 #[cfg(test)]
 mod evidence_tests;
+#[cfg(test)]
+mod rpc_tests;

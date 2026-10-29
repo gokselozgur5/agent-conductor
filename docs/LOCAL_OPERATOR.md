@@ -1,5 +1,38 @@
 # Local operator setup
 
+## Connect another account to the coordinator
+
+The board exposes the existing control protocol at `POST /api/rpc`. An account
+with an operator-provisioned credential can use `conductor rpc` without access to
+the daemon's private state directory or Unix socket:
+
+```sh
+printf '%s\n' '{"type":"health"}' | ./conductor rpc \
+  --address 127.0.0.1:8790 --token-file /absolute/private/operator-token
+```
+
+Use `tools/conductor` instead of `./conductor` from a source checkout. The token
+file must be a private regular file owned by the calling account. The operator
+provisions it explicitly; the client never copies credentials between accounts.
+The credential grants full operator control, like the local socket, and is not
+an agent-scoped capability. Do not place it in a prompt, command argument or URL.
+
+Supply a protocol request payload on stdin or with `--request-file`. Registration,
+task commands, checkpoint queries and event subscription/publication/claim/ack
+use the same request fields as the Unix protocol. The client adds and verifies
+the protocol envelope and prints the full correlated response. Structured errors
+retain the Rust CLI's exit codes. There are no automatic retries: preserve the
+operation's idempotency key and reconcile state after a timeout before retrying.
+
+This transport accepts numeric loopback addresses only and ignores proxy
+environment variables. Accounts on this machine can coordinate without changing
+their HOME or vendor authentication. Native dispatcher execution still runs as
+the daemon account; RPC registration does not launch a worker under another UID,
+transfer its workspace, or prove remote-host execution. Those integrations remain
+required for automatic cross-account native workflows.
+
+## Initialize a local runtime
+
 The `tools/conductor` launcher uses the Rust daemon and CLI for every state change.
 It supports Python3 and the current Unix host. Native isolated checks currently
 require macOS; this launcher does not add Linux isolation or remote-host support.
