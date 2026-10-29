@@ -105,12 +105,17 @@ impl ExecutionProcess {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionRecord {
+    /// Frozen transport selection, including before a peer has acknowledged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub account_channel: bool,
     pub preparation: ExecutionPreparation,
     pub revision: i64,
     pub state: ExecutionState,
     pub wrapper_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<ExecutionProcess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_peer: Option<crate::AccountExecutionPeer>,
     pub checkpoint_json: Option<String>,
     pub exit_code: Option<i32>,
 }
@@ -118,6 +123,11 @@ pub struct ExecutionRecord {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionUpdate {
+    AcknowledgeAccount {
+        wrapper_identity: String,
+        packet_sha256: String,
+        peer: crate::AccountExecutionPeer,
+    },
     Acknowledge {
         wrapper_identity: String,
         packet_sha256: String,
@@ -273,7 +283,31 @@ impl Store {
         input: &ExecutionPreparation,
         audit: EffectAudit<'_>,
     ) -> Result<(ExecutionRecord, bool), StoreError> {
+        self.prepare_with_transport(input, false, audit).await
+    }
+
+    /// Records account transport before connecting, so recovery cannot mistake
+    /// foreign-account files for locally trusted process/receipt observations.
+    /// # Errors
+    /// Refuses invalid/full-profile-missing input, stale claims and transport replay.
+    pub async fn prepare_account_execution_once(
+        &self,
+        input: &ExecutionPreparation,
+        audit: EffectAudit<'_>,
+    ) -> Result<(ExecutionRecord, bool), StoreError> {
+        self.prepare_with_transport(input, true, audit).await
+    }
+
+    async fn prepare_with_transport(
+        &self,
+        input: &ExecutionPreparation,
+        account_channel: bool,
+        audit: EffectAudit<'_>,
+    ) -> Result<(ExecutionRecord, bool), StoreError> {
         validate_preparation(input)?;
+        if account_channel {
+            crate::account_execution_peer::validate_preparation(input)?;
+        }
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(row) = sqlx::query("SELECT * FROM executions WHERE effect_token = ?")
@@ -282,26 +316,29 @@ impl Store {
             .await?
         {
             let record = decode(row)?;
-            if record.preparation != *input {
+            if record.preparation != *input || record.account_channel != account_channel {
                 return Err(StoreError::IdempotencyCollision);
             }
             tx.commit().await?;
             return Ok((record, false));
         }
         require_live(&mut tx, input, audit.now_ms).await?;
-        sqlx::query("INSERT INTO executions (effect_token, task_id, attempt_id, lease_epoch, runner_id, packet_json, packet_sha256, expected_wrapper_identity, state, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)")
+        sqlx::query("INSERT INTO executions (effect_token, task_id, attempt_id, lease_epoch, runner_id, packet_json, packet_sha256, expected_wrapper_identity, account_channel, state, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)")
             .bind(&input.effect_token).bind(&input.task_id).bind(&input.attempt_id).bind(input.lease_epoch)
             .bind(&input.runner_id).bind(&input.packet_json).bind(&input.packet_sha256).bind(&input.expected_wrapper_identity)
+            .bind(account_channel)
             .bind(audit.now_ms).bind(audit.now_ms).execute(&mut *tx).await?;
         append_audit(&mut tx, input, "execution.prepared", &audit, "{}").await?;
         tx.commit().await?;
         Ok((
             ExecutionRecord {
+                account_channel,
                 preparation: input.clone(),
                 revision: 0,
                 state: ExecutionState::Prepared,
                 wrapper_identity: None,
                 process: None,
+                account_peer: None,
                 checkpoint_json: None,
                 exit_code: None,
             },
@@ -352,7 +389,9 @@ impl Store {
         }
         if matches!(
             update,
-            ExecutionUpdate::Acknowledge { .. } | ExecutionUpdate::Checkpoint { .. }
+            ExecutionUpdate::Acknowledge { .. }
+                | ExecutionUpdate::AcknowledgeAccount { .. }
+                | ExecutionUpdate::Checkpoint { .. }
         ) {
             require_live(&mut tx, &record.preparation, audit.now_ms).await?;
         }
@@ -365,11 +404,18 @@ impl Store {
                 return Err(invalid());
             }
         }
+        if record.account_channel && matches!(update, ExecutionUpdate::Acknowledge { .. }) {
+            return Err(invalid());
+        }
+        if let ExecutionUpdate::AcknowledgeAccount { peer, .. } = update {
+            crate::account_execution_peer::validate_ack(&mut tx, &record, peer).await?;
+        }
         let kind = apply_update(&mut record, update)?;
         record.revision = record.revision.checked_add(1).ok_or_else(invalid)?;
-        sqlx::query("UPDATE executions SET revision = ?, state = ?, wrapper_identity = ?, process_json = ?, checkpoint_json = ?, exit_code = ?, updated_at_ms = ? WHERE effect_token = ?")
+        sqlx::query("UPDATE executions SET revision = ?, state = ?, wrapper_identity = ?, process_json = ?, account_peer_json = ?, checkpoint_json = ?, exit_code = ?, updated_at_ms = ? WHERE effect_token = ?")
             .bind(record.revision).bind(record.state.as_str()).bind(&record.wrapper_identity)
             .bind(record.process.as_ref().map(serde_json::to_string).transpose().map_err(|_| invalid())?)
+            .bind(record.account_peer.as_ref().map(serde_json::to_string).transpose().map_err(|_| invalid())?)
             .bind(&record.checkpoint_json).bind(record.exit_code).bind(audit.now_ms).bind(token)
             .execute(&mut *tx).await?;
         append_audit(
@@ -393,6 +439,22 @@ fn apply_update(
     update: &ExecutionUpdate,
 ) -> Result<&'static str, StoreError> {
     match update {
+        ExecutionUpdate::AcknowledgeAccount {
+            wrapper_identity,
+            packet_sha256,
+            peer,
+        } => {
+            let kind = apply_update(
+                record,
+                &ExecutionUpdate::Acknowledge {
+                    wrapper_identity: wrapper_identity.clone(),
+                    packet_sha256: packet_sha256.clone(),
+                    process: None,
+                },
+            )?;
+            record.account_peer = Some(peer.clone());
+            Ok(kind)
+        }
         ExecutionUpdate::Acknowledge {
             wrapper_identity,
             packet_sha256,
@@ -431,6 +493,9 @@ fn apply_update(
             wrapper_identity,
             exit_code,
         } => {
+            if record.account_channel {
+                return Err(invalid());
+            }
             require_wrapper(record, wrapper_identity)?;
             record.state = ExecutionState::Exited;
             record.exit_code = *exit_code;
@@ -533,6 +598,7 @@ fn decode(row: sqlx::sqlite::SqliteRow) -> Result<ExecutionRecord, StoreError> {
     let expected_wrapper_identity: Option<String> = row.try_get("expected_wrapper_identity")?;
     validate_expected_identity(expected_wrapper_identity.as_deref())?;
     Ok(ExecutionRecord {
+        account_channel: row.try_get("account_channel")?,
         preparation: ExecutionPreparation {
             expected_wrapper_identity,
             effect_token: row.try_get("effect_token")?,
@@ -547,12 +613,16 @@ fn decode(row: sqlx::sqlite::SqliteRow) -> Result<ExecutionRecord, StoreError> {
         state: ExecutionState::parse(row.try_get("state")?)?,
         wrapper_identity: row.try_get("wrapper_identity")?,
         process: decode_process(row.try_get("process_json")?)?,
+        account_peer: crate::account_execution_peer::decode(row.try_get("account_peer_json")?)?,
         checkpoint_json: row.try_get("checkpoint_json")?,
         exit_code: row.try_get("exit_code")?,
     })
 }
 fn invalid() -> StoreError {
     StoreError::Integrity("execution identity, state or ownership mismatch".into())
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 fn decode_process(json: Option<String>) -> Result<Option<ExecutionProcess>, StoreError> {
