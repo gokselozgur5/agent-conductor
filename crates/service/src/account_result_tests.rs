@@ -156,6 +156,7 @@ async fn account_result_binds_imported_source_without_local_exit_or_fence() {
     assert_account_import_binding(&f, &record).await;
     assert_account_workspace_not_polled(&f).await;
     assert_capture_projection_revokes_blocked(&f.service, &f.token).await;
+    assert_accepted_account_copy_survives_blocked_execution(&f).await;
     worker.kill().await.unwrap();
     worker.wait().await.unwrap();
 }
@@ -182,6 +183,58 @@ async fn assert_account_workspace_not_polled(f: &AccountServiceFixture) {
             .unwrap(),
         0
     );
+}
+
+async fn assert_accepted_account_copy_survives_blocked_execution(f: &AccountServiceFixture) {
+    use crate::workflow_dependencies::accepted_account_source;
+    use agent_conductor_domain::{ActorId, SourceIdentity, Verdict};
+    let record = f.store.execution(&f.token).await.unwrap().unwrap();
+    let mut task = f.service.workflow_task("task").await.unwrap();
+    let source = task
+        .verification
+        .as_ref()
+        .unwrap()
+        .source
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    assert!(accepted_account_source(&task, &record, &f.packet, &source).is_err());
+    // Pure eligibility fixture: publication still requires the normal state machine.
+    task.state = TaskState::Completed;
+    task.verification.as_mut().unwrap().verdict = Some(Verdict {
+        accepted: true,
+        source: SourceIdentity(source.clone()),
+        verifier: ActorId("independent".into()),
+    });
+    accepted_account_source(&task, &record, &f.packet, &source).unwrap();
+    assert!(
+        f.service
+            .validate_capture_eligibility(&record, &f.packet)
+            .await
+            .is_err()
+    );
+    assert!(f.store.has_unfenced_execution("task").await.unwrap());
+    assert!(accepted_account_source(&task, &record, &f.packet, "snapshot:wrong").is_err());
+    let mut changed = record.clone();
+    changed.account_result.as_mut().unwrap().snapshot_sha256 = Some("0".repeat(64));
+    assert!(accepted_account_source(&task, &changed, &f.packet, &source).is_err());
+    changed = record.clone();
+    changed.account_peer = None;
+    assert!(accepted_account_source(&task, &changed, &f.packet, &source).is_err());
+    changed = record;
+    changed.state = agent_conductor_store::ExecutionState::Prepared;
+    assert!(accepted_account_source(&task, &changed, &f.packet, &source).is_err());
+    changed.state = agent_conductor_store::ExecutionState::Blocked;
+    accepted_account_source(&task, &changed, &f.packet, &source).unwrap();
+    task.verification
+        .as_mut()
+        .unwrap()
+        .verdict
+        .as_mut()
+        .unwrap()
+        .verifier = task.attempt.as_ref().unwrap().worker.clone();
+    assert!(accepted_account_source(&task, &changed, &f.packet, &source).is_err());
 }
 
 #[tokio::test]
