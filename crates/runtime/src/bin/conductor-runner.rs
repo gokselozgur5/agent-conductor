@@ -31,6 +31,8 @@ async fn main() {
         } else {
             Err(())
         }
+    } else if arguments.get(1).is_some_and(|v| v == "--account-listen") {
+        serve_account_channel(&arguments).await
     } else if arguments.get(1).is_some_and(|v| v == "--account-native") {
         serve(true).await
     } else {
@@ -62,11 +64,13 @@ async fn read_frame(reader: &mut (impl AsyncBufRead + Unpin), limit: usize) -> R
     }
     Ok(bytes)
 }
-async fn emit(event: &RunnerEvent) -> Result<(), ()> {
+type Output = std::sync::Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>;
+
+async fn emit(output: &Output, event: &RunnerEvent) -> Result<(), ()> {
     let mut bytes = serde_json::to_vec(event).map_err(|_| ())?;
     bytes.push(b'\n');
     tokio::time::timeout(Duration::from_secs(2), async {
-        let mut output = tokio::io::stdout();
+        let mut output = output.lock().await;
         output.write_all(&bytes).await?;
         output.flush().await
     })
@@ -76,20 +80,59 @@ async fn emit(event: &RunnerEvent) -> Result<(), ()> {
 }
 
 async fn emit_terminal(
+    output: &Output,
     packet: &conductor_runtime::ResumePacket,
     event: &RunnerEvent,
 ) -> Result<(), ()> {
     conductor_runtime::write_terminal_receipt(packet, event).map_err(|_| ())?;
-    emit(event).await
+    emit(output, event).await
 }
 
-#[allow(clippy::too_many_lines)]
 async fn serve(account_native: bool) -> Result<(), ()> {
     let identity = conductor_runtime::RunnerProcessIdentity::from_arguments(
         std::env::args_os().skip(if account_native { 2 } else { 1 }),
     )
     .map_err(|_| ())?;
-    let mut input = BufReader::new(tokio::io::stdin());
+    serve_io(
+        account_native,
+        identity,
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+async fn serve_account_channel(arguments: &[String]) -> Result<(), ()> {
+    if arguments.len() != 5 {
+        return Err(());
+    }
+    let coordinator_uid = arguments[3].parse::<u32>().map_err(|_| ())?;
+    let identity =
+        conductor_runtime::RunnerProcessIdentity::from_arguments(std::env::args_os().skip(4))
+            .map_err(|_| ())?
+            .ok_or(())?;
+    let endpoint = conductor_runtime::AccountChannelListener::bind(
+        std::path::Path::new(&arguments[2]),
+        coordinator_uid,
+        identity.packet_sha256.clone(),
+    )
+    .map_err(|_| ())?;
+    let stream = endpoint
+        .accept(Duration::from_secs(30))
+        .await
+        .map_err(|_| ())?;
+    let (input, output) = stream.into_split();
+    serve_io(true, Some(identity), BufReader::new(input), output).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn serve_io(
+    account_native: bool,
+    identity: Option<conductor_runtime::RunnerProcessIdentity>,
+    mut input: impl AsyncBufRead + Unpin,
+    writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+) -> Result<(), ()> {
+    let output: Output = std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(writer)));
     let bytes = tokio::time::timeout(
         Duration::from_secs(5),
         read_frame(&mut input, MAX_PACKET_BYTES),
@@ -137,7 +180,7 @@ async fn serve(account_native: bool) -> Result<(), ()> {
             .collect(),
     };
     let Ok((started, mut lease_deadline)) =
-        prepare_release(&launch, &mut input, acknowledgement, &packet_hash).await
+        prepare_release(&output, &launch, &mut input, acknowledgement, &packet_hash).await
     else {
         // This return is before any worker task/spawn. Publication failure
         // stays unknown; publication success must never reach the spawn path.
@@ -161,9 +204,10 @@ async fn serve(account_native: bool) -> Result<(), ()> {
     // Progress output has its own bounded queue. A slow parent cannot stall the
     // watchdog/control loop, and only this task writes progress frames.
     let (progress, mut progress_events) = tokio::sync::mpsc::channel(8);
+    let checkpoint_output = output.clone();
     let progress_output = tokio::spawn(async move {
         while let Some(claims) = progress_events.recv().await {
-            emit(&RunnerEvent::Checkpoint { claims }).await?;
+            emit(&checkpoint_output, &RunnerEvent::Checkpoint { claims }).await?;
         }
         Ok::<_, ()>(())
     });
@@ -188,7 +232,7 @@ async fn serve(account_native: bool) -> Result<(), ()> {
             result = &mut process => {
                 let (result, captured) = result.map_err(|_| ())?;
                 progress_output.await.map_err(|_| ())??;
-                return emit_terminal(&receipt_packet,&match result {
+                return emit_terminal(&output,&receipt_packet,&match result {
                     Ok(output) => RunnerEvent::Finished { exit_code: output.exit_code, stdout: output.stdout, stderr: output.stderr },
                     Err(ProcessError::Cancelled | ProcessError::Timeout | ProcessError::OutputLimit) => RunnerEvent::Stopped { reason: "process_stopped".into(), stdout: captured },
                     // Failed fencing or I/O is not evidence that the worker stopped.
@@ -227,13 +271,14 @@ async fn serve(account_native: bool) -> Result<(), ()> {
     match result {
         // Cancellation can race a normal exit. Preserve the weaker observation:
         // normal exit did not fence descendants and must never become Stopped.
-        Ok(output) => {
+        Ok(process_output) => {
             return emit_terminal(
+                &output,
                 &receipt_packet,
                 &RunnerEvent::Finished {
-                    exit_code: output.exit_code,
-                    stdout: output.stdout,
-                    stderr: output.stderr,
+                    exit_code: process_output.exit_code,
+                    stdout: process_output.stdout,
+                    stderr: process_output.stderr,
                 },
             )
             .await;
@@ -242,6 +287,7 @@ async fn serve(account_native: bool) -> Result<(), ()> {
         Err(_) => return Err(()),
     }
     emit_terminal(
+        &output,
         &receipt_packet,
         &RunnerEvent::Stopped {
             reason: stopped.into(),
@@ -252,12 +298,13 @@ async fn serve(account_native: bool) -> Result<(), ()> {
 }
 
 async fn prepare_release(
+    output: &Output,
     launch: &RunnerLaunch,
     input: &mut (impl AsyncBufRead + Unpin),
     acknowledgement: PacketAcknowledgement,
     packet_hash: &str,
 ) -> Result<(u64, u64), ()> {
-    emit(&RunnerEvent::Ready { acknowledgement }).await?;
+    emit(output, &RunnerEvent::Ready { acknowledgement }).await?;
     let release = tokio::time::timeout(Duration::from_secs(5), read_frame(input, 1024))
         .await
         .map_err(|_| ())??;
