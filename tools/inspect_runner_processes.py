@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 
 from process_birth import observe as process_birth
 
@@ -64,14 +65,33 @@ def runner_pids(inventory):
     return result
 
 
+def bounded_column(name, limit):
+    # Only fixed local column names reach this helper; malformed stored values
+    # become a small invalid sentinel before being materialized in Python.
+    return f"CASE WHEN {name} IS NULL THEN NULL WHEN typeof({name})='text' AND length({name})<={limit} THEN {name} ELSE '' END"
+
+
+def expected_binding(expected, observed):
+    if expected is None:
+        return 'legacy_unavailable'
+    try:
+        parsed = uuid.UUID(expected)
+        if parsed.int == 0 or str(parsed) != expected:
+            return 'invalid_recorded_identity'
+    except (ValueError, TypeError, AttributeError):
+        return 'invalid_recorded_identity'
+    return 'matching_observation' if expected == observed else 'identity_mismatch'
+
+
 def correlate(db, authority, observations):
     result = []
     columns = {row[1] for row in db.execute('pragma table_info(executions)')}
-    process_column = ',process_json' if 'process_json' in columns else ''
+    process_column = bounded_column('process_json', 1024) if 'process_json' in columns else 'NULL'
+    expected_column = bounded_column('expected_wrapper_identity', 36) if 'expected_wrapper_identity' in columns else 'NULL'
     for pid, tag in observations:
         if tag[0] != authority:
             continue
-        rows = db.execute('select task_id,attempt_id,lease_epoch,state,wrapper_identity' + process_column + ' from executions where packet_sha256=? limit 2', (tag[1],)).fetchall()
+        rows = db.execute('select task_id,attempt_id,lease_epoch,state,wrapper_identity,' + process_column + ',' + expected_column + ' from executions where packet_sha256=? limit 2', (tag[1],)).fetchall()
         item = dict(pid=pid, packet_sha256=tag[1], wrapper_identity=tag[2])
         if not rows:
             item['classification'] = 'no_matching_record'
@@ -79,10 +99,17 @@ def correlate(db, authority, observations):
             item['classification'] = 'ambiguous_records'
         else:
             task, attempt, epoch, state, wrapper = rows[0][:5]
-            if process_column:
-                item['_recorded_process'] = rows[0][5]
+            item['_recorded_process'] = rows[0][5]
+            binding = expected_binding(rows[0][6], tag[2])
+            item['expected_wrapper_binding'] = binding
             item.update(task_id=task, attempt_id=attempt, lease_epoch=str(epoch), execution_state=state)
-            if wrapper is None and state == 'prepared':
+            if binding == 'invalid_recorded_identity':
+                item['classification'] = 'invalid_expected_wrapper_identity'
+            elif binding == 'identity_mismatch':
+                item['classification'] = 'expected_wrapper_identity_mismatch'
+            elif wrapper is None and binding == 'matching_observation' and state != 'prepared':
+                item['classification'] = 'fenced_record_process_observed' if state == 'fenced' else 'unacknowledged_expected_wrapper'
+            elif wrapper is None and state == 'prepared':
                 item['classification'] = 'prepared_not_acknowledged'
             elif wrapper != tag[2]:
                 item['classification'] = 'wrapper_identity_mismatch'
@@ -180,7 +207,7 @@ def inspect(database, host=None):
                 changed_process_observations=changed,
                 unscoped_runners_on_host=unscoped, unavailable_process_observations=vanished,
                 process_liveness_proven=False, fencing_proven=False,
-                trust='Forgeable command-line metadata and a later SQLite snapshot. Kernel start markers were equal across reads, but timestamps have finite resolution. Races, exec changes and PID reuse are still possible. Reobserve contradictions; never signal a PID or grant lifecycle authority from this report.')
+                trust='Forgeable command-line metadata and a later SQLite snapshot. Kernel start markers were equal across reads, but timestamps have finite resolution. Races, exec changes and PID reuse are still possible. Expected wrapper identity is durable intent, not proof of ACK or worker release. Reobserve contradictions; never signal a PID or grant lifecycle authority from this report.')
 
 
 def main():

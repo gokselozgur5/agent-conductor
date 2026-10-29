@@ -66,6 +66,54 @@ class ProcessInventory(unittest.TestCase):
         db.close()
 
 
+    def test_expected_identity_is_canonical_and_never_inferred_for_legacy(self):
+        self.assertEqual(inventory.expected_binding(None, WRAPPER), 'legacy_unavailable')
+        self.assertEqual(inventory.expected_binding(WRAPPER, WRAPPER), 'matching_observation')
+        self.assertEqual(inventory.expected_binding('22345678-1234-1234-1234-123456789abc', WRAPPER), 'identity_mismatch')
+        for invalid in ['', True, 42, b'raw', WRAPPER.upper(), WRAPPER.replace('-', ''), '00000000-0000-0000-0000-000000000000']:
+            with self.subTest(invalid=invalid):
+                self.assertEqual(inventory.expected_binding(invalid, WRAPPER), 'invalid_recorded_identity')
+
+    def test_expected_identity_distinguishes_preack_blocked_fenced_and_contradictory_ack(self):
+        db = sqlite3.connect(':memory:')
+        db.execute('create table executions(task_id,attempt_id,lease_epoch,state,wrapper_identity,packet_sha256,expected_wrapper_identity)')
+        other = '22345678-1234-1234-1234-123456789abc'
+        db.execute('insert into executions values(?,?,?,?,?,?,?)', ('task', 'attempt', 1, 'prepared', None, PACKET, WRAPPER))
+        observed = [(12, (SCOPE, PACKET, WRAPPER)), (13, (SCOPE, PACKET, other))]
+        for state, classification in [('prepared', 'prepared_not_acknowledged'), ('blocked', 'unacknowledged_expected_wrapper'), ('fenced', 'fenced_record_process_observed')]:
+            db.execute('update executions set state=?', (state,))
+            before = db.total_changes
+            result = inventory.correlate(db, SCOPE, observed)
+            self.assertEqual(db.total_changes, before)
+            self.assertEqual(result[0]['classification'], classification)
+            self.assertEqual(result[0]['expected_wrapper_binding'], 'matching_observation')
+            self.assertEqual(result[1]['classification'], 'expected_wrapper_identity_mismatch')
+        db.execute("update executions set state='started',wrapper_identity=?", (other,))
+        self.assertEqual(inventory.correlate(db, SCOPE, observed)[0]['classification'], 'wrapper_identity_mismatch')
+        db.execute('update executions set wrapper_identity=?', (WRAPPER,))
+        self.assertEqual(inventory.correlate(db, SCOPE, observed)[0]['classification'], 'matching_record')
+        db.execute("update executions set wrapper_identity=NULL,state='prepared',expected_wrapper_identity=NULL")
+        result = inventory.correlate(db, SCOPE, observed)[0]
+        self.assertEqual(result['classification'], 'prepared_not_acknowledged')
+        self.assertEqual(result['expected_wrapper_binding'], 'legacy_unavailable')
+        db.close()
+
+    def test_corrupt_or_oversized_bindings_are_bounded_without_exposing_stored_text(self):
+        import json
+        db = sqlite3.connect(':memory:')
+        db.execute('create table executions(task_id,attempt_id,lease_epoch,state,wrapper_identity,packet_sha256,process_json,expected_wrapper_identity)')
+        secret = 'PRIVATE_STORED_TEXT' * 10000
+        db.execute('insert into executions values(?,?,?,?,?,?,?,?)', ('task', 'attempt', 1, 'prepared', None, PACKET, secret, secret))
+        observed = [(12, (SCOPE, PACKET, WRAPPER))]
+        for expected in [secret, 42, b'raw', '', '00000000-0000-0000-0000-000000000000']:
+            db.execute('update executions set expected_wrapper_identity=?', (expected,))
+            result = inventory.correlate(db, SCOPE, observed)[0]
+            self.assertEqual(result['classification'], 'invalid_expected_wrapper_identity')
+            self.assertEqual(result['_recorded_process'], '')
+            self.assertNotIn('PRIVATE_STORED_TEXT', json.dumps(result))
+        db.close()
+
+
 class BirthObservation(unittest.TestCase):
     def test_linux_parser_handles_parentheses_and_refuses_bad_fields(self):
         tail = [b'S'] + [b'0'] * 18 + [b'12345']

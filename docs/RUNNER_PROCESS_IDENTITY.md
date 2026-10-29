@@ -212,3 +212,23 @@ unmeasured provider usage. A fresh-authority migration fixture imports completed
 schema-18 application rows, preserves their task/ACK/birth records, retains NULL
 expected identities, rejects the old binary and reopens with the new binary.
 This is migration evidence, not cross-path product restoration.
+
+## Expected identity in read-only inventory
+
+On schema 19 the diagnostic reports `expected_wrapper_binding` separately from
+ACK and native birth metadata. It distinguishes `legacy_unavailable`,
+`matching_observation`, `identity_mismatch` and `invalid_recorded_identity`.
+A wrong UUID for the right packet is `expected_wrapper_identity_mismatch`;
+malformed stored identity is `invalid_expected_wrapper_identity`. Neither can
+be presented as a matching prepared wrapper. Stored expected identity and process
+JSON are bounded in the SQL projection before Python materializes them; malformed
+or oversized stored text is not echoed.
+
+A matching expected UUID with no ACK remains `prepared_not_acknowledged` while
+prepared, or `unacknowledged_expected_wrapper` after blocking. A fenced no-spawn
+record with the same observed wrapper is `fenced_record_process_observed`, even
+though its ACK remains absent. The wrapper may briefly remain visible after
+publishing its proof; this classification does not establish a surviving worker.
+A contradictory recorded ACK still refuses a match. Legacy schemas and NULL
+expected identities remain explicitly unknown. These are optional version-2
+observations, not permission to signal, fence, release or retry any process.
