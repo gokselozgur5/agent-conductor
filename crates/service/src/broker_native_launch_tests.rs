@@ -1,4 +1,6 @@
 use super::*;
+use agent_conductor_store::{ExecutionProcess, ExecutionUpdate};
+use conductor_runtime::PreparedBrokerRunner;
 use conductor_runtime::{BrokerEndpoint, BrokerRunnerLaunch, broker_root_identity};
 use sha2::{Digest, Sha256};
 use sqlx::Executor;
@@ -111,5 +113,128 @@ async fn service_prelaunch_persists_exact_intent_without_registering() {
             .execution_has_unresolved_file_broker(&binding.execution_token)
             .await
             .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn native_ready_is_acknowledged_before_broker_registration_and_release() {
+    let NativeLaunchSetup {
+        root: _root,
+        store,
+        binding,
+        launch,
+        endpoint,
+        wrapper,
+    } = native_launch_setup().await;
+    // Authenticate and retain the connection, but do not register or serve yet.
+    let accept = tokio::spawn(endpoint.accept(Duration::from_secs(10)));
+    let prepared = PreparedBrokerRunner::prepare(&wrapper, &launch)
+        .await
+        .unwrap();
+    let stream = accept.await.unwrap().unwrap();
+    let observed = prepared.identity().clone();
+    let execution = store
+        .execution(&binding.execution_token)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        execution.state,
+        agent_conductor_store::ExecutionState::Prepared
+    );
+    store
+        .update_execution(
+            &binding.execution_token,
+            execution.revision,
+            "native-ack",
+            &ExecutionUpdate::Acknowledge {
+                wrapper_identity: binding.invocation_id.clone(),
+                packet_sha256: execution.preparation.packet_sha256,
+                process: Some(ExecutionProcess {
+                    platform: observed.process.host.platform.clone(),
+                    host_id: observed.process.host.host_id.clone(),
+                    boot_id: observed.process.host.boot_id.clone(),
+                    pid: observed.process.pid,
+                    start_marker: observed.process.start_marker.clone(),
+                }),
+            },
+            broker_owner_audit("native-ack"),
+        )
+        .await
+        .unwrap();
+    release_write_and_close(&store, &binding, &launch, prepared, stream).await;
+}
+
+async fn release_write_and_close(
+    store: &Store,
+    binding: &FileBrokerBinding,
+    launch: &BrokerRunnerLaunch,
+    prepared: PreparedBrokerRunner,
+    stream: tokio::net::UnixStream,
+) {
+    let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
+        .await
+        .unwrap();
+    let (_hold, rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(journal.serve_remote(stream, rx, Duration::from_secs(5)));
+    let (store_ref, binding_ref, receipt_root) = (store, binding, &launch.receipt_root);
+    let mut session = prepared
+        .release(|identity| async move {
+            crate::record_broker_owner(
+                store_ref,
+                binding_ref,
+                &identity,
+                receipt_root,
+                broker_owner_audit("native-owner"),
+            )
+            .await?;
+            Ok(continuous_millis().unwrap() + 4000)
+        })
+        .await
+        .unwrap();
+    let (mut peer, _) =
+        conductor_runtime::connect_broker_endpoint(session.proxy_handoff(), Duration::from_secs(2))
+            .await
+            .unwrap();
+    let mut bytes = serde_json::to_vec(&request(binding)).unwrap();
+    bytes.push(b'\n');
+    peer.write_all(&bytes).await.unwrap();
+    let mut peer = BufReader::new(peer);
+    let mut reply = String::new();
+    tokio::time::timeout(Duration::from_secs(5), peer.read_line(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_progress(store, binding, 1, 1).await;
+    assert_eq!(
+        fs::read_to_string(launch.root.join("answer")).unwrap(),
+        "durable answer\n"
+    );
+    session.cancel().await.unwrap();
+    let receipt = session.finish().await.unwrap();
+    assert!(server.await.unwrap().is_ok());
+    assert_late_write_refused(peer, binding, &launch.root).await;
+    crate::close_broker_from_receipt(
+        store,
+        binding,
+        &receipt,
+        &launch.receipt_root,
+        broker_owner_audit("native-close"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .file_broker_launch(binding)
+            .await
+            .unwrap()
+            .launch_sha256,
+        receipt.launch_sha256
     );
 }
