@@ -319,6 +319,16 @@ async fn pinned_codex_broker_outside_read_is_denied() {
 async fn pinned_codex_broker_outside_write_is_denied() {
     codex_probe("broker-write-outside").await;
 }
+#[tokio::test]
+#[ignore = "requires pinned Codex; relative traversal read never reaches model"]
+async fn pinned_codex_broker_traversal_read_is_denied() {
+    codex_probe("broker-read-traversal").await;
+}
+#[tokio::test]
+#[ignore = "requires pinned Codex; relative traversal write never creates a file"]
+async fn pinned_codex_broker_traversal_write_is_denied() {
+    codex_probe("broker-write-traversal").await;
+}
 async fn codex_probe(mode: &str) {
     let root = private_tempdir();
     let directory = private_tempdir();

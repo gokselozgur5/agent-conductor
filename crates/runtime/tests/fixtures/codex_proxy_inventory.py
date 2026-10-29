@@ -22,7 +22,9 @@ mode = os.environ.get("CONDUCTOR_PROXY_CALLS", "inventory")
 execute_calls = mode != "inventory"
 authorized = mode == "approved"
 image_probe = mode in ("image-inside", "image-outside", "image-symlink")
-broker_probe = mode in ("broker-read-outside", "broker-write-outside")
+broker_probe = mode in ("broker-read-outside", "broker-write-outside",
+                        "broker-read-traversal", "broker-write-traversal")
+broker_read = mode in ("broker-read-outside", "broker-read-traversal")
 outside_canary = b"SYNTHETIC_OUTSIDE_READ_MUST_NOT_REACH_MODEL"
 outputs = []
 capability = json.loads(os.environ["CONDUCTOR_BROKER_HANDOFF"])["token"].encode()
@@ -93,9 +95,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                              'expected_sha256': None} if step == 0 else {'path': 'codex-answer'}),
                     'status': 'completed'}
             if broker_probe:
-                writing = mode == 'broker-write-outside'
+                writing = not broker_read
                 item['name'] = 'conductor_write_text' if writing else 'conductor_read_text'
-                arguments = {'path': str(outside_target)}
+                arguments = {'path': broker_path}
                 if writing:
                     arguments.update(contents='forbidden outside write', expected_sha256=None)
                 item['arguments'] = json.dumps(arguments)
@@ -148,7 +150,12 @@ assert isinstance(arguments, list) and all(isinstance(value, str) for value in a
 exec_index = arguments.index('exec')
 if broker_probe:
     outside_target = destination / 'outside-target.txt'
-    if mode == 'broker-read-outside':
+    task_root = Path(arguments[arguments.index('-C') + 1])
+    broker_path = (os.path.relpath(outside_target, task_root)
+                   if mode.endswith('-traversal') else str(outside_target))
+    if mode.endswith('-traversal'):
+        assert broker_path.startswith('../')
+    if broker_read:
         outside_target.write_bytes(outside_canary)
     else:
         assert not outside_target.exists()
@@ -211,7 +218,7 @@ for tool in ('conductor_read_text', 'conductor_write_text'):
 for log in ('stdout.log', 'stderr.log', 'tools.json'):
     assert capability not in (destination / log).read_bytes(), 'Capability leaked into fixture log'
 if broker_probe:
-    if mode == 'broker-read-outside':
+    if broker_read:
         assert outside_target.read_bytes() == outside_canary
     else:
         assert not outside_target.exists(), 'Outside file was created'
