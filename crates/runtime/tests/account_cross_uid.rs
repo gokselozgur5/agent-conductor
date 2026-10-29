@@ -101,7 +101,7 @@ fn address(f: &Fixture, digest: String) -> AccountChannelAddress {
 }
 
 fn as_worker(f: &Fixture) -> tokio::process::Command {
-    if cfg!(target_os = "linux") {
+    let mut command = if cfg!(target_os = "linux") {
         let mut command = tokio::process::Command::new("/usr/bin/setpriv");
         command.args([
             "--reuid",
@@ -115,7 +115,9 @@ fn as_worker(f: &Fixture) -> tokio::process::Command {
         let mut command = tokio::process::Command::new("/usr/bin/sudo");
         command.args(["-n", "-u", &f.account.name, "--"]);
         command
-    }
+    };
+    command.current_dir(&f.receiver);
+    command
 }
 
 async fn start(f: &Fixture) -> tokio::process::Child {
