@@ -17,7 +17,7 @@ class EscapedRunnerTests(unittest.TestCase):
         from pathlib import Path
         import subprocess,json,sys,time,select,sqlite3,hashlib
         root=Path(self.temp.name);workspace=root/'work';workspace.mkdir()
-        
+
         from native_observation_guard import NativeObservationGuard,Violation
         from disaster_recovery import host_epoch
         from process_birth import observe
@@ -29,7 +29,7 @@ class EscapedRunnerTests(unittest.TestCase):
         launch=dict(packet=packet,executable=sys.executable,arguments=['-c',leader_code,str(root/'leader.pid'),sys.executable,str(root/'escaped.py'),str(ready),str(gate),str(workspace/'escaped-write'),str(done)],environment={},output_limit=1024,heartbeat_timeout_ms=1000)
         runner=subprocess.Popen([str(bins/'conductor-runner')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
         child_pid=None;birth=None
-        
+
         def send(value):runner.stdin.write(json.dumps(value)+'\n');runner.stdin.flush()
         def event():
          assert select.select([runner.stdout],[],[],4)[0],'runner event deadline'
