@@ -78,7 +78,8 @@ async fn frozen_launch_checks_vendor_identity_and_retains_packet() {
         "objective":"Run a build", "checkpoint":null,"untrusted_context":[]
     })).unwrap();
     let launch =
-        conductor_runtime::native_writer_launch(&pin, &packet, Default::default()).unwrap();
+        conductor_runtime::native_writer_launch(&pin, &packet, std::collections::BTreeMap::new())
+            .unwrap();
     assert_eq!(launch.packet, packet);
     assert_eq!(launch.arguments[0], "--yolo");
     let mut connection = conductor_runtime::RunnerConnection::launch(
