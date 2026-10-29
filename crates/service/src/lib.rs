@@ -95,8 +95,10 @@ mod capture_eligibility;
 mod source_finalization;
 #[cfg(unix)]
 pub use check_execution::CheckWorkspace;
+mod account_execution;
 #[cfg(unix)]
 mod execution;
+pub use account_execution::AccountExecutionIntent;
 pub use clock::SystemClock;
 
 pub trait ControlService: Send + Sync + 'static {
