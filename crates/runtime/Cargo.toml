@@ -14,7 +14,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", features = ["signal", "process", "time", "fs"] }
+nix = { version = "0.30", features = ["signal", "process", "time", "fs", "user"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "=0.14.11"

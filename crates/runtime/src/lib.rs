@@ -91,3 +91,8 @@ pub use child_identity::ChildIdentity;
 
 mod unstarted_receipt;
 pub use unstarted_receipt::*;
+
+#[cfg(unix)]
+mod auxiliary_runner;
+#[cfg(unix)]
+pub use auxiliary_runner::*;

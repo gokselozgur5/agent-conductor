@@ -37,3 +37,46 @@ kinds at all external-effect boundaries. Process-group absence is not generic
 escaped-descendant containment. Keep sandbox enforcement and source immutability
 separate from process settlement. Neither a passing store test nor a passing
 short native run closes FR-6/NFR-1 or the seven-day requirement.
+
+## Auxiliary supervisor protocol candidate
+
+`conductor-runner --auxiliary INVOCATION_UUID` implements a separate bounded
+protocol. It is tested directly with controlled shell processes; service calls
+still use the prior direct process path until the persistence/client integration
+is complete. This mode alone does not enable automatic recovery.
+
+The parent supplies one private stdin launch frame. It includes authority and
+boot identity, an immutable invocation UUID, canonical working/receipt paths,
+exact argv/environment, executable digest and finite runtime/output/heartbeat
+limits. Credentials remain in memory and pipes; only the launch digest is safe
+to persist. The caller must construct the sandbox and keep the receipt directory
+outside **all** child write roots. The supervisor itself is not a sandbox.
+
+Before Ready, the supervisor durably claims its UUID with an exclusive private
+marker, preventing simultaneous/replayed wrappers from sharing an invocation.
+Ready contains the launch digest and native PID/birth/host identity. The parent
+must independently observe that child, persist its acknowledgement, and only then
+send Release for that exact digest. Executable content and process birth are
+rechecked before release. Until then, no payload process exists.
+
+EOF, malformed control or heartbeat expiry cancels the supervised process. A
+terminal receipt is published before a terminal event and contains no raw output,
+environment or credentials. `never_released` is emitted only on the irrevocable
+pre-spawn return; killing the wrapper before publication leaves uncertainty.
+`owned_group_settled` requires a successful owned-process result or a bounded
+cancellation/timeout/output-limit result with group cleanup. Other errors produce
+no settlement receipt. A live group member after leader exit prevents proof.
+This observation is not proof that a deliberately escaped new session is absent.
+
+Receipts use private, no-replace, fsynced publication. Reads refuse links,
+nonprivate files, malformed/oversized/schema-mismatched content, changed metadata,
+and every mismatch against trusted invocation/authority/boot/launch/process
+expectations. No diagnostic or receipt reader signals an old numeric PID. Partial
+publication is not accepted as completion and cannot be repaired by guessing.
+
+Next integration must persist the launch digest and independently observed
+supervisor identity before Release, retain the wrapper pin and safe receipt root,
+renew/control the session, and reconcile exact terminal evidence transactionally
+before releasing pending ownership. Bind check/verdict publication to that same
+invocation. Do not serialize credentials into the database to reconstruct a launch;
+recovery needs its digest and terminal proof, not the secret launch environment.
