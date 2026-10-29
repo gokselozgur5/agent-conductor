@@ -320,11 +320,7 @@ async fn codex_probe(mode: &str) {
     let proxy = PathBuf::from(env!("CARGO_BIN_EXE_conductor-file-proxy"))
         .canonicalize()
         .unwrap();
-    let policy = conductor_runtime::codex_broker_tool_options(
-        &proxy,
-        &conductor_runtime::binary_sha256(&proxy).unwrap(),
-    )
-    .unwrap();
+    let policy = generated_codex_command(&PathBuf::from(&binary), &proxy, root.path());
     let child = Command::new("/usr/bin/python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -338,7 +334,7 @@ async fn codex_probe(mode: &str) {
         .env(BROKER_HANDOFF_ENV, handoff)
         .env("CONDUCTOR_PROXY_CALLS", mode)
         .env(
-            "CONDUCTOR_CODEX_BROKER_OPTIONS",
+            "CONDUCTOR_CODEX_BROKER_ARGUMENTS",
             serde_json::to_string(&policy).unwrap(),
         )
         .kill_on_drop(true)
@@ -372,4 +368,37 @@ async fn codex_probe(mode: &str) {
     } else {
         assert!(!root.path().join("codex-answer").exists());
     }
+}
+
+fn generated_codex_command(
+    binary: &std::path::Path,
+    proxy: &std::path::Path,
+    root: &std::path::Path,
+) -> Vec<String> {
+    use conductor_runtime::{AdapterKind, ResumePacket, VendorPin, binary_sha256};
+    let digest = binary_sha256(binary).unwrap();
+    let pin = VendorPin {
+        kind: AdapterKind::Codex,
+        version: "0.163.0".into(),
+        executable: binary.to_owned(),
+        executable_sha256: digest.clone(),
+        conformance_sha256: "b".repeat(64),
+    };
+    // Synthetic conformance identity is fixture input, not production admission.
+    let packet: ResumePacket = serde_json::from_value(json!({
+        "contract": {"version":1,"task_id":"task","attempt_id":"attempt","lease_epoch":1,"worker_id":"worker",
+            "adapter":{"kind":"codex","version":"0.163.0","executable_sha256":digest,"conformance_sha256":"b".repeat(64)},
+            "workspace":root,"starting_head":"c".repeat(40),"authority":{"read_roots":[root],"write_roots":[root],"network":"inference_only","allow_workspace_commands":false},
+            "instructions":[],"checks":[],"max_runtime_ms":30000},
+        "objective":"Synthetic local fixture. Execute supplied file tools, then finish.","checkpoint":null,"untrusted_context":[]
+    })).unwrap();
+    conductor_runtime::broker_codex_command(
+        &pin,
+        &packet,
+        std::collections::BTreeMap::new(),
+        proxy,
+        &binary_sha256(proxy).unwrap(),
+    )
+    .unwrap()
+    .arguments
 }

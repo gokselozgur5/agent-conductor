@@ -102,20 +102,17 @@ config = {
         'base_url': f'http://127.0.0.1:{server.server_port}/v1', 'wire_api': 'responses',
         'env_key': 'CONDUCTOR_FIXTURE_KEY', 'request_max_retries': 0, 'stream_max_retries': 0},
 }
-policy = json.loads(os.environ['CONDUCTOR_CODEX_BROKER_OPTIONS'])
-assert isinstance(policy, list) and len(policy) == 14
-assert all(isinstance(value, str) for value in policy)
-assert policy[::2] == ['-c'] * 7
-args = [str(binary), '--no-daemon', '-a', 'never']
+arguments = json.loads(os.environ['CONDUCTOR_CODEX_BROKER_ARGUMENTS'])
+assert isinstance(arguments, list) and all(isinstance(value, str) for value in arguments)
+exec_index = arguments.index('exec')
+args = [str(binary)]
 for key, value in config.items():
     args += ['-c', key + '=' + toml(value)]
-args += policy
+args += arguments[:exec_index]
 if not authorized:
     for name in ('conductor_read_text', 'conductor_write_text'):
         args += ['-c', f'mcp_servers.conductor_files.tools.{name}.approval_mode="prompt"']
-args += ['exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
-         '--skip-git-repo-check', '--json', '-C', str(work),
-         'Synthetic local fixture. Execute the supplied file tools, then finish.']
+args += arguments[exec_index:]
 environment = {'HOME': str(home), 'CODEX_HOME': str(home), 'PATH': '/usr/bin:/bin',
     'TMPDIR': os.environ['TMPDIR'], 'CONDUCTOR_FIXTURE_KEY': 'synthetic-local-only',
     'CONDUCTOR_BROKER_HANDOFF': os.environ['CONDUCTOR_BROKER_HANDOFF']}
