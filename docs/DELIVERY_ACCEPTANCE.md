@@ -18,19 +18,43 @@ interruption and recovery. See [the integration plan](FULL_CAPABILITY_EXECUTION.
 
 ## Candidate identity
 
-Main at `7f24b10c3432867779681e85939ddc6f670a550a` includes merged PR #113
-and the preceding broker, auxiliary and native-observation changes. Schema is 29.
-PR #113 CI and its post-merge run passed on macOS and Linux. These results cover
-the configured CI checks, not Linux native sandbox support or full acceptance.
-Delivered bundles, existing runtimes and the separate endurance fixture retain
-their own pinned versions; repository merges do not upgrade them.
+Main at `a253fa8860d4e3848541776700d60e1b54bef13d` includes PR #157
+and the preceding full-capability account dispatch and accepted-source restart
+changes. PR #157's exact-head CI run `40942678122` passed on macOS and Linux,
+including the explicitly privileged cross-UID fixture on both hosts. This proves
+controlled account identity and snapshot transport, not personal vendor logins
+under a second account or complete Linux workflow acceptance.
 
-The service-authority candidate drives an already released broker/vendor from
-current task ownership. It checks authority generation, task/attempt/epoch,
-monotonic lease and instructions, caps deadlines at the acknowledged launch
-ceiling, and latches revocation on failure. Controlled native pause testing proves
-process termination and durable broker closure separately. Native daemon Codex
-writer admission and complete execution fencing remain unavailable.
+The live account preview remains pinned to clean source
+`df252c50f8b26c223ba6de680ce0ceeea2f7ad4f`; its 61 artifact hashes were verified.
+Repository merges do not upgrade running bundles. Normal packaged CLI acceptance
+has completed with both a real Claude writer and a real Codex writer, each with
+an independent Codex verifier. These runs use the current local OS account's own
+HOME authentication. The Codex account-channel probe completed in 39.062 seconds,
+recorded two actual HTTP requests, passed content and network checks, and produced
+one source-bound accepted completion with all auxiliary invocations settled.
+The original project and installed bundle remained unchanged. These timings are
+individual observations, not performance guarantees.
+
+Local acceptance receipts are retained under the workspace's
+`reviews/agent-conductor-runtime-20261028/` directory:
+
+- `account-preview-acceptance-v1/receipt.json`: packaged Claude account workflow.
+- `account-codex-package-v2/receipt.json`: packaged Codex account workflow.
+- `account-cross-uid-macos-validation.json`: nine hashes binding source and local
+  and hosted checks, including the actual macOS and Linux cross-UID logs.
+
+The first Codex account probe's independent reviewer rejected evidence outside
+its readable roots. That failure is retained in `account-codex-package-v1/`.
+The second probe captures the HTTP response in the candidate for review; no
+acceptance decision was overridden.
+
+Completed, independently accepted immutable account snapshots can serve dependent
+tasks after restart. The old execution remains blocked and unfenced. Pre-spawn
+recovery has separate native acceptance evidence; restarting work after an
+unrestricted agent has already started remains an unresolved recovery policy and
+implementation gate. A peer receipt or process-group exit is not a machine-wide
+write fence.
 
 ## Functional audit
 
@@ -49,18 +73,15 @@ that every required behavior is accepted.
 | FR-7 events | Store event routing and repository observation; source echo, atomic delivery and bounded queues | Final native multi-agent event/ownership scenario |
 | FR-8 wake | Atomic eligibility plus coalesced dispatch notifications; measured wake probes documented in WAKE_SCHEDULING | Final native workload and continuous resource/invariant acceptance |
 | FR-9 completion | Source-bound isolated checks, independent verdict, atomic publication, exact-once completion controls | Final combined-candidate scenario including all hostile/failure controls |
-| FR-10 authority | Capability refusals, restricted Claude writer, isolated checks and read-only verifier | Complete supported-adapter denied-action suite; generic escaped-session fencing is not proved |
-| FR-11 adapters | Pinned Claude writer and Codex/Claude reviewer; vendor conformance controls | Codex writer is explicitly rejected by native_writer_launch; local-auth-only Claude workflow is not established by API-key-backed fixtures |
+| FR-10 authority | Explicit full-capability account profile, retained bounded profile, isolated checks and independent verifier | Complete profile-specific authority suite; generic escaped-session fencing is not proved |
+| FR-11 adapters | Real pinned Codex and Claude full-capability writers with own-HOME authentication and independent review; account-channel packaged acceptance | Final combined-candidate failure matrix and personal vendor login acceptance under distinct accounts |
 | FR-12 operator | CLI, authenticated local board, evidence, diagnostics, controls | Final installation/runbook acceptance; remote authenticated encrypted access not established |
 | FR-13 audit | Transactional audit, fixed public errors, bounded evidence and reported usage | Full privacy-surface review and final causal-record walkthrough |
 
-A proposed bounded broker route, with actual local tool-discovery evidence and
-remaining acceptance gates, is recorded in [CODEX_WRITER_DESIGN.md](CODEX_WRITER_DESIGN.md).
-It does not change native admission.
-
-The Codex writer gap is directly enforced in `crates/runtime/src/vendor.rs`:
-`native_writer_launch` only admits Claude without workspace commands. This is an
-intentional safety refusal, not support for both required writer adapters.
+`native_writer_launch` routes explicitly selected full-capability contracts to
+`full_capability_launch` before applying the bounded-profile Claude-only checks.
+The historical bounded broker proposal in [CODEX_WRITER_DESIGN.md](CODEX_WRITER_DESIGN.md)
+does not describe the current full-capability writer admission path.
 
 ## Non-functional and release gates
 
@@ -87,8 +108,9 @@ or bypass repository policy to produce a green delivery indicator.
 
 1. Preserve the combined auxiliary/native-observation acceptance evidence below,
    then complete the remaining lifecycle/effect and long-running acceptance.
-2. Close capability gaps for Codex writing and Linux isolation using explicit
-   design and real denied-action/fencing evidence before admitting them.
+2. Complete Linux check/reviewer isolation and the remaining profile-specific
+   authority tests. Preserve the delivered full-capability Codex and Claude paths
+   and their explicit distinction from bounded execution.
 3. Audit every failure case listed in REQUIREMENTS section 6 against exact tests;
    close uncovered cases rather than treating a family test as complete coverage.
 4. Complete the privacy-surface and supported-host acceptance suites, installation
