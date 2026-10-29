@@ -7,13 +7,21 @@ and network use. Conductor is the coordinator, not a replacement coding harness.
 The historical two-file-tool broker profile remains useful evidence about bounded
 file effects but is insufficient for the requested product.
 
-## Pending execution boundary
+## Selected execution boundary
 
-One operator question is open: use a separate execution environment with full
-capabilities and selected account access, or run with the existing user account
-across the host. No answer is inferred from elapsed time. Do not install/start a
-VM or container, change host permissions, or introduce a permanent restricted
-fallback as a substitute for that answer.
+The operator selected distinct operating-system user accounts with machine-wide
+access under each account's OS permissions. Workers are not confined to a project
+folder or required to run inside a VM/container. The selected harness invocations
+are `codex --yolo` and `claude --dangerously-skip-permissions`, with working roots
+following the operator's `$HOME/codex` or `$HOME/claude` convention per account.
+These are working-directory conventions, not additional filesystem restrictions.
+
+Preserve each account's own home, vendor login and environment. Conductor must
+launch as the selected account, record that identity with the attempt and keep
+ownership stable across restart/reassignment. Do not substitute the daemon user's
+credentials or a restricted file-only profile. Account separation does not itself
+prove that a stopped process left no descendants; recovery must still report the
+observed process state accurately.
 
 ## Required integration
 

@@ -8,8 +8,9 @@ that scope. Read this current audit before the historical paragraphs in STATUS.
 ## Capability correction
 
 The current acceptance target includes full shell, build/test, tool and network
-capability for the worker, per the operator's explicit direction. The execution
-boundary remains undecided. Existing file-only broker and restricted-writer
+capability for the worker, per the operator's explicit direction. Workers use
+separate OS accounts with machine-wide access under their account permissions
+and the operator-selected Codex/Claude bypass modes. Existing file-only broker and restricted-writer
 acceptance must not be presented as completion of that target. The critical
 user-visible scenario is a normal CLI-created task dispatched to a full-capability
 agent, followed by independent verification and exactly-once completion, including
