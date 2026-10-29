@@ -89,6 +89,16 @@ plus the current generation. A single query supplies the count and sample.
 Preparation, launch, process, receipt and host JSON are never included or decoded
 for this diagnostic. Malformed ownership data cannot hide a pending row.
 
+The authenticated `/api/invariants` endpoint returns the same read-only report
+as the CLI. The board displays diagnostic summaries and bounded task/invocation
+identifiers, using text nodes. It clears unavailable data and discards responses
+after disconnect; raw ownership payloads are not rendered. Current tests cover
+HTTP authentication/origin gates, fresh report routing, DOM text/bounds and late
+response refusal. An isolated native daemon verifies HTTP/CLI correspondence,
+degraded health and preserved unresolved state over two starts. This API/DOM
+validation does not claim a browser screenshot or physical recovery acceptance.
+Run the dependency-free DOM checks with `node --test tests/board_diagnostics.cjs`.
+
 Ordinary current-generation work is not flagged by this diagnostic. Legacy
 markers retain their separate report; settled invocations are excluded. This is
 an observation of unresolved persisted ownership, not proof of process liveness,

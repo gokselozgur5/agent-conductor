@@ -56,6 +56,9 @@ jobs:
           python3 -m unittest discover -s tests -p test_soak_control_plane.py -v
           python3 -m unittest discover -s tests -p test_runner_process_inventory.py -v
 
+      - name: Check board diagnostic rendering
+        run: node --test tests/board_diagnostics.cjs
+
       - name: Reject committed credential material
         shell: bash
         run: |

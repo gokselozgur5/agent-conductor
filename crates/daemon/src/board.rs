@@ -96,6 +96,7 @@ impl OperatorBoard {
             .route("/api/evidence", get(evidence::<S>))
             .route("/api/checkpoint", get(checkpoint::<S>))
             .route("/api/health", get(health::<S>))
+            .route("/api/invariants", get(invariants::<S>))
             .route("/api/control", post(controls::apply::<S>))
             .route("/api/workflows/continue", post(workflows::resume::<S>))
             .route("/api/workflows/reassign", post(workflows::reassign::<S>))
@@ -254,6 +255,9 @@ async fn inventory<S: ControlService>(
     )
     .await
 }
+async fn invariants<S: ControlService>(State(state): State<BoardState<S>>) -> Response {
+    query(&state, ControlRequest::CheckInvariants).await
+}
 async fn health<S: ControlService>(State(state): State<BoardState<S>>) -> Response {
     query(&state, ControlRequest::Health).await
 }
@@ -363,6 +367,66 @@ mod tests {
             2,
             "every refresh reads service state"
         );
+        stop.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn invariant_diagnostics_are_authenticated_fresh_and_read_only() {
+        #[derive(Clone)]
+        struct Diagnostics(Arc<AtomicUsize>);
+        impl ControlService for Diagnostics {
+            async fn handle(
+                &self,
+                request: ControlRequest,
+            ) -> Result<conductor_protocol::Response, conductor_protocol::ErrorBody> {
+                assert!(matches!(request, ControlRequest::CheckInvariants));
+                let count = self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(conductor_protocol::Response::Invariants(
+                    conductor_protocol::InvariantResponse {
+                        healthy: false,
+                        violations: vec![conductor_protocol::InvariantViolation {
+                            code: "auxiliary_recovery_pending".into(),
+                            summary: "preserve unresolved ownership".into(),
+                            context: serde_json::json!({"count":count}),
+                        }],
+                    },
+                ))
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let token = "synthetic-diagnostics-credential-000000";
+        let board = OperatorBoard::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            token.into(),
+            Diagnostics(Arc::clone(&calls)),
+        )
+        .await
+        .unwrap();
+        let address = board.address();
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(board.run_until(async move {
+            let _ = stopped.changed().await;
+        }));
+        let auth = format!("Authorization: Bearer {token}\r\n");
+        for headers in [
+            String::new(),
+            format!("{auth}Origin: http://evil.example\r\n"),
+        ] {
+            let response =
+                request(address, &address.to_string(), "/api/invariants", &headers).await;
+            assert!(response.starts_with("HTTP/1.1 401") || response.starts_with("HTTP/1.1 403"));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        for expected in 0..2 {
+            let response = request(address, &address.to_string(), "/api/invariants", &auth).await;
+            assert!(response.starts_with("HTTP/1.1 200"));
+            assert!(response.contains("cache-control: no-store"));
+            assert!(!response.contains(token));
+            let body: serde_json::Value =
+                serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            assert_eq!(body["type"], "invariants");
+            assert_eq!(body["violations"][0]["context"]["count"], expected);
+        }
         stop.send(true).unwrap();
         task.await.unwrap().unwrap();
     }

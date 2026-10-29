@@ -15,6 +15,9 @@ const text = (tag, value, className) => {
 };
 function disconnect() {
   token = '';
+  el('diagnostics').hidden = true;
+  el('diagnostics-entries').replaceChildren();
+  el('diagnostics-message').textContent = '';
   clearInventory();
   closeHistory();
   closeEvidence();
@@ -66,6 +69,7 @@ async function refresh() {
     if (currentToken !== token) return;
     if (health.type !== 'health') throw new Error('Unexpected health response.');
     el('connection').textContent = `${health.status === 'ready' ? 'Connected' : 'Degraded'} · Watcher: ${health.repository_watcher ?? 'unknown'} · ${new Date().toLocaleTimeString()}`;
+    await refreshDiagnostics(currentToken);
     await refreshQueue(currentToken);
   } catch (error) {
     if (currentToken === token) { el('message').textContent = error.message; el('connection').textContent = 'Connection lost · displayed data may be stale'; }
@@ -250,6 +254,7 @@ el('submit-plan').addEventListener('click', async () => {
     if (currentToken !== token) return;
     if (health.type !== 'health') throw new Error('Unexpected health response.');
     el('connection').textContent = `${health.status === 'ready' ? 'Connected' : 'Degraded'} · Watcher: ${health.repository_watcher ?? 'unknown'} · ${new Date().toLocaleTimeString()}`;
+    await refreshDiagnostics(currentToken);
     await refreshQueue(currentToken);
   } catch (_) { if(currentToken===token) el('message').textContent='Submission outcome unknown. Inspect queue before retrying.'; }
   finally { el('submit-plan').disabled=false; }
@@ -539,4 +544,37 @@ function renderEvidence(entry) {
   if (d.recorded_completion) field('Lifecycle result', 'Completion recorded');
   row.append(fields);
   return row;
+}
+
+async function refreshDiagnostics(currentToken) {
+  if (currentToken !== token) return;
+  try {
+    const response = await fetch('/api/invariants', {headers: {Authorization: `Bearer ${currentToken}`}, cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    if (currentToken !== token) return;
+    if (!response.ok) throw new Error('Diagnostics unavailable');
+    const data = await response.json();
+    if (currentToken !== token) return;
+    if (data.type !== 'invariants' || !Array.isArray(data.violations)) throw new Error('Invalid diagnostics');
+    renderDiagnostics(data);
+  } catch (_) {
+    if (currentToken !== token) return;
+    el('diagnostics').hidden = false;
+    el('diagnostics-entries').replaceChildren();
+    el('diagnostics-message').textContent = 'Recovery diagnostics unavailable. Refresh before acting; no recovery has been authorized.';
+  }
+}
+function renderDiagnostics(data) {
+  el('diagnostics').hidden = data.violations.length === 0;
+  el('diagnostics-message').textContent = data.violations.length > 128 ? 'Showing the first 128 diagnostics. Use check-invariants for the full report.' : 'Preserve task state and evidence while recovery is unresolved.';
+  el('diagnostics-entries').replaceChildren(...data.violations.slice(0,128).map(item => {
+    const row = text('li', `${String(item.code).slice(0,128)}: ${String(item.summary).slice(0,1024)}`);
+    if (item.code === 'auxiliary_recovery_pending' && Array.isArray(item.context?.invocations)) {
+      const details = text('ul', '');
+      for (const invocation of item.context.invocations.slice(0,128)) {
+        details.append(text('li', `Task ${String(invocation.task_id).slice(0,256)} · invocation ${String(invocation.invocation_id).slice(0,256)} · generation ${invocation.generation}`));
+      }
+      row.append(text('p', `${item.context.count} unresolved invocation(s); showing ${Math.min(item.context.invocations.length,128)}.`), details);
+    }
+    return row;
+  }));
 }
