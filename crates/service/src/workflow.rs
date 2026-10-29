@@ -279,13 +279,20 @@ impl<C: Clock> PersistentControlService<C> {
             if !worker_authentication.is_empty() {
                 return Err(invalid("account worker uses its own authentication"));
             }
-            self.stage_workflow_account(plan, packet, baseline, artifacts)
-                .await?;
-            self.start_workflow_writer(plan, packet, token).await?;
-            self.execute_account_workflow_writer(
-                plan, worker_pin, packet, token, baseline, artifacts,
-            )
-            .await
+            let result = async {
+                self.stage_workflow_account(plan, packet, baseline, artifacts)
+                    .await?;
+                self.start_workflow_writer(plan, packet, token).await?;
+                self.execute_account_workflow_writer(
+                    plan, worker_pin, packet, token, baseline, artifacts,
+                )
+                .await
+            }
+            .await;
+            if result.is_err() {
+                self.block_failed_account_workflow(packet).await?;
+            }
+            result
         } else {
             let candidate = self
                 .execute_workflow_writer(plan, worker_pin, packet, token, worker_authentication)
