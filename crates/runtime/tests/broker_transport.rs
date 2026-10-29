@@ -2,7 +2,7 @@
 use conductor_runtime::{
     BrokerError, BrokerFileResult, BrokerFilesystem, BrokerIntent, BrokerJournal, BrokerOperation,
     BrokerRequest, BrokerScope, BrokerStreamReason, MAX_BROKER_FRAME, continuous_millis,
-    serve_broker_stream,
+    serve_broker_stream, serve_owned_broker_stream,
 };
 use std::{
     sync::{Arc, Mutex, mpsc},
@@ -496,4 +496,89 @@ except (BrokenPipeError,ConnectionResetError):
     );
     assert!(journal.events.lock().unwrap().is_empty());
     assert!(!root.path().join("answer").exists());
+}
+
+#[tokio::test]
+async fn owned_idle_accepts_later_work_and_bounds_partial_frames() {
+    for partial in [false, true] {
+        let (root, broker, request) = fixture();
+        let journal = Arc::new(Journal::default());
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (_cancel, rx) = watch::channel(false);
+        let task = tokio::spawn(serve_owned_broker_stream(
+            server,
+            broker,
+            journal.clone(),
+            rx,
+            Duration::from_millis(100),
+            WAIT,
+        ));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(!task.is_finished());
+        if partial {
+            client.write_all(b"{").await.unwrap();
+        } else {
+            client.write_all(&encoded(&request)).await.unwrap();
+            let mut reader = BufReader::new(client);
+            let mut reply = String::new();
+            tokio::time::timeout(WAIT, reader.read_line(&mut reply))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&reply).unwrap()["result"]["type"],
+                "written"
+            );
+        }
+        let end = tokio::time::timeout(WAIT, task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            end.reason,
+            if partial {
+                BrokerStreamReason::TimedOut
+            } else {
+                BrokerStreamReason::PeerClosed
+            }
+        );
+        assert_eq!(end.completed_sequence, Some(u64::from(!partial)));
+        assert_eq!(root.path().join("answer").exists(), !partial);
+        assert_eq!(
+            journal.events.lock().unwrap().len(),
+            if partial { 0 } else { 2 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn owned_idle_observes_cancellation_and_sender_loss() {
+    for sender_loss in [false, true] {
+        let (_root, broker, _) = fixture();
+        let (server, _client) = UnixStream::pair().unwrap();
+        let (cancel, rx) = watch::channel(false);
+        let task = tokio::spawn(serve_owned_broker_stream(
+            server,
+            broker,
+            Arc::new(Journal::default()),
+            rx,
+            Duration::from_millis(100),
+            WAIT,
+        ));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(!task.is_finished());
+        if sender_loss {
+            drop(cancel);
+        } else {
+            cancel.send(true).unwrap();
+        }
+        let end = tokio::time::timeout(WAIT, task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(end.reason, BrokerStreamReason::Cancelled);
+        assert_eq!(end.completed_sequence, Some(0));
+    }
 }
