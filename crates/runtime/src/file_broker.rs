@@ -89,7 +89,7 @@ fn relative_path(path: &str) -> bool {
             .all(|p| !matches!(p, "" | "." | ".." | ".git"))
 }
 impl BrokerScope {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         digest(&self.authority_id)
             && self.boot_generation > 0
             && self.lease_epoch > 0

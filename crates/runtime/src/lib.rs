@@ -119,3 +119,8 @@ pub use broker_transport::*;
 mod broker_mcp;
 #[cfg(unix)]
 pub use broker_mcp::*;
+
+#[cfg(unix)]
+mod broker_endpoint;
+#[cfg(unix)]
+pub use broker_endpoint::*;

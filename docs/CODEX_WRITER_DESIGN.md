@@ -350,7 +350,7 @@ fixed tools are `conductor_read_text` and `conductor_write_text`; write requires
 explicit `expected_sha256` (null for create-only). Results carry serialized JSON
 text with content/digest or written digest. This is compatible with the documented
 [Codex stdio configuration surface](https://learn.chatgpt.com/docs/extend/mcp),
-but the installed CLI has not yet been exercised against this implementation.
+and the pinned-CLI controls below now exercise the executable translation path.
 
 Requests are newline-framed, bounded to 1 MiB, and serialized. IDs are bounded and
 tracked (at most 100,000 requests); reuse closes the session. Local argument errors
@@ -379,3 +379,66 @@ prove that an already-admitted operation stopped; the host must settle the broke
 and persist independent evidence before fencing. Endpoint authentication/handoff,
 actual store journal wiring, durable shutdown/restart reconciliation, CLI startup
 pins and native conformance remain required. Native Codex writing stays refused.
+
+## Single-use endpoint and executable proxy
+
+`BrokerEndpoint` binds one Unix socket in an existing canonical, operator-owned
+private directory. Its handoff pins parent/socket device and inode, a validated
+scope and a random 256-bit capability. The host supplies the bounded handoff only
+through `CONDUCTOR_BROKER_HANDOFF`; it must never enter argv, model context, logs,
+persisted launch/audit records or user-visible configuration. Kernel peer UID and
+a fixed authentication frame (version, capability, scope digest) are checked
+before handing the connected stream to the broker. Wrong or stalled first peers
+consume the endpoint too; there is no retry/reconnect or replacement capability.
+The host must durably register a fresh broker before exporting this handoff.
+Creating another endpoint object cannot authorize reopening an old scope.
+
+The socket entry is removed on completion/drop only while its pinned identity
+still matches. A replacement file is retained. These checks are not an atomic
+filesystem operation against a hostile same-UID path mover. The host must use OS
+policy to exclude untrusted same-UID access to the directory, its parents and the
+handoff environment. Private permission bits and matching UID do not establish a
+peer PID identity, mutual process attestation or that OS policy. This prerequisite
+remains unproved for the native adapter; endpoint authentication alone cannot
+justify native writer admission.
+
+`conductor-file-proxy` is a real stdio executable with no command-line arguments.
+It consumes the environment handoff, connects once, and runs the bounded MCP
+translator. It receives no task root or filesystem descriptor. Failed startup and
+protocol failures emit a fixed stderr message; stdout carries MCP frames only.
+Its blocking stdin reader cannot delay process exit after channel ownership ends.
+The library and executable remain outside the production native-writer launcher.
+
+Seven automated endpoint/process tests cover single-use authentication and byte
+preservation, wrong token/scope, non-private directories and replaced socket
+canaries, stalled authentication and accept-future abort, real proxy create/read
+and EOF, malformed environment privacy, and a proxy in a separate process group
+remaining alive after broker revocation before its late write is refused. The
+initial test fixture used default temporary-directory permissions and was
+correctly rejected; the fixture now requests mode0700 at creation. No endpoint
+permission requirement was weakened.
+
+Three opt-in tests also run the exact pinned Codex0.163.0 binary with a private
+HOME/CODEX_HOME and a local deterministic provider. The real Codex harness starts
+the real proxy and discovers both tools; it then executes write/read through the
+broker under an explicitly authorized two-tool profile. The host independently
+checks two admissions, the actual file bytes, sequence2 and peer EOF. The negative
+profile offers the same tools but leaves them unapproved: Codex refuses the write,
+no operation reaches the broker, and no file appears. Global approval policy stays
+`never`; the positive fixture uses only the documented per-tool
+[`approval_mode = "approve"`](https://learn.chatgpt.com/docs/extend/mcp) for those
+two tools, with server defaults prompting and an exact tool allow list.
+
+The local provider emits controlled [function-call stream events](https://developers.openai.com/api/docs/guides/function-calling),
+not model inference. It verifies that the capability is absent from received model
+requests and captured stdout/stderr/tool-inventory logs. The CLI reports fallback
+metadata for the fixture model `gpt-5.3-codex`; this is not all-model acceptance.
+Discovery alone makes no file calls; positive and denial results are separate.
+The first call attempt without per-tool permission failed its positive assertion;
+that evidence is retained and the denial is now an explicit negative control.
+No real model service, production authentication or original project is used.
+
+These tests do not prove OS confinement, full privacy coverage, live-model behavior,
+SQLite journal wiring, durable shutdown evidence, restart reconciliation or
+long-lived idle handling. Native Codex writing remains refused. The handed-off
+Claude-writer/Codex-reviewer release bundle is unchanged by this development.
