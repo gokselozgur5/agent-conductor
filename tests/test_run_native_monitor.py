@@ -75,6 +75,13 @@ class MonitorRunTests(unittest.TestCase):
                     run_native_monitor(Guard(),lambda:{},root/'run',duration_seconds=duration,interval_seconds=.1,pinned_files=[__file__])
                 self.assertFalse((root/'run').exists())
 
+    def test_seven_day_run_requires_resources_before_output_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            guard=Guard();guard.max_gap=20
+            with self.assertRaisesRegex(Violation,'soak_resources_required'):
+                run_native_monitor(guard,lambda:{},Path(directory)/'run',duration_seconds=604800,interval_seconds=10,pinned_files=[__file__])
+            self.assertFalse((Path(directory)/'run').exists())
+
 
 if __name__=='__main__':
     unittest.main()

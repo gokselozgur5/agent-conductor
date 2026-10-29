@@ -28,7 +28,7 @@ def pin(path):
 
 
 def run_native_monitor(guard, invariant_reader, output, *, duration_seconds,
-                       interval_seconds, pinned_files):
+                       interval_seconds, pinned_files, resources=None):
     """Observe an already-owned test runtime; caller owns workload and cleanup.
 
     Reader transport must have a finite timeout. Existing output is never reused.
@@ -40,10 +40,13 @@ def run_native_monitor(guard, invariant_reader, output, *, duration_seconds,
     require(interval_seconds < guard.max_gap, 'invalid_monitor_cadence')
     require(math.ceil(duration_seconds/interval_seconds)+2 <= 150000, 'monitor_sample_limit')
     require(guard.board_reader is not None, 'board_reader_required')
+    require(duration_seconds < SEVEN_DAYS or resources is not None, 'soak_resources_required')
+    require(resources is None or resources.database == guard.database, 'resource_database_mismatch')
     require(0 < len(pinned_files) <= 8, 'runtime_pins_required')
     sources = [Path(__file__), Path(__file__).with_name('native_observation_guard.py'),
                Path(__file__).with_name('inspect_runner_processes.py'),
                Path(__file__).with_name('process_birth.py'),
+               Path(__file__).with_name('native_resource_guard.py'),
                Path(__file__).with_name('soak_control_plane.py')]
     files = {str(Path(p).resolve(strict=True)): pin(p) for p in [*pinned_files, *sources]}
     output = Path(output)
@@ -60,15 +63,18 @@ def run_native_monitor(guard, invariant_reader, output, *, duration_seconds,
     error = None
     record = dict(scope='sampled_native_process_board_and_protected_tree',
                   full_v1_accepted=False, duration_seconds=duration_seconds,
-                  interval_seconds=interval_seconds, started_wall_s=wall, pinned_sha256=files)
+                  interval_seconds=interval_seconds, started_wall_s=wall, pinned_sha256=files,
+                  resource_limits=None if resources is None else dict(resources.limits),
+                  observed_daemon=None if resources is None else dict(pid=resources.pid, start_marker=resources.birth))
     atomic_json(output/'run.json', record)
     try:
         descriptor = os.open(output/'samples.jsonl', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600)
         with os.fdopen(descriptor, 'w') as stream:
             while True:
                 sample_started = time.monotonic()
+                require(resources is None or dict(resources.limits) == record['resource_limits'], 'resource_limits_changed')
                 last = guard.sample(invariant_reader())
-                last = dict(last, elapsed_s=time.monotonic()-started)
+                last = dict(last, resources=None if resources is None else resources.sample(), elapsed_s=time.monotonic()-started)
                 samples += 1
                 require(samples <= 150000, 'monitor_sample_limit')
                 tagged = max(tagged, last['tagged_observations'])

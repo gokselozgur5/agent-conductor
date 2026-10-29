@@ -111,5 +111,33 @@ A duration below seven days always yields `completed_short_native_probe`, even i
 a delayed run lasts longer. A full requested seven-day run can yield only
 `completed_sampled_native_soak`, with `full_v1_accepted` still false. Neither status
 proves complete fault coverage, arbitrary descendant containment, continuous
-workload activity, resource-growth bounds or revocation of write capability.
+workload activity, whole-process-tree resource bounds or revocation of write capability.
 Keep the existing control-plane endurance run separate.
+
+## Selected daemon resource limits
+
+Pass a `NativeResourceGuard` as `resources=` to the unattended loop. Its database
+must match the observation guard. A requested seven-day run refuses without this
+resource guard; short compatibility probes explicitly record null resource limits
+when it is absent. Limits are copied into the run receipt and cannot change during
+sampling. PID and kernel start marker identify the selected daemon in that receipt.
+
+The resource guard verifies the kernel start marker before and after each sample,
+reads bounded native RSS, and caps both absolute RSS and growth from the first
+observed baseline. It counts SQLite database/WAL/SHM bytes plus explicitly selected
+log files, pending/leased event deliveries, and unfinished workflow dispatches.
+Terminal event history is not pending backlog. Query and process-read deadlines,
+missing database/process observations, malformed RSS and special files refuse.
+Failures latch; the observer never stops or signals the measured process.
+
+Defaults are 512 MiB RSS, 64 MiB RSS growth, 2 GiB selected state/log bytes, 256
+pending deliveries and 256 unfinished dispatches. Callers must select limits and
+log paths appropriate to the isolated test before starting. Samples record actual
+measurements and the baseline. These are selected-daemon/selected-file limits,
+not total process-tree memory, all artifact storage, queue age or leak attribution.
+
+Controls include every resource refusal and PID changes. A separate owned Python
+process allocates 32 MiB after baseline; the native RSS observation exceeds an
+8 MiB growth limit and permanently fails. This demonstrates detection, not a leak
+in Conductor. Native workflow acceptance records the same measurements while the
+actual daemon dispatches and verifies work.
