@@ -1,5 +1,7 @@
 mod broker_candidate_failure;
 pub use broker_candidate_failure::BrokerCandidateFailure;
+mod broker_candidate;
+pub use broker_candidate::BrokerCandidate;
 mod broker_authority;
 mod broker_vendor_session;
 pub use broker_vendor_session::BrokerVendorOutcome;
