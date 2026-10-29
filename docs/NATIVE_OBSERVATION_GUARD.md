@@ -141,3 +141,22 @@ process allocates 32 MiB after baseline; the native RSS observation exceeds an
 8 MiB growth limit and permanently fails. This demonstrates detection, not a leak
 in Conductor. Native workflow acceptance records the same measurements while the
 actual daemon dispatches and verifies work.
+
+## Escaped-session writer control
+
+The actual runner is tested with an explicitly controlled fake-adapter launch
+whose child starts a new session. After the runner reports `stopped/cancelled`
+and exits, that child remains alive and writes to the owned test workspace only
+when the test releases a separate gate. The protected-surface guard detects that
+post-stop write and fails. The bounded child then settles; no model is invoked.
+
+This is a counterexample to treating process-group cancellation as arbitrary
+process-tree fencing. The fake adapter is a test primitive, not native vendor
+admission. An independent adapter-boundary regression requires command-capable
+Claude and Codex writers to return `VendorError::Capability` before constructing
+a launch. Neither the stop event nor this diagnostic grants recovery authority.
+
+The negative guard control uses synthetic durable scope and runtime-health input.
+It proves detection for a selected protected workspace, not discovery of every
+untagged descendant or containment of arbitrary native commands. The real native
+workflow acceptance remains restricted to the admitted file-writer capability.
