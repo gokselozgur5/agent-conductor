@@ -158,6 +158,7 @@ mod tests {
         })).unwrap();
         let baseline = GitSnapshot {
             starting_head: "c".repeat(40),
+            starting_ref: None,
             status_sha256: "d".repeat(64),
             manifest: manifest.clone(),
         };

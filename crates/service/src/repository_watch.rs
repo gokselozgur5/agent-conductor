@@ -205,8 +205,9 @@ impl<C: Clock> PersistentControlService<C> {
             Err(_) => return Err(invalid("repository observation refused")),
         };
         let fingerprint = format!(
-            "{}:{}:{}",
+            "{}:{:?}:{}:{}",
             observed.starting_head,
+            observed.starting_ref,
             observed.status_sha256,
             observed
                 .manifest
@@ -422,6 +423,7 @@ impl<C: Clock> PersistentControlService<C> {
         .map_err(|_| invalid("owned configuration encoding"))?;
         let current = GitSnapshot {
             starting_head: packet.contract.starting_head.clone(),
+            starting_ref: None,
             status_sha256: manifest
                 .sha256()
                 .map_err(|_| invalid("owned manifest hash"))?,
@@ -620,6 +622,11 @@ fn changes(
         events.push(envelope(config,version,"git.head_changed",None,&serde_json::json!({"before":old.starting_head,"after":current.starting_head,"attribution":"external"}),now)?);
         next.starting_head.clone_from(&current.starting_head);
     }
+    if old.starting_ref != current.starting_ref {
+        events.push(envelope(config, version, "git.ref_changed", None,
+            &serde_json::json!({"before":old.starting_ref,"after":current.starting_ref,"attribution":"external"}), now)?);
+        next.starting_ref.clone_from(&current.starting_ref);
+    }
     for path in paths {
         if events.len() >= 256 {
             break;
@@ -758,6 +765,7 @@ mod tests {
     fn snapshot(count: usize) -> GitSnapshot {
         GitSnapshot {
             starting_head: "a".repeat(40),
+            starting_ref: None,
             status_sha256: "b".repeat(64),
             manifest: conductor_runtime::SnapshotManifest {
                 version: 1,
@@ -772,6 +780,35 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn same_commit_reference_change_publishes_once_then_settles() {
+        let config = RepositoryWatch {
+            id: "watch".into(),
+            project_id: "project".into(),
+            source_agent_id: "source".into(),
+            root: "/fixture".into(),
+        };
+        let mut old = snapshot(1);
+        old.starting_ref = Some("refs/heads/main".into());
+        let mut current = old.clone();
+        current.starting_ref = Some("refs/heads/other".into());
+        let (next, events) = changes(&config, 1, &old, &current, 100).unwrap();
+        assert_eq!(next, current);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].topic, "git.ref_changed");
+        assert!(
+            changes(&config, 2, &next, &current, 101)
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        current.starting_ref = Some("HEAD".into());
+        let (detached, events) = changes(&config, 2, &next, &current, 102).unwrap();
+        assert_eq!(detached, current);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].topic, "git.ref_changed");
+    }
+
     #[test]
     fn bounded_batches_drain_storm_without_losing_paths_or_reusing_ids() {
         let config = RepositoryWatch {

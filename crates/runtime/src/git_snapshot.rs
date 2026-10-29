@@ -15,12 +15,16 @@ use tokio::sync::watch;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GitSnapshot {
     pub starting_head: String,
+    /// Symbolic HEAD target, or `HEAD` when detached; absent in legacy inventories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_ref: Option<String>,
     pub status_sha256: String,
     pub manifest: SnapshotManifest,
 }
 #[derive(Eq, PartialEq)]
 struct Inventory {
     head: String,
+    head_ref: String,
     status_sha256: String,
     paths: Vec<String>,
 }
@@ -46,6 +50,7 @@ pub async fn snapshot_git(source: &Path, destination: &Path) -> Result<GitSnapsh
     }
     let snapshot = GitSnapshot {
         starting_head: before.head,
+        starting_ref: Some(before.head_ref),
         status_sha256: before.status_sha256,
         manifest,
     };
@@ -79,6 +84,7 @@ pub async fn observe_git(source: &Path) -> Result<GitSnapshot, SnapshotError> {
     }
     Ok(GitSnapshot {
         starting_head: before.head,
+        starting_ref: Some(before.head_ref),
         status_sha256: before.status_sha256,
         manifest,
     })
@@ -142,6 +148,20 @@ async fn inventory(root: &Path) -> Result<Inventory, SnapshotError> {
     if ![40, 64].contains(&head.len()) || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(SnapshotError::Invalid);
     }
+    let symbolic = git_status(root, &["symbolic-ref", "--quiet", "HEAD"]).await?;
+    let head_ref = match symbolic.exit_code {
+        Some(0) => {
+            let reference =
+                String::from_utf8(symbolic.stdout).map_err(|_| SnapshotError::Unsupported)?;
+            let reference = reference.trim_end_matches('\n');
+            if !reference.starts_with("refs/") || reference.contains(['\n', '\r']) {
+                return Err(SnapshotError::Invalid);
+            }
+            reference.to_owned()
+        }
+        Some(1) => "HEAD".to_owned(),
+        _ => return Err(SnapshotError::Io),
+    };
     let raw = git(
         root,
         &[
@@ -171,6 +191,7 @@ async fn inventory(root: &Path) -> Result<Inventory, SnapshotError> {
     .await?;
     Ok(Inventory {
         head,
+        head_ref,
         status_sha256: format!("{:x}", Sha256::digest(status)),
         paths,
     })
