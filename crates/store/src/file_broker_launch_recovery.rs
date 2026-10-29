@@ -143,6 +143,7 @@ mod tests {
                 .is_err()
         );
         proof.process.pid -= 1;
+        assert_registered_refused(&store, &binding, &proof).await;
         store.inner.writer.lock().await.execute("CREATE TRIGGER reject_launch_recovery BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.launch_recovered' BEGIN SELECT RAISE(FAIL,'fixture'); END").await.unwrap();
         let before = snapshot(&mut *store.inner.writer.lock().await).await;
         assert!(
@@ -197,5 +198,30 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+    async fn assert_registered_refused(
+        store: &Store,
+        binding: &FileBrokerBinding,
+        proof: &UnreleasedBrokerLaunchProof,
+    ) {
+        sqlx::query("INSERT INTO file_brokers(invocation_id,execution_token,binding_json,state,created_at_ms) VALUES(?,?,?,'open',100)")
+            .bind(&binding.invocation_id).bind(&binding.execution_token).bind(binding.encoded().unwrap())
+            .execute(&mut *store.inner.writer.lock().await).await.unwrap();
+        let registered = snapshot(&mut *store.inner.writer.lock().await).await;
+        assert!(
+            store
+                .recover_unregistered_broker_launch(binding, proof, 2, audit("recover-registered"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            snapshot(&mut *store.inner.writer.lock().await).await,
+            registered
+        );
+        sqlx::query("DELETE FROM file_brokers WHERE invocation_id=?")
+            .bind(&binding.invocation_id)
+            .execute(&mut *store.inner.writer.lock().await)
+            .await
+            .unwrap();
     }
 }
