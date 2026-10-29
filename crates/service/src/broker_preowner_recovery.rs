@@ -18,6 +18,19 @@ pub async fn recover_unregistered_broker_from_receipt(
     generation: i64,
     event: EffectAudit<'_>,
 ) -> Result<bool, BrokerError> {
+    let host = HostEpoch::current()
+        .await
+        .map_err(|_| BrokerError::Refused)?;
+    recover_on_host(store, binding, generation, event, &host).await
+}
+
+pub(super) async fn recover_on_host(
+    store: &Store,
+    binding: &FileBrokerBinding,
+    generation: i64,
+    event: EffectAudit<'_>,
+    host: &HostEpoch,
+) -> Result<bool, BrokerError> {
     let launch = store
         .file_broker_launch(binding)
         .await
@@ -28,9 +41,6 @@ pub async fn recover_unregistered_broker_from_receipt(
         .map_err(|_| BrokerError::Refused)?
         .ok_or(BrokerError::Refused)?;
     let process = execution.process.ok_or(BrokerError::Refused)?;
-    let host = HostEpoch::current()
-        .await
-        .map_err(|_| BrokerError::Refused)?;
     let root = Path::new(&launch.receipt_root);
     if host.platform != launch.platform
         || host.host_id != launch.host_id
@@ -91,4 +101,49 @@ pub async fn recover_unregistered_broker_from_receipt(
         )
         .await
         .map_err(|_| BrokerError::Admission)
+}
+
+impl<C: crate::Clock> crate::PersistentControlService<C> {
+    pub(super) async fn recover_preowner_broker_receipts(
+        &self,
+    ) -> Result<usize, agent_conductor_store::StoreError> {
+        let mut cursor = self.broker_preowner_cursor.lock().await;
+        let page = self
+            .store
+            .pending_unregistered_broker_launch_page(cursor.as_deref())
+            .await?;
+        *cursor = if page.len() == 128 {
+            page.last().map(|row| row.invocation_id.clone())
+        } else {
+            None
+        };
+        if page.is_empty() {
+            return Ok(0);
+        }
+        let Ok(host) = HostEpoch::current().await else {
+            return Ok(0);
+        };
+        let generation = i64::try_from(self.boot_generation)
+            .map_err(|_| agent_conductor_store::StoreError::BootGenerationOverflow)?;
+        let mut recovered = 0;
+        for candidate in page {
+            let Ok(binding) = candidate.binding else {
+                continue;
+            };
+            let id = uuid::Uuid::now_v7().to_string();
+            let event = EffectAudit {
+                id: &id,
+                actor_id: "conductor-preowner-recovery",
+                correlation_id: &binding.invocation_id,
+                now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+            };
+            if matches!(
+                recover_on_host(&self.store, &binding, generation, event, &host).await,
+                Ok(true)
+            ) {
+                recovered += 1;
+            }
+        }
+        Ok(recovered)
+    }
 }

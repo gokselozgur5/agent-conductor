@@ -714,3 +714,23 @@ reconciliation, complete journal/release lifetime ownership, native vendor launc
 OS denial controls and operational endurance remain open. Host policy must exclude
 untrusted writers and movers from the approved executable and private receipt
 roots; a file digest alone does not approve arbitrary executable behavior.
+
+
+## Bounded pre-owner discovery (issue #96)
+
+The existing opt-in interrupted-workflow recovery path now scans up to 128
+ACK-bearing, never-registered open preparations before owned-broker and writer
+fence reconciliation. A dedicated cursor is shared across service clones; each
+page samples the native host once and decodes candidates independently. Missing
+ACK, malformed binding or absent proof never grants closure or another spawn.
+
+An actual-runner restart regression places 129 malformed, foreign-key-valid
+preparations before a genuine NeverReleased receipt. The first pass retains the
+genuine preparation; a clone reaches and closes it on the second page while all
+129 malformed records remain unresolved. Closing this preparation admits zero
+workflow continuations and is not an execution fence.
+
+This supersedes the preceding explicit-only discovery limitation for unregistered,
+ACK-bearing preparations. Registered-but-unowned brokers, pre-ACK uncertainty,
+full journal/release supervision, vendor admission and operational acceptance
+remain outstanding.
