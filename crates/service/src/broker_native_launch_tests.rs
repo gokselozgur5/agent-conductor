@@ -908,3 +908,7 @@ mod codex_session {
 mod vendor_supervision {
     include!("broker_vendor_session_tests.rs");
 }
+
+mod owned_codex {
+    include!("broker_owned_codex_tests.rs");
+}
