@@ -148,3 +148,59 @@ async fn broker_service_authority_observes_operator_stop_and_lock_stall() {
             .unwrap();
     }
 }
+
+#[tokio::test]
+async fn broker_service_authority_never_extends_acknowledged_launch_ceiling() {
+    let (directory, store) = lifecycle_store().await;
+    let clock = FixedClock::new(0);
+    let service = PersistentControlService::start_with_clock(store.clone(), 100, clock.clone())
+        .await
+        .unwrap();
+    let (claimed, _) = claim_task(&service).await;
+    let row = store.task("task").await.unwrap().unwrap();
+    service
+        .apply_row(
+            row,
+            lifecycle_command(
+                &claimed,
+                Actor {
+                    id: ActorId("worker".into()),
+                    role: ActorRole::Worker,
+                },
+                CommandKind::Heartbeat {
+                    attempt_id: AttemptId("attempt".into()),
+                    lease_epoch: 1,
+                    lease_duration_ms: 10000,
+                    worker_margin_ms: 0,
+                },
+                "ceiling-heartbeat",
+            ),
+        )
+        .await
+        .unwrap();
+    let packet = runtime_launch(directory.path()).packet;
+    let binding = broker_authority_binding(directory.path(), &store).await;
+    let ceiling = conductor_runtime::continuous_millis().unwrap() + 2000;
+    service
+        .with_broker_authority(&packet, &binding, ceiling, |mut lease| async move {
+            assert_eq!(*lease.borrow_and_update(), Some(ceiling));
+            tokio::time::timeout(std::time::Duration::from_secs(1), lease.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(*lease.borrow_and_update(), Some(ceiling));
+            // The worker's lease remains valid, but the immutable launch must expire.
+            tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                while lease.borrow_and_update().is_some() {
+                    lease.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(*lease.borrow(), None);
+        })
+        .await
+        .unwrap();
+    assert_eq!(clock.read(service.boot_generation).monotonic_ms, 0);
+    assert!(service.validate_runtime_owner(&packet).await.is_ok());
+}
