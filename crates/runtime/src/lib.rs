@@ -104,3 +104,8 @@ pub use auxiliary_client::*;
 
 mod file_broker;
 pub use file_broker::*;
+
+#[cfg(unix)]
+mod broker_filesystem;
+#[cfg(unix)]
+pub use broker_filesystem::*;

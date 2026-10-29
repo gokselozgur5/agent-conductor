@@ -1,6 +1,6 @@
 # Codex writer capability design
 
-Status: proposed implementation, supported by bounded tool-discovery evidence.
+Status: protocol and isolated file port implemented; production integration remains proposed.
 Native Codex writer admission remains refused. This design does not certify a
 file-only adapter, write fencing, model behavior or complete v1 delivery.
 
@@ -114,8 +114,9 @@ types and a serial in-process capability gate. Scope binds authority, boot
 generation, invocation UUID, task, attempt and lease epoch. Requests use exact
 monotonic sequence numbers, at most 100,000 operations, a 1 MiB encoded frame
 limit, 256 KiB text writes and lexical relative paths. Write replacement requires
-an expected digest; absent digest means create-only. Actual filesystem enforcement
-of that precondition is the next trusted port, not implemented by the gate.
+an expected digest; absent digest means create-only. The concrete filesystem port
+below enforces that precondition within a private tree whose external writers
+must be excluded; the gate alone does not.
 
 The gate constructs a content-bound intent digest, invokes the trusted admission
 port, rechecks revocation/deadline, then invokes the synchronous operation port.
@@ -139,7 +140,50 @@ panic poisoning. Port callbacks and intent markers are synthetic; these are not
 SQLite durability, process-death, proxy confinement or native Codex acceptance.
 No production launcher uses the gate yet and Codex writer admission stays closed.
 
-Next: connect concrete durable intent admission and root-scoped file operations
-to this primitive, then the private broker/proxy transport. Physical path races,
-symlinks/hardlinks, filesystem interruption, orphan proxy and actual adapter
-negative controls remain required before granting a write capability.
+Next: connect durable intent admission and the filesystem port below to the
+private broker/proxy transport. Filesystem interruption, orphan proxy and actual
+adapter negative controls remain required before granting a write capability.
+
+## Concrete bounded filesystem port
+
+`BrokerFilesystem` owns its gate and pinned directory descriptor. The only public
+operation path admits the intent and serializes actual reads/writes through that
+gate. UTF-8 reads and writes are bounded to 256 KiB; cumulative write contents are
+limited to 64 MiB per instance. It opens intermediate directories and final files
+relative to descriptors without following symlinks. It refuses hardlinks, special
+files, cross-device descendants, case variants of `.git`, and the reserved
+`.conductor-broker-` staging namespace. Root identity is rechecked before work and
+publication. This is not a policy for an arbitrary mutable host directory.
+
+Creates and replacements first write an exclusive invocation/sequence-named
+staging file, sync its bytes and permissions, then publish it. Create-only uses
+an atomic hardlink operation that cannot replace an existing name, followed by
+removal of the staging name; replacement uses rename after rechecking the prior
+content digest. Parent directory sync precedes a successful return. Replacement
+preserves ordinary permission bits but does not propagate special privilege bits.
+A failed admitted operation closes the gate as uncertain. No failure cleanup
+removes staging evidence; pre-existing staging names are never overwritten.
+
+**Required host invariant:** the broker must be the only writer to the private
+attempt tree, including its directories. Descriptor traversal and repeated
+checks do not prevent another writer from moving an already opened directory
+outside the root or modifying a destination after its digest check. This port
+does not supply an atomic content compare-and-swap against a hostile concurrent
+writer. The launcher must establish OS-enforced read-only access for Codex/proxy
+and exclude other writers before granting this capability. That integration and
+its adversarial race acceptance remain unimplemented. Root replacement and
+static symlink/hardlink refusals in tests do not prove this host invariant.
+
+Real temporary-file regressions cover create/read/replace, executable permission
+preservation, duplicate create and digest mismatch, outside canaries behind file
+and directory links, hardlinks, FIFO nonblocking refusal, root replacement during
+admission, invalid text/size, protected staging and Git names, retained staging
+collision and admission failure. A private unit control seeds an exhausted byte
+budget and proves refusal before a filesystem effect; it is not a measured 64 MiB
+load run. No crash/power-loss durability, native Codex confinement or durable
+SQLite admission is claimed by these tests.
+
+This minimum port handles existing directories and text files. Directory creation,
+listing, deletion and binary editing remain explicit capability work; they are not
+silently supported. Store admission, completion receipts, restart reconciliation,
+proxy transport and native end-to-end acceptance remain the next integration work.
