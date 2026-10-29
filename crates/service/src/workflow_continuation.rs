@@ -12,7 +12,9 @@ impl<C: Clock> PersistentControlService<C> {
     /// # Errors
     /// Returns storage errors; missing fence evidence never grants admission.
     pub async fn recover_interrupted_workflows(&self) -> Result<usize, StoreError> {
+        self.recover_file_broker_receipts().await?;
         self.recover_fenced_receipts().await?;
+        self.recover_auxiliary_receipts().await?;
         let _guard = self.mutations.lock().await;
         let mut count = 0;
         for job in self.store.interrupted_workflows().await? {
@@ -71,6 +73,7 @@ impl<C: Clock> PersistentControlService<C> {
         if task.version != version
             || task.state.is_terminal()
             || self.store.has_unfenced_execution(task_id).await?
+            || self.store.has_pending_auxiliary(task_id).await?
         {
             return Err(invalid(
                 "continuation requires current nonterminal task and verified prior write fences",

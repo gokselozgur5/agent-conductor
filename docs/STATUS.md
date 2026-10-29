@@ -1,8 +1,83 @@
 # Status
 
-## Current result
+For the current requirement-by-requirement delivery gaps, see
+[Delivery acceptance audit](DELIVERY_ACCEPTANCE.md). Later sections retain
+historical evidence and must not be read as current feature inventories.
 
-Candidate migration 19 persists the expected wrapper UUID before spawn and checks
+## Integrated candidate
+
+Draft [PR #91](https://github.com/gokselozgur5/agent-conductor/pull/91) on
+`codex/delivery-integration` combines the auxiliary ownership
+and native-observation candidates. It adds scoped auxiliary process observation,
+with 348 Rust and 112 Python tests and a real monitored Claude/check/Codex workflow.
+Both auxiliary roles are observed while live; an actual scoped orphan is detected.
+The first 10-second-grace probe failed and is retained; the separate accepted probe
+uses the existing configurable 60-second observation grace. This candidate is not
+installed into the operator runtime or accepted as the full product.
+
+## Published auxiliary candidate
+
+Draft [PR #90](https://github.com/gokselozgur5/agent-conductor/pull/90), tracked by
+[issue #89](https://github.com/gokselozgur5/agent-conductor/issues/89), adds the
+auxiliary process ownership candidate through schema 25. It is not merged or
+installed into the existing schema-19 operator runtime.
+
+Checks and independent verifiers now commit invocation ownership before external
+effects, bind native process identity before release, and require private
+settlement evidence before atomically publishing an invocation-linked result.
+Recovery handles no-launch and pre-ACK proofs, bounded paged inventories, legacy
+uncertainty, and evidence-supported native boot transitions when a receipt is
+missing. Native origin evidence commits with each new invocation. A host fence
+never substitutes for a successful check or verdict. See
+[AUXILIARY_PROCESS_OWNERSHIP.md](AUXILIARY_PROCESS_OWNERSHIP.md) for the contracts,
+fixtures and precise refusal paths.
+
+The schema-25 candidate passes 345 local workspace Rust tests, 73 Python tests,
+strict Clippy, formatting and build checks. Positive native boot changes
+remain synthetic tests; real same-boot observation and supervisor controls do
+not establish physical reboot acceptance. Hosted CI is currently refused before
+steps by the account payment/spending-limit check. Local tests do not resolve
+that external blocker or provide unrun Linux acceptance.
+
+Controlled native verifier pre-ACK and both terminal-proof/before-result
+publication crash boundaries now pass, with one continuation and no old-result
+publication. Nonlegacy pending ownership from another daemon generation is
+reported by a bounded `auxiliary_recovery_pending` invariant diagnostic, exposed
+through the authenticated board API and recovery panel. Two DOM tests and an
+isolated native HTTP/CLI restart probe pass. Separate real Chrome desktop and
+390-pixel mobile checks verify readable diagnostics, no horizontal overflow and
+clearing on disconnect; they do not establish general browser compatibility.
+
+The [auxiliary fault matrix](AUXILIARY_FAULT_MATRIX.md) identifies exact tested
+boundaries and remaining gaps, separating abrupt process death from cancellation
+and controlled daemon relays. Admission now has abrupt child-process coverage on
+both sides of its transaction for both roles. Result publication adds six real
+child exits at task/link writes and after commit, with exact rollback/replay checks;
+these synthetic store batches do not replace native domain-completion acceptance.
+
+Completed tasks whose dispatch finish write was interrupted are now reconciled
+at startup and maintenance from validated historical acceptance, without relaunch.
+The reproduced native stale-queue fixture repairs across two starts with task and
+ownership records unchanged, no model calls and one reconciliation audit.
+
+A separate native verdict-to-completion interruption now passes: the accepted
+verdict survives daemon loss, exactly one continuation performs fresh checks and
+independent review, and one completion remains stable across restart. Original
+publications are preserved; this uses controlled completion-write refusal.
+
+Native partial-copy interruption controls also pass for check and verifier
+preparation: incomplete copies and unbound ownership remain unchanged across two
+same-boot restarts, with no result publication or replacement worker. This is
+verified refusal, not automatic recovery.
+
+Next acceptance work: audit remaining operational recovery and release gates;
+finish physical host recovery, native
+endurance, privacy and supported-host/release checks. Keep the existing
+control-plane-only soak separate from full native/v1 acceptance. No automatic
+reboot, marker deletion, fabricated receipt or CI-policy bypass is authorized by
+this candidate.
+
+The existing schema-19 runtime persists the expected wrapper UUID before spawn and checks
 ACK against that intent. A private trusted wrapper receipt can now prove that no
 worker started and fence the exact prepared attempt without inventing an ACK.
 Legacy/unknown evidence stays blocked; normal finite continuation gates apply.

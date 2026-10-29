@@ -91,3 +91,56 @@ pub use child_identity::ChildIdentity;
 
 mod unstarted_receipt;
 pub use unstarted_receipt::*;
+
+#[cfg(unix)]
+mod auxiliary_runner;
+#[cfg(unix)]
+pub use auxiliary_runner::*;
+
+#[cfg(unix)]
+mod auxiliary_client;
+#[cfg(unix)]
+pub use auxiliary_client::*;
+
+mod file_broker;
+pub use file_broker::*;
+
+#[cfg(unix)]
+mod broker_filesystem;
+#[cfg(unix)]
+pub use broker_filesystem::*;
+
+#[cfg(unix)]
+mod broker_transport;
+#[cfg(unix)]
+pub use broker_transport::*;
+
+#[cfg(unix)]
+mod broker_mcp;
+#[cfg(unix)]
+pub use broker_mcp::*;
+
+#[cfg(unix)]
+mod broker_endpoint;
+#[cfg(unix)]
+pub use broker_endpoint::*;
+
+#[cfg(unix)]
+mod broker_journal_wire;
+#[cfg(unix)]
+pub use broker_journal_wire::*;
+
+#[cfg(unix)]
+mod broker_runner;
+#[cfg(unix)]
+pub use broker_runner::*;
+
+#[cfg(unix)]
+mod broker_receipt;
+#[cfg(unix)]
+pub use broker_receipt::*;
+
+#[cfg(unix)]
+mod broker_client;
+#[cfg(unix)]
+pub use broker_client::*;

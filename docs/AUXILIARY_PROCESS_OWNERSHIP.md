@@ -1,0 +1,281 @@
+# Auxiliary process ownership
+
+Issue #89 tracks checks and independent verifiers that outlive their daemon.
+A fenced writer does not establish settlement of these later processes. Actual
+native crash controls reproduced automatic continuation while an old approved
+check shell remained alive in its disposable sandbox.
+
+The candidate adds schema 20 auxiliary invocation records before check capture
+or review-copy preparation and process launch. Each immutable record binds a
+fresh invocation UUID, task/version, writer execution/attempt, boot generation,
+source identity, definition digest, role and private destination. Preparation
+and audit commit together. Identical retries return no launch permission;
+changed identity reuse refuses. One pending invocation excludes another for
+that task. Admission requires the current verifying task/source, a fenced writer,
+no unfenced writer and the current runtime generation.
+
+Schema 21 binds the exact launch digest, wrapper path/hash and private receipt
+root before supervisor creation. The parent independently samples the Ready PID,
+kernel birth and host epoch, then atomically records that identity and release
+authorization before writing Release. Replays grant neither spawn nor release.
+Task/version/source/authority/boot ownership is rechecked at both admission steps.
+The runtime authority is the existing 64-character digest, not an invocation UUID.
+
+Both native required checks and independent review use this session. The client
+renews while awaiting a bounded terminal frame without discarding partial reads.
+A terminal event alone cannot publish results: the service must first verify the
+private receipt against persisted launch/process identity and unchanged wrapper
+pin. Settlement and audit commit together. Restart reconciliation accepts an old
+invocation's proof only under the current runtime generation and same authority;
+it runs before interrupted workflow admission. Direct claim/requeue, reassignment
+and continuation refuse pending auxiliary ownership independently of writer fences.
+
+This remains intermediate issue acceptance. Pre-acknowledgement recovery now
+accepts only a private `never_released` receipt matching the persisted invocation,
+authority, original boot and launch digest, after rechecking the retained wrapper
+pin. The receipt's self-reported process identity remains receipt evidence:
+`process_json` stays NULL and `release_recorded` stays zero. A started/settled
+process receipt cannot substitute for missing acknowledgement. Current authority
+and runtime generation, exact launch binding and atomic settlement/audit are
+required; malformed, missing or nonprivate evidence leaves ownership pending.
+The supervisor's exclusive invocation claim prevents replay from releasing a
+second payload. Recovery never signals a receipt PID or invents a live observation. Synchronous capture, review preparation and launch-definition failures now
+settle an unbound invocation with an `auxiliary.not_launched` audit in the same
+owning runtime. The transaction refuses any launch binding, process identity,
+release authorization or changed generation. It cannot be used as restart proof;
+audit failure preserves pending ownership. Errors after launch binding require supervisor evidence. A wrapper killed
+before receipt publication, malformed launch input or a failure before it accepts
+the launch still leaves uncertainty; absence is never a no-launch receipt. Schema 22 preserves legacy uncertainty separately from invocation evidence.
+A noncompleted task with current or historical verification and no auxiliary
+invocation receives a `legacy_auxiliary_ownership` marker; an existing pending
+invocation without a launch binding also receives one. Task aggregates and old
+invocations remain unchanged. Completed history and fresh tasks are not marked;
+already bound pending invocations retain their existing receipt recovery path.
+
+The marker blocks continuation, direct claims, dispatch admission, new writer
+executions and auxiliary launches. Persisted legacy queue entries are excluded
+from selection and active queue capacity so they do not block unrelated work.
+`check-invariants` reports `legacy_auxiliary_ownership_unknown` with a bounded
+list and total count. Backup/restore validation refuses these markers even when
+the writer is fenced. Reopening the database neither duplicates nor clears them.
+
+Before upgrading, finish ordinary legacy verification under the old runtime
+where possible. If ownership is already uncertain, preserve the state and
+artifacts: do not delete the marker, fabricate an invocation or treat cancellation
+as settlement. No acknowledgement or clear-marker command is provided. The schema 24 native-boot procedure below can resolve eligible legacy ownership;
+its physical reboot acceptance remains outstanding before deployment can be
+claimed complete. The marker alone does not resolve unknown historical processes
+or certify arbitrary escaped descendants. Complete boundary coverage and host
+recovery acceptance remain required. Actual native crash controls now cover both a running required
+check and an independently observed verifier child: after daemon death, private
+settlement is audited before the replacement writer is prepared, and each task
+completes with one automatic continuation. These two boundaries do not cover
+the complete fault matrix.
+
+The shared cold-database validator refuses pending auxiliary invocations for
+backup and restore paths, even if no live writer remains. Before merge/deployment,
+finish host-recovery policy and operator/invariant reporting; verify both process
+kinds at all external-effect boundaries. Process-group absence is not generic
+escaped-descendant containment. Keep sandbox enforcement and source immutability
+separate from process settlement. Neither a passing store test nor a passing
+short native run closes FR-6/NFR-1 or the seven-day requirement.
+
+## Recovery diagnostics
+
+`check-invariants` reports `auxiliary_recovery_pending` when a nonlegacy pending
+invocation belongs to a different persisted daemon generation. It reports the
+total count and at most 128 invocation/task IDs with their stored generation,
+plus the current generation. A single query supplies the count and sample.
+Preparation, launch, process, receipt and host JSON are never included or decoded
+for this diagnostic. Malformed ownership data cannot hide a pending row.
+
+The authenticated `/api/invariants` endpoint returns the same read-only report
+as the CLI. The board displays diagnostic summaries and bounded task/invocation
+identifiers, using text nodes. It clears unavailable data and discards responses
+after disconnect; raw ownership payloads are not rendered. Current tests cover
+HTTP authentication/origin gates, fresh report routing, DOM text/bounds and late
+response refusal. An isolated native daemon verifies HTTP/CLI correspondence,
+degraded health and preserved unresolved state over two starts. This API/DOM
+validation does not claim a browser screenshot or physical recovery acceptance.
+Run the dependency-free DOM checks with `node --test tests/board_diagnostics.cjs`.
+
+Ordinary current-generation work is not flagged by this diagnostic. Legacy
+markers retain their separate report; settled invocations are excluded. This is
+an observation of unresolved persisted ownership, not proof of process liveness,
+a safe PID to signal, or permission to reboot. Preserve state and artifacts;
+continuation and backup remain refused until supported recovery verifies
+settlement. The diagnostic neither clears records nor changes recovery policy.
+
+Controlled native crash evidence additionally covers verifier pre-ACK and both
+roles after private terminal receipt publication but before terminal delivery and
+domain result publication. The terminal relay preserves the native wrapper PID.
+Each run completes with one automatic continuation, no old invocation result,
+settlement audited before replacement execution, unchanged original project files
+(excluding Git metadata), and stable completion after another daemon restart.
+These controlled boundaries do not establish the entire fault matrix or generic
+escaped-process containment.
+
+## Auxiliary supervisor protocol candidate
+
+`conductor-runner --auxiliary INVOCATION_UUID` implements a separate bounded
+protocol. Native service check/review calls now use it through `AuxiliarySession`.
+Controlled shell tests exercise the transport independently of model behavior.
+
+The parent supplies one private stdin launch frame. It includes authority and
+boot identity, an immutable invocation UUID, canonical working/receipt paths,
+exact argv/environment, executable digest and finite runtime/output/heartbeat
+limits. Credentials remain in memory and pipes; only the launch digest is safe
+to persist. The caller must construct the sandbox and keep the receipt directory
+outside **all** child write roots. The supervisor itself is not a sandbox.
+
+Before Ready, the supervisor durably claims its UUID with an exclusive private
+marker, preventing simultaneous/replayed wrappers from sharing an invocation.
+Ready contains the launch digest and native PID/birth/host identity. The parent
+must independently observe that child, persist its acknowledgement, and only then
+send Release for that exact digest. Executable content and process birth are
+rechecked before release. Until then, no payload process exists.
+
+EOF, malformed control or heartbeat expiry cancels the supervised process. A
+terminal receipt is published before a terminal event and contains no raw output,
+environment or credentials. `never_released` is emitted only on the irrevocable
+pre-spawn return; killing the wrapper before publication leaves uncertainty.
+`owned_group_settled` requires a successful owned-process result or a bounded
+cancellation/timeout/output-limit result with group cleanup. Other errors produce
+no settlement receipt. A live group member after leader exit prevents proof.
+This observation is not proof that a deliberately escaped new session is absent.
+
+Receipts use private, no-replace, fsynced publication. Reads refuse links,
+nonprivate files, malformed/oversized/schema-mismatched content, changed metadata,
+and every mismatch against trusted invocation/authority/boot/launch/process
+expectations. No diagnostic or receipt reader signals an old numeric PID. Partial
+publication is not accepted as completion and cannot be repaired by guessing.
+
+The persisted launch digest covers the final executable, complete argv and
+private environment. Secret launch bytes are never stored to support recovery;
+its persisted digest and terminal proof are sufficient. The initial definition
+record remains distinct from that final launch binding. Check result and verifier
+publication retain their task/version/source revalidation after settlement.
+
+Schema 23 links each new native result to one settled invocation and one audit
+record. The task update, result audit, idempotency record and publication link
+commit together. Publication requires an acknowledged `owned_group_settled`
+receipt, unchanged process/launch scope, current task/attempt/source/boot/authority,
+a fenced writer and no pending or legacy ownership. A never-released receipt is
+recovery evidence only and cannot publish a check or verdict. A link failure rolls
+back the result; identical replay adds nothing and a second result identity for
+the same invocation refuses. Result audit correlations and reviewer usage use the
+auxiliary invocation ID. Older/manual results are not backfilled with invented
+provenance.
+
+## Local validation
+
+Build matching workspace binaries before the service's actual-supervisor tests:
+
+```sh
+cargo build --workspace
+CONDUCTOR_TEST_BIN_DIR="$PWD/target/debug" cargo test --workspace --all-features
+```
+
+When using `CARGO_TARGET_DIR`, set the binary directory to that target's `debug`
+directory instead. CI builds the binaries first and supplies this explicit path;
+tests do not silently use a runner from another checkout or skip the production
+supervision path when it is unavailable.
+
+### Terminal delivery after control-pipe closure
+
+After Release, a renewal or cancellation write can fail while the supervisor is
+finishing its output. The parent retains the same in-flight framed reader and
+stops sending controls after that failure. It allows at most five additional
+seconds, still bounded by the original execution deadline, to receive the
+terminal frame. Invalid frames, EOF, another Ready, failed supervisor exit and
+missing private settlement proof remain refusals. A broken control pipe alone
+never establishes settlement or authorizes publication.
+
+Real-pipe regression peers consume Release and the initial renewal, close stdin,
+and gate terminal output until the parent has attempted renewal or cancellation.
+These are deterministic transport controls, not a claim that every real-worker
+shutdown schedule has been observed.
+
+### Legacy ownership after a native host boot transition
+
+Schema 24 records a first native host/boot witness for each unresolved legacy
+marker under the daemon's existing authority and reserved generation. The
+migration invents no native evidence. First observation and same-boot daemon
+restarts preserve the barrier. Reconciliation runs before automatic continuation
+selection when recovery is enabled; it reads native identity internally and
+accepts no externally supplied host/boot request.
+
+A later boot on the same host and authority, with a strictly newer runtime
+generation, can settle the exact witnessed legacy ownership. The original marker
+and bounded invocation preparation must still match. Unbound invocations must
+still lack launch binding, process identity, release acknowledgment and receipt.
+Contradictions latch and remain blocked; this path never manufactures a PID or
+an auxiliary group receipt. The native-boot proof, audit, invocation settlement
+and marker removal share one transaction. Witness history remains afterward;
+replay writes no duplicate result. Missing native identity does not clear anything.
+
+Each pass handles at most 128 tasks, recording its checked generation so earlier
+same-boot or contradictory rows do not starve later rows. Invariant diagnostics
+separate `native_witness_required`, `later_native_boot_required` and
+`witness_contradiction`. This operation neither changes task aggregates nor
+fences writer executions. Existing source, writer, paused/cancelled-task and
+continuation limits still apply. A host settlement cannot publish a native check
+or verdict: it lacks the released/process-bound group receipt required there.
+
+Tests cover actual old-schema upgrades, same-boot native observation, synthetic
+later-boot settlement, foreign/mutated evidence, rollback, Tokio cancellation,
+replay and multiple batches. Synthetic boot transitions are not physical reboot
+acceptance. No command here reboots the host; the physical recovery experiment remains
+outstanding and requires separate explicit approval.
+
+### Bounded receipt recovery across large inventories
+
+Receipt recovery scans at most 128 pending invocations per pass in invocation-ID
+order. A cursor shared by service clones advances across full pages and wraps
+on a short/empty page; restarting the daemon starts a fresh sweep without
+changing ownership. This prevents more than 128 pending rows or early missing
+receipts from blocking later valid receipt recovery.
+
+Each row is decoded independently with the existing JSON size limits. Its
+preparation identity must match the stored invocation, task, execution token and
+boot generation. Invalid rows remain pending and keep their task/backup barriers;
+they cannot authorize launch, settlement or result publication. Valid rows in the
+same page still undergo the unchanged private receipt, authority and process
+checks. Cursor advancement itself is only an observation aid. Cancellation or a
+read/settlement failure may defer work until a later sweep, never settle it.
+
+Tests retain a 130-row inventory, malformed/rebound/oversized first rows and
+page boundaries. A real supervisor pre-ACK receipt is recovered after 128 invalid
+rows; non-private proof and stale authority still refuse, service clones share
+the sweep, and the invalid rows remain pending after the healthy receipt settles.
+
+### Native origin evidence for missing receipts
+
+Schema 25 adds auxiliary host evidence without backfilling historical identity.
+Before capture, launch binding or spawn, the service reads native host identity
+and commits it atomically with the invocation under the current authority and
+generation. A changed or late replay cannot invent admission evidence.
+
+Receipt recovery still prefers the private supervisor receipt. If it is absent
+or invalid for an older invocation, native host reconciliation may establish
+settlement after a verified same-host boot transition under the same authority.
+Admission evidence covers crashes before launch binding, before acknowledgment,
+and after Release without a terminal receipt. Persisted launch/process metadata
+must remain internally consistent; an acknowledged process must match the
+admission boot. Task state, source, missing PID/ACK fields and result records are
+not rewritten by host settlement.
+
+For older records without admission evidence, an already acknowledged process
+with matching launch authority supplies its recorded native boot. Without that
+process evidence, the runtime records a first recovery observation and an exact
+bounded ownership snapshot. That observation alone never settles anything: a
+later native boot and unchanged snapshot are required. Legacy markers continue
+through their separate schema 24 path. Foreign authority/host, stale generation,
+changed scope and contradictory release/process state refuse settlement.
+
+Observation/audit/settlement are cancellation-safe transactions. Host settlement
+has its own audit and proof type; it cannot pass the native result publication
+gate, which still requires a released invocation and owned-group receipt.
+Synthetic positive transitions test this logic; physical reboot acceptance is
+still outstanding. Same-boot daemon restart and missing PID/receipt are not boot
+transition evidence. No recovery path executes a host reboot.

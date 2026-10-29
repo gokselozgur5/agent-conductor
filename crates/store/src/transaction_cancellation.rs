@@ -288,7 +288,7 @@ async fn run(store: &Store, owner: Owner, delivery: Option<&EventDelivery>) -> R
         ),
     }
 }
-async fn snapshot(connection: &mut SqliteConnection) -> Vec<(String, String)> {
+pub(super) async fn snapshot(connection: &mut SqliteConnection) -> Vec<(String, String)> {
     let tables:Vec<String>=sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetch_all(&mut *connection).await.unwrap();
     let mut result = vec![];
     for table in tables {
@@ -501,4 +501,346 @@ async fn persist_lost_commit_response_replays_once() {
 #[tokio::test]
 async fn publish_lost_commit_response_replays_once() {
     check_lost_commit_response(Owner::Publish).await;
+}
+
+#[tokio::test]
+async fn cancel_legacy_host_witness_and_settlement_rolls_back_all_tables() {
+    for settling in [false, true] {
+        let (_root, store, _) = fixture(Owner::Project).await;
+        {
+            let mut c = store.inner.writer.lock().await;
+            c.execute("INSERT INTO tasks(id,project_id,objective,state,priority,version,authority_json,created_at_ms,updated_at_ms,aggregate_json) VALUES('legacy','seed','fixture','paused',0,1,'{}',0,0,'{}'); INSERT INTO legacy_auxiliary_ownership VALUES('legacy','verification_without_invocation',1)").await.unwrap();
+        }
+        store
+            .start_reserved_runtime(0, &"a".repeat(64), 2)
+            .await
+            .unwrap();
+        let mut host = AuxiliaryHostObservation {
+            authority_id: "a".repeat(64),
+            generation: 2,
+            platform: "macos".into(),
+            host_id: "b".repeat(64),
+            boot_id: "c".repeat(64),
+        };
+        if settling {
+            store
+                .reconcile_legacy_auxiliary_host(&host, 0)
+                .await
+                .unwrap();
+            store
+                .start_reserved_runtime(0, &host.authority_id, 3)
+                .await
+                .unwrap();
+            host.generation = 3;
+            host.boot_id = "d".repeat(64);
+        }
+        let before = snapshot(&mut *store.inner.writer.lock().await).await;
+        let written = Arc::new(AtomicBool::new(false));
+        let observed = written.clone();
+        let (release, wait) = mpsc::channel();
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_update_hook(move |update| {
+                if update.table == "audit_events" {
+                    observed.store(true, Ordering::SeqCst);
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+            });
+        let owned = store.clone();
+        let request =
+            tokio::spawn(async move { owned.reconcile_legacy_auxiliary_host(&host, 0).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !written.load(Ordering::SeqCst) {
+                assert!(!request.is_finished());
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        let mut c = store.inner.writer.lock().await;
+        c.lock_handle().await.unwrap().remove_update_hook();
+        assert_eq!(snapshot(&mut c).await, before);
+        drop(c);
+        assert_eq!(
+            snapshot(&mut store.readers().acquire().await.unwrap()).await,
+            before
+        );
+    }
+}
+
+pub(super) async fn auxiliary_origin_fixture(
+    mode: &str,
+) -> (
+    tempfile::TempDir,
+    Store,
+    AuxiliaryPreparation,
+    AuxiliaryHostObservation,
+) {
+    let (root, store, _) = fixture(Owner::Update).await;
+    store
+        .start_reserved_runtime(0, &"a".repeat(64), 2)
+        .await
+        .unwrap();
+    let source = format!("snapshot:{}", "b".repeat(64));
+    {
+        let mut c = store.inner.writer.lock().await;
+        c.execute("UPDATE executions SET state='fenced';UPDATE tasks SET state='verifying'")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET aggregate_json=?")
+            .bind(
+                serde_json::json!({"attempt":{"id":"attempt"},"verification":{"source":source}})
+                    .to_string(),
+            )
+            .execute(&mut *c)
+            .await
+            .unwrap();
+    }
+    let input = AuxiliaryPreparation {
+        invocation_id: uuid::Uuid::now_v7().to_string(),
+        task_id: "task".into(),
+        execution_token: "token".into(),
+        attempt_id: "attempt".into(),
+        task_version: 2,
+        boot_generation: 2,
+        kind: AuxiliaryKind::Check,
+        source,
+        definition_sha256: "c".repeat(64),
+        workspace: "/workspace".into(),
+    };
+    let mut host = AuxiliaryHostObservation {
+        authority_id: "a".repeat(64),
+        generation: 2,
+        platform: "macos".into(),
+        host_id: "d".repeat(64),
+        boot_id: "e".repeat(64),
+    };
+    if mode != "admit" {
+        if mode == "settle" {
+            store
+                .prepare_auxiliary_with_host(&input, &host, execution_audit("origin-prepare"))
+                .await
+                .unwrap();
+        } else {
+            store
+                .prepare_auxiliary_once(&input, execution_audit("origin-prepare"))
+                .await
+                .unwrap();
+        }
+        store
+            .start_reserved_runtime(0, &host.authority_id, 3)
+            .await
+            .unwrap();
+        host.generation = 3;
+        host.boot_id = "f".repeat(64);
+    }
+    (root, store, input, host)
+}
+
+#[tokio::test]
+async fn cancel_auxiliary_origin_admission_observation_and_settlement() {
+    for mode in ["admit", "observe", "settle"] {
+        let (_root, store, input, host) = auxiliary_origin_fixture(mode).await;
+        let before = snapshot(&mut *store.inner.writer.lock().await).await;
+        let written = Arc::new(AtomicBool::new(false));
+        let observed = written.clone();
+        let (release, wait) = mpsc::channel();
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_update_hook(move |update| {
+                if update.table == "audit_events" {
+                    observed.store(true, Ordering::SeqCst);
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+            });
+        let owned = store.clone();
+        let request = tokio::spawn(async move {
+            if mode == "admit" {
+                owned
+                    .prepare_auxiliary_with_host(&input, &host, execution_audit("cancelled"))
+                    .await
+            } else {
+                owned
+                    .reconcile_auxiliary_host(&input, &host, execution_audit("cancelled"))
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !written.load(Ordering::SeqCst) {
+                assert!(!request.is_finished());
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        let mut c = store.inner.writer.lock().await;
+        c.lock_handle().await.unwrap().remove_update_hook();
+        assert_eq!(snapshot(&mut c).await, before);
+        drop(c);
+        assert_eq!(
+            snapshot(&mut store.readers().acquire().await.unwrap()).await,
+            before
+        );
+    }
+}
+
+#[tokio::test]
+async fn auxiliary_admission_survives_process_death_on_both_sides() {
+    const MODE: &str = "CONDUCTOR_AUXILIARY_CRASH_MODE";
+    const CONTROL: &str = "CONDUCTOR_AUXILIARY_CRASH_CONTROL";
+    if let Ok(mode) = std::env::var(MODE) {
+        let control = std::path::PathBuf::from(std::env::var(CONTROL).unwrap());
+        crash_auxiliary_admission(&mode, &control).await;
+    }
+    for mode in [
+        "check_before_commit",
+        "verifier_before_commit",
+        "check_after_commit",
+        "verifier_after_commit",
+    ] {
+        let control = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "transaction_cancellation::auxiliary_admission_survives_process_death_on_both_sides", "--nocapture"])
+            .env(MODE, mode).env(CONTROL, control.path()).env("TMPDIR", control.path())
+            .spawn().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("crash fixture timed out: {mode}");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(status.code(), Some(77), "{mode}");
+        let path = std::fs::read_to_string(control.path().join("database")).unwrap();
+        let store = Store::open(path).await.unwrap();
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(store.readers())
+            .await
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        if mode.ends_with("before_commit") {
+            let before: Vec<(String, String)> =
+                serde_json::from_slice(&std::fs::read(control.path().join("before.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                snapshot(&mut *store.inner.writer.lock().await).await,
+                before
+            );
+        } else {
+            let input: AuxiliaryPreparation =
+                serde_json::from_slice(&std::fs::read(control.path().join("input.json")).unwrap())
+                    .unwrap();
+            let row: (String, String, i64, Option<String>, Option<String>) = sqlx::query_as("SELECT preparation_json,state,release_recorded,process_json,launch_binding_json FROM auxiliary_invocations WHERE invocation_id=?")
+                .bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<AuxiliaryPreparation>(&row.0).unwrap(),
+                input
+            );
+            assert_eq!(
+                (row.1, row.2, row.3, row.4),
+                ("pending".into(), 0, None, None)
+            );
+            for table in ["auxiliary_host_evidence", "auxiliary_invocations"] {
+                let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                    .fetch_one(store.readers())
+                    .await
+                    .unwrap();
+                assert_eq!(count, 1);
+            }
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE id='crash-admission'")
+                    .fetch_one(store.readers())
+                    .await
+                    .unwrap();
+            assert_eq!(count, 1);
+            let host: AuxiliaryHostObservation =
+                serde_json::from_slice(&std::fs::read(control.path().join("host.json")).unwrap())
+                    .unwrap();
+            let stored: (String, String, Option<String>) = sqlx::query_as(
+                "SELECT kind,host_json,ownership_json FROM auxiliary_host_evidence WHERE invocation_id=?",
+            ).bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+            assert_eq!(stored.0, "admission");
+            assert_eq!(
+                serde_json::from_str::<AuxiliaryHostObservation>(&stored.1).unwrap(),
+                host
+            );
+            assert!(stored.2.is_none());
+            assert!(store.has_pending_auxiliary("task").await.unwrap());
+        }
+    }
+}
+
+async fn crash_auxiliary_admission(mode: &str, control: &std::path::Path) -> ! {
+    let (root, store, mut input, host) = auxiliary_origin_fixture("admit").await;
+    if mode.starts_with("verifier") {
+        input.kind = AuxiliaryKind::Verifier;
+    }
+    let before = snapshot(&mut *store.inner.writer.lock().await).await;
+    std::fs::write(
+        control.join("before.json"),
+        serde_json::to_vec(&before).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        control.join("database"),
+        root.path().join("state.sqlite3").to_str().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        control.join("input.json"),
+        serde_json::to_vec(&input).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        control.join("host.json"),
+        serde_json::to_vec(&host).unwrap(),
+    )
+    .unwrap();
+    if mode.ends_with("before_commit") {
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_update_hook(|update| {
+                if update.table == "audit_events" {
+                    // Exit in the SQLite worker without unwinding or closing its transaction.
+                    std::process::exit(77);
+                }
+            });
+    }
+    assert!(
+        store
+            .prepare_auxiliary_with_host(&input, &host, execution_audit("crash-admission"))
+            .await
+            .unwrap()
+    );
+    assert!(mode.ends_with("after_commit"));
+    std::process::exit(77);
 }

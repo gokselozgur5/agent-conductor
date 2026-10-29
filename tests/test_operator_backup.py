@@ -42,6 +42,10 @@ class BackupTests(unittest.TestCase):
               CREATE TABLE tasks(state TEXT,id TEXT);
               CREATE TABLE projects(canonical_path TEXT,filesystem_identity TEXT,git_common_dir_identity TEXT);
               CREATE TABLE executions(state TEXT,packet_json TEXT);
+              CREATE TABLE auxiliary_invocations(state TEXT);
+              CREATE TABLE file_brokers(state TEXT);
+              CREATE TABLE file_operations(completed_at_ms INTEGER);
+              CREATE TABLE legacy_auxiliary_ownership(task_id TEXT);
               CREATE TABLE leases(status TEXT);
               CREATE TABLE effect_intents(status TEXT);
               CREATE TABLE recovery_authority(singleton INTEGER, authority_id TEXT);
@@ -59,7 +63,7 @@ class BackupTests(unittest.TestCase):
     def test_snapshot_preserves_bytes_modes_and_database(self):
         before = backup.inventory(self.state, backup.SKIP)
         result = backup.backup(self.state, self.target)
-        self.assertEqual(result['schema'], 19)
+        self.assertEqual(result['schema'], 28)
         manifest = json.loads((self.target / 'manifest.json').read_text())
         self.assertEqual(manifest['entries'], backup.inventory(self.target / 'state'))
         self.assertEqual(before, backup.inventory(self.state, backup.SKIP))
@@ -67,6 +71,39 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(self.target.stat().st_mode & 0o777, 0o700)
         with self.assertRaises(FileExistsError):
             backup.backup(self.state, self.target)
+
+    def test_pending_auxiliary_refuses_backup_even_without_live_writer(self):
+        with sqlite3.connect(self.state / 'state.sqlite3') as db:
+            db.execute("insert into auxiliary_invocations values('pending')")
+        with self.assertRaisesRegex(ValueError, 'unresolved auxiliary'):
+            backup.backup(self.state, self.target)
+        self.assertFalse(self.target.exists())
+
+    def test_legacy_auxiliary_uncertainty_refuses_cold_backup(self):
+        with sqlite3.connect(self.state / 'state.sqlite3') as db:
+            db.execute("insert into legacy_auxiliary_ownership values('legacy-task')")
+        with self.assertRaisesRegex(ValueError, 'legacy auxiliary ownership unresolved'):
+            backup.backup(self.state, self.target)
+        self.assertFalse(self.target.exists())
+
+    def test_open_file_broker_refuses_backup_until_closed(self):
+        with sqlite3.connect(self.state / 'state.sqlite3') as db:
+            db.execute("insert into file_brokers values('open')")
+        with self.assertRaisesRegex(ValueError, 'file broker ownership unresolved'):
+            backup.backup(self.state, self.target)
+        self.assertFalse(self.target.exists())
+        with sqlite3.connect(self.state / 'state.sqlite3') as db:
+            db.execute("update file_brokers set state='closed'")
+        backup.backup(self.state, self.target)
+        self.assertTrue(backup.verify(self.target)['verified'])
+
+    def test_closed_broker_with_unknown_operation_still_refuses_backup(self):
+        with sqlite3.connect(self.state / 'state.sqlite3') as db:
+            db.execute("insert into file_brokers values('closed')")
+            db.execute("insert into file_operations values(NULL)")
+        with self.assertRaisesRegex(ValueError, 'file broker ownership unresolved'):
+            backup.backup(self.state, self.target)
+        self.assertFalse(self.target.exists())
 
     def test_wal_export_verifies_and_tampering_is_refused(self):
         with sqlite3.connect(self.state / 'state.sqlite3') as db:

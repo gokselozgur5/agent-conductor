@@ -148,3 +148,28 @@ async fn stopped_process_retains_bounded_observation_without_becoming_success() 
     assert!(matches!(result, Err(ProcessError::Cancelled)));
     assert_eq!(captured, b"observed-envelope\n");
 }
+
+#[tokio::test]
+async fn successful_leader_does_not_certify_a_live_group_member() {
+    let directory = tempfile::tempdir().expect("directory");
+    let (_keepalive, cancellation) = watch::channel(false);
+    let result = run_process(
+        &spec(
+            directory.path(),
+            "(exec >/dev/null 2>&1; sleep 1; echo settled > descendant-settled) & exit 0",
+        ),
+        cancellation,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(ProcessError::Fence(_))),
+        "unexpected result: {result:?}"
+    );
+    // The leader is already reaped; the runtime must not signal a reused group.
+    // This owned finite descendant settles naturally before fixture cleanup.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !directory.path().join("descendant-settled").exists() {
+        assert!(Instant::now() < deadline, "owned child did not settle");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}

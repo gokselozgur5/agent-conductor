@@ -178,6 +178,9 @@ pub async fn run_process_observed(
     };
     // The leader has been reaped. Do not signal this numeric group identity again.
     group.armed = false;
+    // A clean leader exit alone does not settle surviving group members.
+    // Observe only after reap: never signal a potentially recycled identity.
+    group.confirm_absent().await?;
     Ok(ProcessOutput {
         exit_code: status.code(),
         stdout: std::mem::take(captured_stdout),

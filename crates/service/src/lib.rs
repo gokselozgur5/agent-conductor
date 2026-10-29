@@ -1,3 +1,11 @@
+mod broker_ownership;
+pub use broker_ownership::{
+    close_broker_from_receipt, record_broker_owner, recover_broker_from_receipt,
+};
+#[cfg(unix)]
+mod broker_journal;
+#[cfg(unix)]
+pub use broker_journal::RegisteredBrokerJournal;
 use std::{
     fs,
     future::Future,
@@ -30,6 +38,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 #[cfg(unix)]
+mod auxiliary;
+mod auxiliary_supervision;
 mod check_execution;
 #[cfg(unix)]
 mod checkpoint;
@@ -85,6 +95,8 @@ pub struct PersistentControlService<C = SystemClock> {
     started_at: Instant,
     clock: Arc<C>,
     mutations: Arc<Mutex<()>>,
+    auxiliary_recovery_cursor: Arc<Mutex<Option<String>>>,
+    broker_recovery_cursor: Arc<Mutex<Option<String>>>,
     watcher_status: Arc<RwLock<WatcherStatus>>,
     observed_projects: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
 }
@@ -97,6 +109,8 @@ impl<C: Clock> Clone for PersistentControlService<C> {
             started_at: self.started_at,
             clock: Arc::clone(&self.clock),
             mutations: Arc::clone(&self.mutations),
+            auxiliary_recovery_cursor: Arc::clone(&self.auxiliary_recovery_cursor),
+            broker_recovery_cursor: Arc::clone(&self.broker_recovery_cursor),
             watcher_status: Arc::clone(&self.watcher_status),
             observed_projects: Arc::clone(&self.observed_projects),
         }
@@ -170,12 +184,17 @@ impl<C: Clock> PersistentControlService<C> {
         store
             .recover_workflow_dispatch(startup.boot_generation, started_at_ms)
             .await?;
+        store
+            .reconcile_completed_dispatch(startup.boot_generation, started_at_ms)
+            .await?;
         let service = Self {
             store,
             boot_generation: startup.boot_generation,
             started_at: Instant::now(),
             clock: Arc::new(clock),
             mutations: Arc::new(Mutex::new(())),
+            auxiliary_recovery_cursor: Arc::new(Mutex::new(None)),
+            broker_recovery_cursor: Arc::new(Mutex::new(None)),
             watcher_status: Arc::new(RwLock::new(WatcherStatus::Disabled)),
             observed_projects: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         };
@@ -505,11 +524,16 @@ impl<C: Clock> PersistentControlService<C> {
         if matches!(
             command.kind,
             CommandKind::Claim { .. } | CommandKind::RequeueExpired
-        ) && self
+        ) && (self
             .store
             .has_unfenced_execution(task_id)
             .await
             .map_err(store_error)?
+            || self
+                .store
+                .has_pending_auxiliary(task_id)
+                .await
+                .map_err(store_error)?)
         {
             return Err(ErrorBody::new(
                 ErrorCode::Validation,
@@ -1095,6 +1119,13 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
             .await
             .map_err(store_error)?;
         self.recover_fenced_receipts().await.map_err(store_error)?;
+        self.store
+            .reconcile_completed_dispatch(
+                self.boot_generation,
+                self.clock.read(self.boot_generation).wall_unix_ms,
+            )
+            .await
+            .map_err(store_error)?;
         self.reconcile_expired()
             .await
             .map(|_| ())
@@ -1517,6 +1548,10 @@ fn hash(v: &str) -> String {
 }
 #[cfg(test)]
 mod effect_tests {
+    #[cfg(unix)]
+    mod broker_journal_tests {
+        include!("broker_journal_tests.rs");
+    }
     include!("checkpoint_tests.rs");
     include!("reassignment_tests.rs");
     include!("unowned_tests.rs");
@@ -2399,6 +2434,52 @@ mod effect_tests {
     }
 
     #[tokio::test]
+    async fn pending_auxiliary_refuses_direct_claim_and_requeue_despite_writer_fence() {
+        use sqlx::Connection;
+        let (directory, store) = lifecycle_store().await;
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .unwrap();
+        let (task, _) = claim_task(&service).await;
+        let mut connection = sqlx::SqliteConnection::connect(&format!(
+            "sqlite://{}",
+            directory.path().join("state.sqlite3").display()
+        ))
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO executions(effect_token,task_id,attempt_id,lease_epoch,runner_id,packet_json,packet_sha256,state,created_at_ms,updated_at_ms) SELECT token,task_id,attempt_id,lease_epoch,'fixture','{}','hash','fenced',0,0 FROM effect_intents").execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO auxiliary_invocations (invocation_id,task_id,execution_token,preparation_json,boot_generation,state,created_at_ms,settled_at_ms) SELECT 'aux',task_id,effect_token,'{}',1,'pending',0,NULL FROM executions").execute(&mut connection).await.unwrap();
+        assert!(!store.has_unfenced_execution("task").await.unwrap());
+        for kind in [
+            CommandKind::RequeueExpired,
+            CommandKind::Claim {
+                attempt_id: AttemptId("next".into()),
+                worker: ActorId("worker".into()),
+                lease_duration_ms: 10,
+                worker_margin_ms: 1,
+                recovery_grace_ms: 5,
+            },
+        ] {
+            let command = lifecycle_command(
+                &task,
+                Actor {
+                    id: ActorId("operator".into()),
+                    role: ActorRole::Operator,
+                },
+                kind,
+                "blocked-aux",
+            );
+            assert!(
+                service
+                    .validate_execution_fence("task", &command)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn failed_spawn_retains_expected_identity_without_ack_or_fence() {
         use agent_conductor_store::{EffectAudit, ExecutionState};
         let (directory, store) = lifecycle_store().await;
@@ -3192,6 +3273,7 @@ mod effect_tests {
         use agent_conductor_domain::{CheckId, RequiredCheck, SourceIdentity};
         use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionUpdate};
         use conductor_runtime::{CheckDefinition, CheckOutcome, snapshot_paths};
+        use sqlx::Connection;
         for cancel in [false, true] {
             let (directory, store) = lifecycle_store().await;
             let service =
@@ -3318,12 +3400,100 @@ mod effect_tests {
                     .await
                     .unwrap();
             }
+            // This production-path test requires the matching workspace runner build.
+            let mut authority_connection = sqlx::SqliteConnection::connect(&format!(
+                "sqlite://{}",
+                directory.path().join("state.sqlite3").display()
+            ))
+            .await
+            .unwrap();
+            sqlx::query("UPDATE recovery_authority SET authority_id=?")
+                .bind("a".repeat(64))
+                .execute(&mut authority_connection)
+                .await
+                .unwrap();
             let workspace = CheckWorkspace {
+                wrapper: std::path::PathBuf::from(
+                    std::env::var("CONDUCTOR_TEST_BIN_DIR")
+                        .expect("build workspace binaries and set CONDUCTOR_TEST_BIN_DIR"),
+                )
+                .join("conductor-runner"),
                 source,
                 inventory,
                 destination: directory.path().join("check"),
                 toolchain_roots: vec![],
             };
+            if !cancel {
+                for missing_wrapper in [false, true] {
+                    let failed_workspace = CheckWorkspace {
+                        wrapper: if missing_wrapper {
+                            directory.path().join("absent-runner")
+                        } else {
+                            workspace.wrapper.clone()
+                        },
+                        source: workspace.source.clone(),
+                        inventory: if missing_wrapper {
+                            workspace.inventory.clone()
+                        } else {
+                            vec!["absent-input".into()]
+                        },
+                        destination: directory.path().join(if missing_wrapper {
+                            "bad-wrapper"
+                        } else {
+                            "bad-capture"
+                        }),
+                        toolchain_roots: vec![],
+                    };
+                    let (_sender, receiver) = tokio::sync::watch::channel(false);
+                    assert!(
+                        service
+                            .execute_required_check(&token, "test", &failed_workspace, receiver)
+                            .await
+                            .is_err()
+                    );
+                    assert!(!store.has_pending_auxiliary("task").await.unwrap());
+                    let bound: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auxiliary_invocations WHERE launch_binding_json IS NOT NULL OR process_json IS NOT NULL OR release_recorded!=0").fetch_one(store.readers()).await.unwrap();
+                    assert_eq!(bound, 0);
+                    let row = store.task("task").await.unwrap().unwrap();
+                    let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+                    assert!(task.verification.unwrap().checks.is_empty());
+                }
+                let row = store.task("task").await.unwrap().unwrap();
+                let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+                let artifacts = directory.path().join("bad-review");
+                fs::create_dir_all(artifacts.join("review-input")).unwrap();
+                let source_identity = format!("snapshot:{digest}");
+                let invocation = service
+                    .begin_review_auxiliary(&task, &input.packet, &source_identity, &artifacts)
+                    .await
+                    .unwrap();
+                let baseline = snapshot_paths(
+                    &workspace.source,
+                    &directory.path().join("review-baseline-fixture"),
+                    &workspace.inventory,
+                )
+                .unwrap();
+                let prepared = crate::workflow_review::prepare_review(
+                    &artifacts,
+                    &baseline,
+                    &workspace.inventory,
+                    &source_identity,
+                );
+                assert!(
+                    service
+                        .auxiliary_prelaunch_result(&invocation, prepared)
+                        .await
+                        .is_err()
+                );
+                assert!(!store.has_pending_auxiliary("task").await.unwrap());
+                let abandoned: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM audit_events WHERE kind='auxiliary.not_launched'",
+                )
+                .fetch_one(store.readers())
+                .await
+                .unwrap();
+                assert_eq!(abandoned, 3);
+            }
             let (_sender, receiver) = tokio::sync::watch::channel(false);
             let execute = service.execute_required_check(&token, "test", &workspace, receiver);
             let interrupt = async {
@@ -3350,6 +3520,14 @@ mod effect_tests {
             let (result, ()) = tokio::join!(execute, interrupt);
             let row = store.task("task").await.unwrap().unwrap();
             let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+            let publications:Vec<(String,String,String)>=sqlx::query_as("SELECT p.invocation_id,a.correlation_id,a.kind FROM auxiliary_publications p JOIN audit_events a ON a.id=p.audit_id").fetch_all(store.readers()).await.unwrap();
+            if cancel {
+                assert!(publications.is_empty());
+            } else {
+                assert_eq!(publications.len(), 1);
+                assert_eq!(publications[0].0, publications[0].1);
+                assert_eq!(publications[0].2, "record_check");
+            }
             if cancel {
                 assert!(result.is_err());
                 assert_eq!(task.state, TaskState::Cancelled);
@@ -3365,7 +3543,259 @@ mod effect_tests {
                     "conductor-check-executor"
                 );
                 assert!(verification.verdict.is_none());
+                assert_auxiliary_preack_recovery(
+                    &service,
+                    &store,
+                    directory.path(),
+                    &workspace.wrapper,
+                )
+                .await;
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_host_recovery_reads_native_identity_and_keeps_same_boot_blocked() {
+        use sqlx::{Connection, Executor};
+        let (directory, store) = lifecycle_store().await;
+        let mut c = sqlx::SqliteConnection::connect(&format!(
+            "sqlite://{}",
+            directory.path().join("state.sqlite3").display()
+        ))
+        .await
+        .unwrap();
+        c.execute("INSERT INTO legacy_auxiliary_ownership VALUES('task','verification_without_invocation',0)").await.unwrap();
+        let before = store.task("task").await.unwrap().unwrap().aggregate_json;
+        for generation in [1, 2] {
+            let service = PersistentControlService::start_with_reservation(
+                store.clone(),
+                100,
+                FixedClock::new(0),
+                Some((&"a".repeat(64), generation)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(service.recover_interrupted_workflows().await.unwrap(), 0);
+            assert!(store.has_pending_auxiliary("task").await.unwrap());
+            let row:(String,String,String,i64)=sqlx::query_as("SELECT platform,host_id,boot_id,observed_generation FROM legacy_auxiliary_host_witness").fetch_one(&mut c).await.unwrap();
+            let native = conductor_runtime::HostEpoch::current().await.unwrap();
+            assert_eq!(
+                (row.0, row.1, row.2),
+                (native.platform, native.host_id, native.boot_id)
+            );
+            assert_eq!(row.3, 1);
+            assert_eq!(
+                store.task("task").await.unwrap().unwrap().aggregate_json,
+                before
+            );
+        }
+        let violations = store.check_runtime_invariants().await.unwrap();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.code == "legacy_auxiliary_ownership_unknown"
+                    && v.context_json.contains("later_native_boot_required"))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn assert_auxiliary_preack_recovery(
+        service: &PersistentControlService<FixedClock>,
+        store: &Store,
+        root: &std::path::Path,
+        wrapper: &std::path::Path,
+    ) {
+        use agent_conductor_store::{AuxiliaryKind, AuxiliaryLaunchBinding, EffectAudit};
+        use conductor_runtime::{AuxiliaryLaunch, AuxiliarySession};
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        let row = store.task("task").await.unwrap().unwrap();
+        let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+        let source = task
+            .verification
+            .as_ref()
+            .unwrap()
+            .source
+            .as_ref()
+            .unwrap()
+            .0
+            .clone();
+        let work = root.join("preack-work");
+        fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let receipts = root.join("preack-receipts");
+        fs::create_dir(&receipts).unwrap();
+        fs::set_permissions(&receipts, fs::Permissions::from_mode(0o700)).unwrap();
+        let input = service
+            .begin_auxiliary(&task, AuxiliaryKind::Check, &source, &work, b"preack-test")
+            .await
+            .unwrap();
+        assert_native_auxiliary_origin(store, &input).await;
+        let executable = std::path::PathBuf::from("/bin/sh").canonicalize().unwrap();
+        let hash = |p: &std::path::Path| format!("{:x}", Sha256::digest(fs::read(p).unwrap()));
+        let launch = AuxiliaryLaunch {
+            version: 1,
+            invocation_id: input.invocation_id.clone(),
+            authority_id: "a".repeat(64),
+            boot_generation: service.boot_generation,
+            receipt_root: receipts.canonicalize().unwrap(),
+            executable_sha256: hash(&executable),
+            executable,
+            arguments: vec!["-c".into(), "echo forbidden > payload-started".into()],
+            directory: work.clone(),
+            environment: std::collections::BTreeMap::new(),
+            timeout_ms: 5000,
+            heartbeat_timeout_ms: 3000,
+            output_limit: 1024,
+        };
+        let wrapper = wrapper.canonicalize().unwrap();
+        let binding = AuxiliaryLaunchBinding {
+            launch_sha256: launch.sha256().unwrap(),
+            authority_id: launch.authority_id.clone(),
+            receipt_root: launch.receipt_root.to_str().unwrap().into(),
+            wrapper_path: wrapper.to_str().unwrap().into(),
+            wrapper_sha256: hash(&wrapper),
+        };
+        store
+            .bind_auxiliary_launch(
+                &input,
+                &binding,
+                EffectAudit {
+                    id: "preack-bind",
+                    actor_id: "test",
+                    correlation_id: &input.invocation_id,
+                    now_ms: 100,
+                },
+            )
+            .await
+            .unwrap();
+        let session = AuxiliarySession::prepare(&wrapper, &launch).await.unwrap();
+        assert_eq!(service.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        // Lose the private parent pipe before the Ready identity is acknowledged.
+        drop(session);
+        let receipt = receipts.join(format!("auxiliary-{}.json", input.invocation_id));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !receipt.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_paged_auxiliary_recovery(service, store, root, &input, &receipt, &work).await;
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn assert_native_auxiliary_origin(
+        store: &Store,
+        input: &agent_conductor_store::AuxiliaryPreparation,
+    ) {
+        let row:(String,String,Option<String>)=sqlx::query_as("SELECT kind,host_json,ownership_json FROM auxiliary_host_evidence WHERE invocation_id=?").bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+        assert_eq!(row.0, "admission");
+        assert!(row.2.is_none());
+        let host: agent_conductor_store::AuxiliaryHostObservation =
+            serde_json::from_str(&row.1).unwrap();
+        let native = conductor_runtime::HostEpoch::current().await.unwrap();
+        assert_eq!(host.generation, input.boot_generation);
+        assert_eq!(host.authority_id, "a".repeat(64));
+        assert_eq!(
+            (host.platform, host.host_id, host.boot_id),
+            (native.platform, native.host_id, native.boot_id)
+        );
+        let state:(Option<String>,Option<String>,i64)=sqlx::query_as("SELECT launch_binding_json,process_json,release_recorded FROM auxiliary_invocations WHERE invocation_id=?").bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+        assert_eq!(
+            state,
+            (None, None, 0),
+            "native host must be durable before launch binding or Release"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn assert_paged_auxiliary_recovery(
+        service: &PersistentControlService<FixedClock>,
+        store: &Store,
+        root: &std::path::Path,
+        input: &agent_conductor_store::AuxiliaryPreparation,
+        receipt: &std::path::Path,
+        work: &std::path::Path,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        seed_invalid_auxiliary_page(store, root, &input.execution_token).await;
+        let restarted = PersistentControlService::start_with_reservation(
+            store.clone(),
+            200,
+            FixedClock::new(0),
+            Some((&"a".repeat(64), service.boot_generation + 1)),
+        )
+        .await
+        .unwrap();
+        fs::set_permissions(receipt, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert!(restarted.auxiliary_recovery_cursor.lock().await.is_some());
+        // A clone continues the same sweep and refuses the non-private proof.
+        assert_eq!(
+            restarted
+                .clone()
+                .recover_auxiliary_receipts()
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(restarted.auxiliary_recovery_cursor.lock().await.is_none());
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        fs::set_permissions(receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(service.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert_eq!(service.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 1);
+        assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert!(!store.has_pending_auxiliary("task").await.unwrap());
+        let observed:(Option<String>,i64,String)=sqlx::query_as("SELECT process_json,release_recorded,settlement_json FROM auxiliary_invocations WHERE invocation_id=?").bind(&input.invocation_id).fetch_one(store.readers()).await.unwrap();
+        assert!(observed.0.is_none());
+        assert_eq!(observed.1, 0);
+        let proof: serde_json::Value = serde_json::from_str(&observed.2).unwrap();
+        assert_eq!(proof["observation"], "never_released");
+        assert!(!work.join("payload-started").exists());
+        let unknown: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM auxiliary_invocations WHERE state='pending'")
+                .fetch_one(store.readers())
+                .await
+                .unwrap();
+        assert_eq!(
+            unknown, 128,
+            "invalid rows must remain owned, never silently settled"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn seed_invalid_auxiliary_page(store: &Store, root: &std::path::Path, token: &str) {
+        use sqlx::Connection;
+        let mut c = sqlx::SqliteConnection::connect(&format!(
+            "sqlite://{}",
+            root.join("state.sqlite3").display()
+        ))
+        .await
+        .unwrap();
+        for i in 1..=128 {
+            let id = format!("invalid-aux-{i:03}");
+            let mut task = Task::new(TaskId(id.clone()), vec![]);
+            task.state = TaskState::Paused;
+            store
+                .create_task(NewTask {
+                    id: &id,
+                    project_id: "project",
+                    objective: "invalid ownership fixture",
+                    state: "paused",
+                    priority: 0,
+                    authority_json: "{}",
+                    aggregate_json: &serde_json::to_string(&task).unwrap(),
+                    created_at_ms: 0,
+                })
+                .await
+                .unwrap();
+            let invocation = format!("00000000-0000-4000-8000-{i:012x}");
+            sqlx::query("INSERT INTO auxiliary_invocations(invocation_id,task_id,execution_token,preparation_json,boot_generation,state,created_at_ms) VALUES(?,?,?,'{}',1,'pending',0)").bind(invocation).bind(&id).bind(token).execute(&mut c).await.unwrap();
         }
     }
 

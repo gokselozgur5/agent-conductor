@@ -11,16 +11,40 @@ use tokio::{
 
 #[tokio::main]
 async fn main() {
-    let status = if serve().await.is_err() {
+    let arguments: Vec<String> = std::env::args().collect();
+    let result = if arguments.get(1).is_some_and(|v| v == "--file-broker") {
+        if arguments.len() == 2 {
+            conductor_runtime::serve_broker_runner()
+                .await
+                .map_err(|_| ())
+        } else {
+            Err(())
+        }
+    } else if arguments.get(1).is_some_and(|v| v == "--auxiliary") {
+        if matches!(arguments.len(), 3 | 4) {
+            conductor_runtime::serve_auxiliary_tagged(
+                &arguments[2],
+                arguments.get(3).map(String::as_str),
+            )
+            .await
+            .map_err(|_| ())
+        } else {
+            Err(())
+        }
+    } else {
+        serve().await
+    };
+    let status = if result.is_err() {
         // No packet, environment, vendor output or credential material in errors.
         eprintln!("runner protocol or supervision failed");
         1
     } else {
         0
     };
-    // Tokio stdin uses a blocking reader that cannot be cancelled. All owned
-    // workers are settled before serve returns; do not wait for an idle parent
-    // to close stdin merely to shut down that reader thread.
+    // Tokio stdin uses a blocking reader that cannot be cancelled. Handlers
+    // finish cleanup attempts before returning; errors can leave uncertainty,
+    // so wrapper exit alone is never settlement evidence. Do not wait for an
+    // idle parent to close stdin merely to shut down that reader thread.
     std::process::exit(status);
 }
 

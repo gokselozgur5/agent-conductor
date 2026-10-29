@@ -16,6 +16,16 @@ use tokio::sync::Mutex;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+mod auxiliary;
+mod auxiliary_host;
+mod legacy_auxiliary_host;
+pub use legacy_auxiliary_host::AuxiliaryHostObservation;
+mod auxiliary_launch;
+mod auxiliary_publication;
+pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
+pub use auxiliary_launch::{
+    AuxiliaryInvocation, AuxiliaryLaunchBinding, AuxiliaryRecoveryCandidate,
+};
 mod inventory;
 mod usage;
 pub use inventory::{InventoryKind, InventoryRow};
@@ -23,10 +33,13 @@ mod evidence;
 mod history;
 pub use evidence::EvidenceRow;
 #[cfg(test)]
+mod auxiliary_crash_tests;
+#[cfg(test)]
 mod transaction_cancellation;
 pub use history::AuditMetadata;
 mod workflow_dependencies;
 pub use workflow_dependencies::WorkflowDependency;
+mod completed_dispatch;
 mod workflow_assignments;
 mod workflows;
 pub use workflows::WorkflowDispatch;
@@ -90,6 +103,7 @@ struct StoreInner {
     writer: Mutex<SqliteConnection>,
     readers: SqlitePool,
     dispatch_changes: tokio::sync::watch::Sender<()>,
+    completed_dispatch_cursor: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +333,7 @@ impl Store {
                 writer: Mutex::new(writer),
                 readers,
                 dispatch_changes: tokio::sync::watch::channel(()).0,
+                completed_dispatch_cursor: Mutex::new(None),
             }),
         })
     }
@@ -811,6 +826,27 @@ impl Store {
             });
         }
 
+        let legacy_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM legacy_auxiliary_ownership")
+                .fetch_one(&self.inner.readers)
+                .await?;
+        if legacy_count != 0 {
+            let tasks: Vec<(String,String,String)> = sqlx::query_as("SELECT substr(l.task_id,1,256),l.reason,CASE WHEN w.task_id IS NULL THEN 'native_witness_required' WHEN w.status='observed' THEN 'later_native_boot_required' ELSE 'witness_contradiction' END FROM legacy_auxiliary_ownership l LEFT JOIN legacy_auxiliary_host_witness w ON w.task_id=l.task_id ORDER BY l.task_id LIMIT 128")
+                .fetch_all(&self.inner.readers).await?;
+            violations.push(RuntimeInvariantViolation {
+                code: "legacy_auxiliary_ownership_unknown".into(),
+                summary: "legacy verification lacks auxiliary settlement evidence; continuation and backup remain refused".into(),
+                context_json: serde_json::json!({"count":legacy_count,"tasks":tasks,"limit":128}).to_string(),
+            });
+        }
+
+        if let Some(diagnostic) = self.auxiliary_recovery_diagnostic().await? {
+            violations.push(diagnostic);
+        }
+        if let Some(diagnostic) = self.file_broker_recovery_diagnostic().await? {
+            violations.push(diagnostic);
+        }
+
         Ok(violations)
     }
 }
@@ -1159,3 +1195,17 @@ async fn persist_in_transaction(
         outcome_json: batch.outcome_json.clone(),
     })
 }
+
+mod file_broker;
+pub use file_broker::{
+    FileBrokerBinding, FileBrokerOwner, FileBrokerRecoveryCandidate, FileBrokerStatus,
+};
+#[cfg(test)]
+mod file_broker_barrier_tests;
+#[cfg(test)]
+mod file_broker_crash_tests;
+#[cfg(test)]
+mod file_broker_tests;
+
+#[cfg(test)]
+mod file_broker_owner_tests;

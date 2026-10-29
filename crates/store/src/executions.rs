@@ -61,7 +61,7 @@ pub struct ExecutionProcess {
     pub start_marker: String,
 }
 impl ExecutionProcess {
-    fn validate(&self) -> Result<(), StoreError> {
+    pub(crate) fn validate(&self) -> Result<(), StoreError> {
         if self.pid == 0
             || self.pid > i32::MAX.unsigned_abs()
             || [&self.host_id, &self.boot_id].iter().any(|id| {

@@ -112,6 +112,18 @@ fn writer_admission_is_enforced_by_the_adapter_boundary() {
 }
 
 #[test]
+fn command_capable_native_writers_are_refused_before_launch_construction() {
+    for kind in [AdapterKind::Claude, AdapterKind::Codex] {
+        let (_directory, pin, mut packet) = fixture(kind);
+        packet.contract.authority.allow_workspace_commands = true;
+        assert!(matches!(
+            conductor_runtime::native_writer_launch(&pin, &packet, BTreeMap::new()),
+            Err(VendorError::Capability)
+        ));
+    }
+}
+
+#[test]
 fn instruction_prompt_uses_only_verified_text_in_frozen_order() {
     use conductor_runtime::InstructionPin;
     use sha2::{Digest, Sha256};

@@ -13,6 +13,7 @@ import time
 import uuid
 
 from process_birth import observe as process_birth
+from auxiliary_process_inventory import parse_tag as parse_auxiliary_tag, inventory as auxiliary_inventory
 
 TAG = re.compile(r'--conductor-owner=v1:([0-9a-f]{64}):([0-9a-f]{64}):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\Z')
 
@@ -82,7 +83,7 @@ def discover_runner_pids(names, arguments):
         fields = line.strip().split(None, 1)
         if len(fields) == 2:
             pid = pid_field(fields[0])
-            if pid is not None and parse_tag(fields[1]) is not None:
+            if pid is not None and (parse_tag(fields[1]) is not None or parse_auxiliary_tag(fields[1]) is not None):
                 result.add(pid)
                 if len(result) > 128:
                     raise ValueError('too_many_runner_observations')
@@ -255,6 +256,7 @@ def inspect(database, host=None):
     candidates = discover_runner_pids(inventory, argument_hints)
     del inventory, argument_hints  # Never retain raw host command lines in reports.
     observations = []
+    auxiliary = []
     unscoped = 0
     unconfirmed = 0
     vanished = 0
@@ -278,6 +280,10 @@ def inspect(database, host=None):
             continue
         tag = parse_tag(command)
         if tag is None:
+            auxiliary_tag = parse_auxiliary_tag(command)
+            if auxiliary_tag is not None:
+                auxiliary.append((pid, auxiliary_tag, before))
+                continue
             if pid in named_candidates:
                 unscoped += 1
             else:
@@ -296,6 +302,8 @@ def inspect(database, host=None):
             raise ValueError('unbound_runtime_scope')
         matches = correlate(db, row[0], observations)
         recorded = recorded_observations(db, row[0], host, deadline)
+        auxiliary_report = auxiliary_inventory(db, row[0], host, auxiliary, deadline,
+                                               birth=process_birth, ps=ps, binding=process_binding)
     if time.monotonic() > deadline:
         raise ValueError('inventory_deadline')
     stable = []
@@ -309,8 +317,8 @@ def inspect(database, host=None):
         stable.append(item)
     if time.monotonic() > deadline:
         raise ValueError('inventory_deadline')
-    return dict(version=2, discovery='bounded_host_argv_candidates', authority_id=row[0], boot_generation=str(row[1]), observations=stable,
-                recorded_process_inventory=recorded,
+    return dict(version=3, discovery='bounded_host_argv_candidates', authority_id=row[0], boot_generation=str(row[1]), observations=stable,
+                recorded_process_inventory=recorded, auxiliary_process_inventory=auxiliary_report,
                 changed_process_observations=changed,
                 unconfirmed_candidate_observations=unconfirmed,
                 unscoped_runners_on_host=unscoped, unavailable_process_observations=vanished,

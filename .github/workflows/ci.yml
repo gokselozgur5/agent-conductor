@@ -22,6 +22,10 @@ jobs:
         os: [ubuntu-latest, macos-14]
 
     steps:
+      - name: Select short temporary paths for Unix sockets
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
       - name: Check out source
         uses: actions/checkout@v4
 
@@ -37,11 +41,13 @@ jobs:
       - name: Run strict Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Run workspace tests
-        run: cargo test --workspace --all-features
-
       - name: Build operator integration binaries
         run: cargo build --workspace
+
+      - name: Run workspace tests
+        env:
+          CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
+        run: cargo test --workspace --all-features
 
       - name: Check operator recovery and publication refusals
         env:
@@ -53,6 +59,16 @@ jobs:
           python3 -m unittest discover -s tests -p test_host_recovery_integration.py -v
           python3 -m unittest discover -s tests -p test_soak_control_plane.py -v
           python3 -m unittest discover -s tests -p test_runner_process_inventory.py -v
+          python3 -m unittest discover -s tests -p test_auxiliary_process_inventory.py -v
+          python3 -m unittest discover -s tests -p test_native_observation_guard.py -v
+          python3 -m unittest discover -s tests -p test_run_native_monitor.py -v
+          python3 -m unittest discover -s tests -p test_native_resource_guard.py -v
+          python3 -m unittest discover -s tests -p test_native_stale_control.py -v
+          python3 -m unittest discover -s tests -p test_escaped_runner.py -v
+          python3 -m unittest discover -s tests -p test_verification_surface.py -v
+
+      - name: Check board diagnostic rendering
+        run: node --test tests/board_diagnostics.cjs
 
       - name: Reject committed credential material
         shell: bash

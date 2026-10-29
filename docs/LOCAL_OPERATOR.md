@@ -205,3 +205,40 @@ After stopping and reconciling the runtime, `tools/conductor backup DESTINATION`
 exports private state and `tools/conductor verify-backup DESTINATION` checks it
 without starting workers. See [OPERATOR_BACKUP.md](OPERATOR_BACKUP.md) for the
 fencing requirements, external dependencies and pending restore limitations.
+
+## Host-local prebuilt preview
+
+`tools/package_local.py --bin-dir /absolute/built/bin --accepted-plan /private/accepted-plan.json --destination /new/private/bundle`
+creates a separate bundle with exact binaries, operator tools, documentation and
+a content manifest. It never copies model credentials, project files or runtime
+state, and refuses an existing destination or changed adapter binary. Packaging
+is not adapter conformance or full release acceptance. Use an already accepted
+Claude-writer/Codex-reviewer plan; the profile remains specific to this host.
+
+Inside the bundle, `./conductor init --project /absolute/git-project --port 8788`
+selects the bundled binaries. `./conductor plan` selects its accepted profile by
+default, so no private test-plan path or build toolchain is needed to operate it.
+The remaining arguments and authorization rules are identical to `tools/conductor`.
+The manifest records whether packaging source was dirty and hashes all shipped
+files. Use a clean committed source and separately validate the actual workflow
+before handing a bundle to an operator.
+
+The host-local release bundle was exercised through its own launcher with two
+linked native tasks: Claude wrote each task, isolated checks passed, and distinct
+Codex reviewers accepted both outputs. The second task consumed the first task's
+exact accepted source identity. Independent SQLite/file verification confirmed
+one completion per task, four settled auxiliary invocations, both fenced writers,
+unchanged original files and 42 healthy invariant samples. A stopped/start/read/stop
+rehearsal preserved task aggregates, executions, publications and dispatch outcomes.
+The bundle's 26 shipped files retained their manifest hashes. Evidence is retained
+privately as `operator-bundle-native-v2/receipt.json` and
+`operator-bundle-native-v2/independent-verification.json`.
+
+The earlier debug bundle is not accepted: its second verifier failed during
+startup, leaving unresolved auxiliary ownership. A process sample observed
+executable SHA-256 validation; that sample does not establish the sole cause of
+the failure. Its extended observation, failure and owned-process cleanup records
+are preserved separately; no pending state was cleared or upgraded. The release
+exercise used a fresh state and project, not a repaired or relabelled debug run.
+Use release binaries for the operator workflow. This two-task local exercise does
+not establish native Codex writing, Linux isolation, full endurance or complete v1.

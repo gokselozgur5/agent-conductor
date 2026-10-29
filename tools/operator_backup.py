@@ -87,8 +87,14 @@ def database(path, state):
         expected = [(int(file.name.split('_')[0]), hashlib.sha384(file.read_bytes()).digest(), 1) for file in sorted(MIGRATIONS.glob('*.sql'))]
         if not expected or migrations != expected:
             raise ValueError('unsupported or incomplete database migration')
+        if db.execute("select exists(select 1 from file_brokers where state != 'closed') or exists(select 1 from file_operations where completed_at_ms is null)").fetchone()[0]:
+            raise ValueError('file broker ownership unresolved; verified closure required before backup')
         if db.execute("select count(*) from executions where state != 'fenced'").fetchone()[0]:
             raise ValueError('execution without a verified write fence; reconcile before backup')
+        if db.execute('select count(*) from legacy_auxiliary_ownership').fetchone()[0]:
+            raise ValueError('legacy auxiliary ownership unresolved; verified recovery required before backup')
+        if db.execute("select count(*) from auxiliary_invocations where state != 'settled'").fetchone()[0]:
+            raise ValueError('unresolved auxiliary invocation; reconcile before backup')
         if db.execute("select count(*) from leases where status in ('active','recovery_pending')").fetchone()[0]:
             raise ValueError('live or recovering lease; reconcile before backup')
         if db.execute("select count(*) from effect_intents where status not in ('done','abandoned')").fetchone()[0]:
