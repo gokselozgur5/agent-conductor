@@ -216,3 +216,41 @@ async fn release_write_and_close(
         receipt.launch_sha256
     );
 }
+
+#[tokio::test]
+async fn native_launcher_refuses_consumed_intent_without_ack_or_receipt_claim() {
+    let NativeLaunchSetup {
+        root: _root,
+        store,
+        binding,
+        launch,
+        endpoint,
+        wrapper,
+    } = native_launch_setup(true).await;
+    let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+    let before = store
+        .execution(&binding.execution_token)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+            .await
+            .is_err()
+    );
+    let after = store
+        .execution(&binding.execution_token)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before, after);
+    assert!(after.process.is_none());
+    assert_eq!(fs::read_dir(&launch.receipt_root).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+}
