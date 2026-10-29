@@ -153,8 +153,29 @@ impl RegisteredBrokerJournal {
     pub async fn serve_remote(
         self,
         stream: UnixStream,
+        cancel: watch::Receiver<bool>,
+        wait: Duration,
+    ) -> Result<(), BrokerError> {
+        self.serve_remote_mode(stream, cancel, wait, false).await
+    }
+
+    // Only the owned journal session opts into idle waiting. Legacy callers keep
+    // their whole-read deadline; partial frames and admitted results stay bounded.
+    pub(crate) async fn serve_remote_owned(
+        self,
+        stream: UnixStream,
+        cancel: watch::Receiver<bool>,
+        wait: Duration,
+    ) -> Result<(), BrokerError> {
+        self.serve_remote_mode(stream, cancel, wait, true).await
+    }
+
+    async fn serve_remote_mode(
+        self,
+        stream: UnixStream,
         mut cancel: watch::Receiver<bool>,
         wait: Duration,
+        allow_idle: bool,
     ) -> Result<(), BrokerError> {
         use conductor_runtime::{BrokerJournalRequest, MAX_JOURNAL_FRAME};
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -165,6 +186,19 @@ impl RegisteredBrokerJournal {
         let mut completed = 0;
         let mut pending = None;
         loop {
+            if allow_idle && pending.is_none() {
+                // No admitted operation exists yet. Wait for the first byte under
+                // the session owner, then apply the unchanged frame deadline.
+                tokio::select! {
+                    biased;
+                    () = journal_cancelled(&mut cancel) => return Err(BrokerError::Revoked),
+                    ready = stream.fill_buf() => {
+                        if ready.map_err(|_| BrokerError::Uncertain)?.is_empty() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
             let mut bytes = Vec::new();
             let read = async {
                 (&mut stream)
