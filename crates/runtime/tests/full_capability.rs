@@ -50,8 +50,8 @@ async fn unrestricted_launch_retains_account_home_and_literal_prompt() {
     }
 }
 
-#[test]
-fn frozen_launch_checks_vendor_identity_and_retains_packet() {
+#[tokio::test]
+async fn frozen_launch_checks_vendor_identity_and_retains_packet() {
     let user = User::from_uid(getuid()).unwrap().unwrap();
     let account = ExecutionAccount::resolve(&user.name).unwrap();
     let executable = std::path::PathBuf::from("/bin/echo");
@@ -77,9 +77,26 @@ fn frozen_launch_checks_vendor_identity_and_retains_packet() {
         },
         "objective":"Run a build", "checkpoint":null,"untrusted_context":[]
     })).unwrap();
-    let launch = conductor_runtime::full_capability_launch(&pin, &packet).unwrap();
+    let launch =
+        conductor_runtime::native_writer_launch(&pin, &packet, Default::default()).unwrap();
     assert_eq!(launch.packet, packet);
     assert_eq!(launch.arguments[0], "--yolo");
+    let mut connection = conductor_runtime::RunnerConnection::launch(
+        std::path::Path::new(env!("CARGO_BIN_EXE_conductor-runner")),
+        &launch,
+        None,
+        |_, _| async { Ok(conductor_runtime::continuous_millis().unwrap() + 1000) },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        connection.event().await.unwrap(),
+        conductor_runtime::RunnerEvent::Finished {
+            exit_code: Some(0),
+            ..
+        }
+    ));
+    connection.wait().await.unwrap();
     pin.version = "changed".into();
     assert!(conductor_runtime::full_capability_launch(&pin, &packet).is_err());
 }

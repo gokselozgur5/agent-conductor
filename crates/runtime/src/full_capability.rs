@@ -51,7 +51,7 @@ pub fn full_capability_launch(
         executable: spec.executable,
         arguments: spec.arguments,
         environment: spec.environment,
-        output_limit: spec.output_limit,
+        output_limit: 1024 * 1024,
         heartbeat_timeout_ms: 1000.min(contract.max_runtime_ms),
     })
 }

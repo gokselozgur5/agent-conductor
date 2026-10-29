@@ -20,6 +20,9 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeWorkflowPlan {
+    /// Explicit machine-wide execution under this OS account's own credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_capability: Option<conductor_runtime::FullCapabilityProfile>,
     pub task_id: String,
     pub project: PathBuf,
     pub objective: String,
@@ -169,7 +172,7 @@ impl<C: Clock> PersistentControlService<C> {
         untrusted_context.extend(advisory_context);
         let packet = ResumePacket {
             contract: AttemptContract {
-                full_capability: None,
+                full_capability: plan.full_capability.clone(),
                 version: 1,
                 task_id: plan.task_id.clone(),
                 attempt_id: attempt_id.clone(),
@@ -466,7 +469,7 @@ impl<C: Clock> PersistentControlService<C> {
                 project_id,
                 objective: plan.objective.clone(),
                 priority: 0,
-                authority: serde_json::json!({"workspace":workspace,"mode":"native-isolated"}),
+                authority: serde_json::json!({"workspace":workspace,"mode":if plan.full_capability.is_some() {"native-full-capability"} else {"native-isolated"},"full_capability":plan.full_capability}),
                 required_checks: plan
                     .checks
                     .iter()
@@ -717,6 +720,14 @@ fn advisory_context(plan: &NativeWorkflowPlan) -> Result<Option<String>, StoreEr
         .map_err(|_| invalid("advisory sources changed or unavailable"))
 }
 fn writer_authority(plan: &NativeWorkflowPlan, workspace: PathBuf) -> CapabilityEnvelope {
+    if plan.full_capability.is_some() {
+        return CapabilityEnvelope {
+            read_roots: vec!["/".into()],
+            write_roots: vec!["/".into()],
+            network: NetworkPolicy::Unrestricted,
+            allow_workspace_commands: true,
+        };
+    }
     CapabilityEnvelope {
         read_roots: std::iter::once(workspace.clone())
             .chain(plan.instructions.iter().map(|pin| pin.path.clone()))
@@ -834,6 +845,7 @@ mod tests {
             conformance_sha256: "b".repeat(64),
         };
         NativeWorkflowPlan {
+            full_capability: None,
             wake_subscription: None,
             depends_on: vec![],
             input_task: None,
@@ -856,6 +868,33 @@ mod tests {
             advisory_sources: vec![],
         }
     }
+    #[test]
+    fn full_capability_plan_roundtrip_preserves_account_and_machine_authority() {
+        let mut selected = plan("/project".into(), "/artifacts".into());
+        assert!(
+            serde_json::to_value(&selected)
+                .unwrap()
+                .get("full_capability")
+                .is_none()
+        );
+        selected.full_capability = Some(conductor_runtime::FullCapabilityProfile {
+            account: conductor_runtime::ExecutionAccount {
+                name: "worker".into(),
+                uid: 501,
+                gid: 20,
+                home: "/Users/worker".into(),
+            },
+            path: "/usr/bin:/bin".into(),
+        });
+        let restored: NativeWorkflowPlan =
+            serde_json::from_slice(&serde_json::to_vec(&selected).unwrap()).unwrap();
+        assert_eq!(restored.full_capability, selected.full_capability);
+        let authority = writer_authority(&restored, "/artifacts/work/tree".into());
+        assert_eq!(authority.network, NetworkPolicy::Unrestricted);
+        assert_eq!(authority.write_roots, vec![PathBuf::from("/")]);
+        assert!(authority.allow_workspace_commands);
+    }
+
     #[test]
     fn initial_decisions_are_bounded_and_legacy_plan_encoding_is_unchanged() {
         let mut plan = plan("/project".into(), "/artifacts".into());

@@ -36,7 +36,8 @@ impl<C: Clock> PersistentControlService<C> {
 
     /// Launches a pinned native writer admitted by its runtime adapter. Its authentication
     /// environment is forwarded only through the private wrapper pipe, never SQL.
-    /// Command-capable writers remain refused pending descendant fencing evidence.
+    /// Unrestricted launches retain the selected OS account. Launch or normal exit
+    /// alone does not establish a descendant fence or accept the task's output.
     /// The pin must be selected by trusted daemon configuration, not worker text.
     /// # Errors
     /// Refuses unsupported writer capabilities, stale identity or failed release.

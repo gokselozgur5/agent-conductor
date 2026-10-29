@@ -67,6 +67,7 @@ fn bound_initial_manifest(
         || packet.objective != plan.objective
         || packet.contract.checks != plan.checks
         || packet.contract.instructions != plan.instructions
+        || packet.contract.full_capability != plan.full_capability
         || packet
             .sha256()
             .map_err(|_| invalid("initial packet hash failed"))?
@@ -187,6 +188,23 @@ mod tests {
             exit_code: None,
         };
         (plan, record, manifest)
+    }
+
+    #[test]
+    fn initial_binding_rejects_replacing_the_execution_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (mut plan, record, _) = fixture(&root);
+        plan.full_capability = Some(conductor_runtime::FullCapabilityProfile {
+            account: conductor_runtime::ExecutionAccount {
+                name: "worker".into(),
+                uid: 501,
+                gid: 20,
+                home: "/Users/worker".into(),
+            },
+            path: "/usr/bin:/bin".into(),
+        });
+        assert!(bound_initial_manifest(&plan, &root.join("work/tree"), &record).is_err());
     }
 
     #[test]

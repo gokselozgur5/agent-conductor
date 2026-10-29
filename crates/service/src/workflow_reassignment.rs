@@ -27,7 +27,8 @@ impl<C: Clock> PersistentControlService<C> {
         if worker.trim().is_empty()
             || worker.len() > 128
             || worker == format!("{}:verifier", plan.task_id)
-            || pin.kind != AdapterKind::Claude
+            || (pin.kind != AdapterKind::Claude
+                && !(plan.full_capability.is_some() && pin.kind == AdapterKind::Codex))
         {
             return Err(invalid("unsupported successor identity or capability"));
         }
@@ -37,7 +38,7 @@ impl<C: Clock> PersistentControlService<C> {
             .await?
             .ok_or_else(|| invalid("successor must already be registered"))?;
         if agent.access_mode != "read_write"
-            || agent.adapter_kind != "claude"
+            || agent.adapter_kind != format!("{:?}", pin.kind).to_lowercase()
             || agent.protocol_fingerprint != pin.conformance_sha256
             || agent.capability_hash != pin.executable_sha256
         {
@@ -79,8 +80,8 @@ impl<C: Clock> PersistentControlService<C> {
             executable_sha256: pin.executable_sha256.clone(),
             conformance_sha256: pin.conformance_sha256.clone(),
         };
-        // Validate the actual executable and existing file-only capabilities before
-        // durable queue admission. Authentication is supplied only by the daemon.
+        // Validate the executable and retain the frozen account/capability profile
+        // before durable admission. The account is never inferred from worker prose.
         conductor_runtime::native_writer_launch(&pin, &packet, BTreeMap::new())
             .map_err(|_| invalid("successor adapter refused retained contract"))?;
         let source = task
