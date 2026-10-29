@@ -27,6 +27,7 @@ fn bound_owner(
     }
     BrokerReceiptDirectory::open(root)?;
     Ok(FileBrokerOwner {
+        receipt_root: Some(root.to_str().ok_or(BrokerError::Invalid)?.into()),
         launch_sha256: receipt.launch_sha256.clone(),
         receipt_root_identity_sha256: broker_root_identity(root)?,
         process: ExecutionProcess {
@@ -84,7 +85,10 @@ pub async fn close_broker_from_receipt(
         .file_broker_owner(binding)
         .await
         .map_err(|_| BrokerError::Refused)?;
-    let actual = bound_owner(binding, receipt, root)?;
+    let mut actual = bound_owner(binding, receipt, root)?;
+    if expected.receipt_root.is_none() {
+        actual.receipt_root = None;
+    }
     if expected != actual {
         return Err(BrokerError::Refused);
     }
@@ -118,12 +122,22 @@ pub async fn recover_broker_from_receipt(
     generation: i64,
     event: EffectAudit<'_>,
 ) -> Result<bool, BrokerError> {
+    let host = conductor_runtime::HostEpoch::current()
+        .await
+        .map_err(|_| BrokerError::Refused)?;
+    recover_on_host(store, binding, root, generation, event, &host).await
+}
+async fn recover_on_host(
+    store: &Store,
+    binding: &FileBrokerBinding,
+    root: &Path,
+    generation: i64,
+    event: EffectAudit<'_>,
+    host: &conductor_runtime::HostEpoch,
+) -> Result<bool, BrokerError> {
     use conductor_runtime::{BrokerScope, ChildIdentity, HostEpoch};
     let owner = store
         .file_broker_owner(binding)
-        .await
-        .map_err(|_| BrokerError::Refused)?;
-    let host = HostEpoch::current()
         .await
         .map_err(|_| BrokerError::Refused)?;
     if owner.process.platform != host.platform
@@ -205,4 +219,66 @@ pub async fn recover_broker_from_receipt(
             .await
     }
     .map_err(|_| BrokerError::Refused)
+}
+
+impl<C: crate::Clock> crate::PersistentControlService<C> {
+    pub(super) async fn recover_file_broker_receipts(
+        &self,
+    ) -> Result<usize, agent_conductor_store::StoreError> {
+        let mut cursor = self.broker_recovery_cursor.lock().await;
+        let page = self
+            .store
+            .pending_file_broker_page(cursor.as_deref())
+            .await?;
+        *cursor = if page.len() == 128 {
+            page.last().map(|row| row.invocation_id.clone())
+        } else {
+            None
+        };
+        if page.is_empty() {
+            return Ok(0);
+        }
+        let Ok(host) = conductor_runtime::HostEpoch::current().await else {
+            return Ok(0);
+        };
+        let generation = i64::try_from(self.boot_generation)
+            .map_err(|_| agent_conductor_store::StoreError::BootGenerationOverflow)?;
+        let mut recovered = 0;
+        for candidate in page {
+            let Ok(binding) = candidate.binding else {
+                continue;
+            };
+            // Re-read exact ownership inside recovery before accepting evidence.
+            let owner = match self.store.file_broker_owner(&binding).await {
+                Ok(owner) => owner,
+                Err(agent_conductor_store::StoreError::Integrity(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(root) = owner.receipt_root else {
+                continue;
+            };
+            let id = uuid::Uuid::now_v7().to_string();
+            let event = EffectAudit {
+                id: &id,
+                actor_id: "conductor-broker-recovery",
+                correlation_id: &binding.invocation_id,
+                now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+            };
+            if matches!(
+                recover_on_host(
+                    &self.store,
+                    &binding,
+                    Path::new(&root),
+                    generation,
+                    event,
+                    &host
+                )
+                .await,
+                Ok(true)
+            ) {
+                recovered += 1;
+            }
+        }
+        Ok(recovered)
+    }
 }

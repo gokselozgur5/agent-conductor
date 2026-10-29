@@ -10,6 +10,9 @@ pub struct FileBrokerOwner {
     pub launch_sha256: String,
     pub receipt_root_identity_sha256: String,
     pub process: ExecutionProcess,
+    /// Canonical private directory locator; absent on older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_root: Option<String>,
 }
 impl FileBrokerOwner {
     pub(super) fn encoded(&self) -> Result<String, StoreError> {
@@ -17,7 +20,19 @@ impl FileBrokerOwner {
             return Err(invalid());
         }
         self.process.validate()?;
-        serde_json::to_string(self).map_err(|_| invalid())
+        if self.receipt_root.as_ref().is_some_and(|path| {
+            path.is_empty()
+                || path.len() > 4096
+                || path.chars().any(char::is_control)
+                || !std::path::Path::new(path).is_absolute()
+        }) {
+            return Err(invalid());
+        }
+        let encoded = serde_json::to_string(self).map_err(|_| invalid())?;
+        if encoded.len() > 4096 {
+            return Err(invalid());
+        }
+        Ok(encoded)
     }
 }
 impl Store {
@@ -148,4 +163,43 @@ pub(super) async fn recovery_audit(
         .bind(serde_json::json!({"invocation_id":binding.invocation_id,"sequence":completed,"origin_generation":binding.boot_generation,"recovery_generation":generation}).to_string())
         .bind(event.now_ms).execute(db).await?;
     Ok(())
+}
+
+/// One independently decoded pending row; invalid rows remain unresolved.
+pub struct FileBrokerRecoveryCandidate {
+    pub invocation_id: String,
+    pub binding: Result<FileBrokerBinding, StoreError>,
+}
+impl Store {
+    /// Stable bounded discovery; one malformed binding does not hide later rows.
+    /// Ownerless registrations are retained for separate prelaunch recovery.
+    /// # Errors
+    /// Returns database read errors; binding JSON is bounded before decoding.
+    pub async fn pending_file_broker_page(
+        &self,
+        after: Option<&str>,
+    ) -> Result<Vec<FileBrokerRecoveryCandidate>, StoreError> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT b.invocation_id,b.execution_token,CASE WHEN length(b.binding_json)<=4096 THEN b.binding_json ELSE '' END FROM file_brokers b JOIN file_broker_owners o USING(invocation_id) WHERE b.state='open' AND (? IS NULL OR b.invocation_id>?) ORDER BY b.invocation_id LIMIT 128")
+            .bind(after).bind(after).fetch_all(&self.inner.readers).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(invocation_id, execution_token, encoded)| {
+                let binding = (|| {
+                    let binding: FileBrokerBinding =
+                        serde_json::from_str(&encoded).map_err(|_| invalid())?;
+                    if binding.invocation_id != invocation_id
+                        || binding.execution_token != execution_token
+                        || binding.encoded()? != encoded
+                    {
+                        return Err(invalid());
+                    }
+                    Ok(binding)
+                })();
+                FileBrokerRecoveryCandidate {
+                    invocation_id,
+                    binding,
+                }
+            })
+            .collect())
+    }
 }

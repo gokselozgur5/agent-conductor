@@ -485,6 +485,13 @@ impl<C: Clock> PersistentControlService<C> {
     pub(super) async fn recover_fenced_receipts(&self) -> Result<(), StoreError> {
         let _guard = self.mutations.lock().await;
         for record in self.store.blocked_executions().await? {
+            if self
+                .store
+                .execution_has_unresolved_file_broker(&record.preparation.effect_token)
+                .await?
+            {
+                continue;
+            }
             let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
                 .map_err(|_| runtime_error("stored packet invalid"))?;
             if packet.contract.adapter.kind != AdapterKind::Claude

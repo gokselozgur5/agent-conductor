@@ -1244,10 +1244,18 @@ async fn assert_recovered_generation(
         .await
         .unwrap();
     let generation = binding.boot_generation + 1;
-    reopened
-        .start_reserved_runtime(200, &binding.authority_id, generation.try_into().unwrap())
-        .await
-        .unwrap();
+    prepare_broker_restart_packet(root, binding).await;
+    if count == 1 {
+        seed_invalid_broker_page(root, binding).await;
+    }
+    let service = PersistentControlService::start_with_reservation(
+        reopened.clone(),
+        200,
+        FixedClock::new(0),
+        Some((&binding.authority_id, generation.try_into().unwrap())),
+    )
+    .await
+    .unwrap();
     for stale in [binding.boot_generation, generation + 1] {
         assert!(
             crate::recover_broker_from_receipt(
@@ -1277,17 +1285,20 @@ async fn assert_recovered_generation(
     );
     assert_progress(&reopened, binding, count, count).await;
     fs::rename(retained, receipt_path).unwrap();
-    assert!(
-        crate::recover_broker_from_receipt(
-            &reopened,
-            binding,
-            receipts,
-            generation,
-            broker_owner_audit("recovered")
-        )
-        .await
-        .unwrap()
-    );
+    if count == 1 {
+        assert_broker_pages(&reopened).await;
+    }
+    service.recover_interrupted_workflows().await.unwrap();
+    if count == 1 {
+        assert!(service.broker_recovery_cursor.lock().await.is_some());
+        assert_progress(&reopened, binding, count, count).await;
+        service
+            .clone()
+            .recover_interrupted_workflows()
+            .await
+            .unwrap();
+    }
+    assert!(service.broker_recovery_cursor.lock().await.is_none());
     assert!(
         !crate::recover_broker_from_receipt(
             &reopened,
@@ -1306,5 +1317,103 @@ async fn assert_recovered_generation(
             admitted: count,
             completed: count
         }
+    );
+}
+
+async fn seed_invalid_broker_page(root: &tempfile::TempDir, binding: &FileBrokerBinding) {
+    use sqlx::Executor;
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("state.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    let mut tx = db.begin().await.unwrap();
+    for i in 1..=129 {
+        let id = format!("invalid-broker-{i}");
+        let invocation = format!("00000000-0000-4000-8000-{i:012x}");
+        let mut task = Task::new(TaskId(id.clone()), vec![]);
+        task.state = TaskState::Paused;
+        sqlx::query("INSERT INTO tasks(id,project_id,objective,state,authority_json,aggregate_json,created_at_ms,updated_at_ms) SELECT ?,project_id,'invalid broker fixture','paused','{}',?,0,0 FROM tasks WHERE id=?")
+            .bind(&id).bind(serde_json::to_string(&task).unwrap()).bind(&binding.task_id).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO attempts(id,task_id,worker_id,lease_epoch,instruction_hashes_json,required_checks_json,capability_hash,started_at_ms,ended_at_ms) SELECT ?,?,worker_id,1,instruction_hashes_json,required_checks_json,capability_hash,0,1 FROM attempts WHERE id=?")
+            .bind(&id).bind(&id).bind(&binding.attempt_id).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO effect_intents(token,task_id,attempt_id,lease_epoch,correlation_id,effect_kind,request_json,status,created_at_ms,updated_at_ms) VALUES(?,?,?,1,'fixture','fixture','{}','done',0,0)")
+            .bind(&id).bind(&id).bind(&id).execute(&mut *tx).await.unwrap();
+        let mut packet = runtime_launch(root.path()).packet;
+        packet.contract.task_id.clone_from(&id);
+        packet.contract.attempt_id.clone_from(&id);
+        sqlx::query("INSERT INTO executions(effect_token,task_id,attempt_id,lease_epoch,runner_id,packet_json,packet_sha256,state,created_at_ms,updated_at_ms) VALUES(?,?,?,1,'fixture',?,?,'blocked',0,0)")
+            .bind(&id).bind(&id).bind(&id).bind(serde_json::to_string(&packet).unwrap()).bind(packet.sha256().unwrap()).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO file_brokers(invocation_id,execution_token,binding_json,state,created_at_ms) VALUES(?,?,'{}','open',0)")
+            .bind(&invocation).bind(&id).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO file_broker_owners(invocation_id,owner_json,authorized_at_ms) VALUES(?,'{}',0)")
+            .bind(&invocation).execute(&mut *tx).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    assert!(
+        db.fetch_optional("PRAGMA foreign_key_check")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+async fn prepare_broker_restart_packet(root: &tempfile::TempDir, binding: &FileBrokerBinding) {
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("state.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    let packet = runtime_launch(root.path()).packet;
+    sqlx::query("UPDATE executions SET packet_json=?,packet_sha256=? WHERE effect_token=?")
+        .bind(serde_json::to_string(&packet).unwrap())
+        .bind(packet.sha256().unwrap())
+        .bind(&binding.execution_token)
+        .execute(&mut db)
+        .await
+        .unwrap();
+}
+
+async fn assert_broker_pages(store: &Store) {
+    let first = store.pending_file_broker_page(None).await.unwrap();
+    assert_eq!(first.len(), 128);
+    assert!(first.iter().all(|row| row.binding.is_err()));
+    let second = store
+        .pending_file_broker_page(Some(&first.last().unwrap().invocation_id))
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 2);
+    assert!(second[0].binding.is_err());
+    assert!(second[1].binding.is_ok());
+}
+
+#[tokio::test]
+async fn journal_startup_defers_writer_receipt_until_broker_is_resolved() {
+    let (_root, store, binding, _db) = fixture().await;
+    let _journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
+        .await
+        .unwrap();
+    // The synthetic packet is intentionally invalid: startup must not examine
+    // writer settlement while the independently owned broker remains unresolved.
+    let service = PersistentControlService::start_with_reservation(
+        store.clone(),
+        200,
+        FixedClock::new(0),
+        Some((
+            &binding.authority_id,
+            (binding.boot_generation + 1).try_into().unwrap(),
+        )),
+    )
+    .await
+    .unwrap();
+    service.recover_interrupted_workflows().await.unwrap();
+    assert_progress(&store, &binding, 0, 0).await;
+    assert!(
+        store
+            .has_unfenced_execution(&binding.task_id)
+            .await
+            .unwrap()
     );
 }

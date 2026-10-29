@@ -557,7 +557,7 @@ Release, revalidates process/root identities, and checks the independent receipt
 on successful shutdown. Actual-runner client tests cover persisted identity before release, callback
 failure without release, and failed completion audit retaining the file and
 pending intent without a receipt. The callback now uses the production store ownership transaction. Vendor
-admission and automatic daemon scheduling of receipt recovery remain incomplete. Native admission still requires durable parent
+admission and pre-owner recovery remain incomplete. Native admission still requires durable parent
 ownership and restart reconciliation, vendor configuration/OS confinement and
 long-lived idle handling. The existing Claude workflow and Codex writer refusal
 remain unchanged.
@@ -614,6 +614,51 @@ from independent receipts. The client peer is retained until stdout is closed so
 normal peer EOF cannot race terminal delivery. These are controlled runner and
 store generation tests, not a killed production daemon/vendor acceptance run.
 Store controls cover pending effects, changed authority/binding/process/root,
-audit rollback and single generation-bound recovery audit. Automatic daemon
-recovery scheduling, pre-owner failure recovery and native Codex launch/OS/idle
-composition remain incomplete.
+audit rollback and single generation-bound recovery audit. Pre-owner failure recovery and native Codex launch/OS/idle composition remain
+incomplete.
+
+
+## Automatic bounded receipt sweep
+
+New ownership records retain the canonical private receipt-directory locator in
+addition to its identity hash. The locator is bounded and immutable with the
+owner; it is not a capability or file-content record. Older records without a
+locator retain their exact encoding and are never backfilled or guessed. Explicit
+recovery with a separately supplied matching directory remains available for
+those older records; automatic recovery skips them.
+
+The existing opt-in interrupted-workflow recovery loop now sweeps brokers before
+writer fencing and continuation. Each sweep reads at most 128 owned open brokers
+in invocation order, independently decodes bindings, and shares its cursor across
+service clones. A short page resets the cursor for a later sweep. Malformed rows,
+missing private receipts and unknown effects remain open without blocking later
+rows. One native host observation is shared across the page; each settlement
+rechecks persisted owner, directory identity and transactional generation/state.
+No sweep relaunches a broker or signals a stored PID.
+
+The actual-runner recovery test now enters the production service startup and
+interrupted-workflow recovery path. Its write scenario places 129 malformed,
+foreign-key-valid broker records ahead of the genuine record: the first 128-row
+page leaves it open, a service clone processes the second page and closes only the
+genuine broker. Test execution packets are valid synthetic adapter packets;
+initial acknowledgements and unrelated malformed rows remain controlled fixtures.
+This is service lifecycle coverage, not a complete production daemon/vendor
+acceptance scenario. Ownerless/pre-owner recovery and Codex launch integration
+remain required before native writer admission.
+
+Writer receipt reconciliation also defers executions with any open broker or
+contradictory pending broker operation, including during startup before the
+opt-in sweep runs. This prevents an unresolved broker's SQL fence barrier from
+turning ordinary startup into a failed reconciliation. The barrier remains
+transactionally authoritative; deferral never establishes a writer fence.
+
+The next native-launch composition must preserve the distinction between endpoint
+authentication and durable journal registration. The broker authenticates its
+journal connection before emitting Ready, while current journal registration
+requires an acknowledged execution. A launcher can authenticate and retain the
+private stream without serving it, observe Ready, durably acknowledge the exact
+process, then register/serve the journal and persist broker ownership before
+Release. This avoids weakening operation admission or fabricating an initial ACK.
+The current test fixture registers against a synthetic started execution and is
+not evidence that this native ordering has been implemented. Durable prelaunch
+metadata and recovery before parent-observed ownership remain prerequisites.

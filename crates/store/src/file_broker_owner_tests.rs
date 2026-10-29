@@ -5,6 +5,7 @@ use sqlx::Executor;
 
 fn owner() -> FileBrokerOwner {
     FileBrokerOwner {
+        receipt_root: None,
         launch_sha256: "c".repeat(64),
         receipt_root_identity_sha256: "d".repeat(64),
         process: ExecutionProcess {
@@ -300,4 +301,95 @@ async fn broker_recovery_audit_binds_both_generations_without_duplicate_event() 
     assert_eq!(payload["origin_generation"], 2);
     assert_eq!(payload["recovery_generation"], 3);
     assert_eq!(payload["sequence"], 0);
+}
+
+#[tokio::test]
+async fn broker_owner_locator_is_optional_bounded_and_never_backfilled() {
+    let (_root, store, binding) = fixture().await;
+    store
+        .register_file_broker(&binding, audit("register"))
+        .await
+        .unwrap();
+    let mut owner = owner();
+    for path in [
+        "relative".to_owned(),
+        "/bad\npath".to_owned(),
+        format!("/{}", "x".repeat(4096)),
+    ] {
+        owner.receipt_root = Some(path);
+        assert!(
+            store
+                .authorize_file_broker_release(&binding, &owner, audit("invalid"))
+                .await
+                .is_err()
+        );
+    }
+    owner.receipt_root = None;
+    assert!(
+        store
+            .authorize_file_broker_release(&binding, &owner, audit("legacy"))
+            .await
+            .unwrap()
+    );
+    let saved = store.file_broker_owner(&binding).await.unwrap();
+    assert!(saved.receipt_root.is_none());
+    assert!(
+        !serde_json::to_string(&saved)
+            .unwrap()
+            .contains("\"receipt_root\"")
+    );
+    owner.receipt_root = Some("/new-root".into());
+    assert!(
+        store
+            .authorize_file_broker_release(&binding, &owner, audit("backfill"))
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .file_broker_owner(&binding)
+            .await
+            .unwrap()
+            .receipt_root
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn broker_fence_deferral_checks_open_and_contradictory_pending_ownership() {
+    let (_root, store, binding) = fixture().await;
+    assert!(
+        !store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    store
+        .register_file_broker(&binding, audit("register"))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    store
+        .close_file_broker(&binding, 0, audit("close"))
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    sqlx::query("INSERT INTO file_operations(invocation_id,sequence,request_sha256,admitted_at_ms) VALUES(?,1,?,100)")
+        .bind(&binding.invocation_id).bind("e".repeat(64)).execute(&mut *store.inner.writer.lock().await).await.unwrap();
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
 }

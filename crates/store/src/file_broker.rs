@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Connection, SqliteConnection};
 #[path = "file_broker_owner.rs"]
 mod ownership;
-pub use ownership::FileBrokerOwner;
+pub use ownership::{FileBrokerOwner, FileBrokerRecoveryCandidate};
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -337,5 +337,19 @@ impl Store {
             summary:"file broker ownership remains unresolved; preserve files and operation evidence before continuation or backup".into(),
             context_json:serde_json::json!({"count":total,"brokers":records,"limit":128}).to_string(),
         }))
+    }
+}
+
+impl Store {
+    /// Whether this execution still owns unresolved broker effects/capabilities.
+    /// # Errors
+    /// Returns database read errors; false alone is never execution fencing.
+    pub async fn execution_has_unresolved_file_broker(
+        &self,
+        token: &str,
+    ) -> Result<bool, StoreError> {
+        let pending: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM file_brokers b WHERE b.execution_token=? AND (b.state='open' OR EXISTS(SELECT 1 FROM file_operations o WHERE o.invocation_id=b.invocation_id AND o.completed_at_ms IS NULL)))")
+            .bind(token).fetch_one(&self.inner.readers).await?;
+        Ok(pending != 0)
     }
 }
