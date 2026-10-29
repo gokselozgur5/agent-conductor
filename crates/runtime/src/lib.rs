@@ -114,3 +114,8 @@ pub use broker_filesystem::*;
 mod broker_transport;
 #[cfg(unix)]
 pub use broker_transport::*;
+
+#[cfg(unix)]
+mod broker_mcp;
+#[cfg(unix)]
+pub use broker_mcp::*;

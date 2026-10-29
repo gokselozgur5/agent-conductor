@@ -1,6 +1,6 @@
 # Codex writer capability design
 
-Status: protocol and isolated file port implemented; production integration remains proposed.
+Status: broker, persistence barriers and MCP translation primitives implemented; production integration remains proposed.
 Native Codex writer admission remains refused. This design does not certify a
 file-only adapter, write fencing, model behavior or complete v1 delivery.
 
@@ -329,7 +329,53 @@ the callback returned normally before asserting no delayed file effect.
 
 The journal here is a trusted synchronous interface. Its stream tests use markers;
 real SQLite/file ordering is separately covered by the store integration tests.
-The server has no production launcher call site yet. MCP JSON-RPC translation,
-private endpoint creation/inheritance, authenticated host wiring, independently
+The server has no production launcher call site yet. MCP translation is described
+below; private endpoint creation/inheritance, authenticated host wiring, independently
 persisted shutdown/result receipts and actual Codex confinement remain required.
 Do not enable a native writer by treating `BrokerStreamEnd` as a fence receipt.
+
+## MCP translation primitive
+
+`serve_broker_mcp` now translates an isolated input/output stream into requests on
+one host-supplied private Unix connection. It owns no task root or filesystem descriptor,
+subprocess launcher, socket discovery or reconnect mechanism. Scope comes only
+from the trusted caller; tool arguments cannot override it. This remains a library
+primitive, not a configured Codex subprocess or production launcher integration.
+
+The implementation follows the [MCP 2025-06-18 lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)
+and [tools subset](https://modelcontextprotocol.io/specification/2025-06-18/server/tools).
+It negotiates exactly that implemented version rather than echoing unsupported
+versions. Initialization and the initialized notification precede tools. Its two
+fixed tools are `conductor_read_text` and `conductor_write_text`; write requires an
+explicit `expected_sha256` (null for create-only). Results carry serialized JSON
+text with content/digest or written digest. This is compatible with the documented
+[Codex stdio configuration surface](https://learn.chatgpt.com/docs/extend/mcp),
+but the installed CLI has not yet been exercised against this implementation.
+
+Requests are newline-framed, bounded to 1 MiB, and serialized. IDs are bounded and
+tracked (at most 100,000 requests); reuse closes the session. Local argument errors
+never reach the broker or consume a broker sequence. Replies must match version,
+sequence, result shape, byte bounds and content digest before success is emitted.
+An invalid/lost/timed-out broker response closes the channel before returning a
+fixed MCP tool error: the operation outcome is unknown, and the proxy never retries.
+MCP output is bounded to 4 MiB to cover nested escaping of a bounded text result.
+Idle input, broker exchange and blocked output waits are individually bounded to
+at most 30 seconds. These limits need explicit host lifecycle integration for a
+long-lived model session; do not silently reconnect an expired capability.
+
+Eight regressions cover actual file create/read/digest replacement; pre-init and
+invalid/forged arguments; duplicate IDs; malformed/partial/oversized input and
+notification-only tool calls; malformed/mismatched/digest-invalid broker replies;
+broker timeout; proxy abort during an exchange; blocked output and idle input;
+and a live proxy attempting a write after host revocation. The latter leaves the
+proxy running until the new MCP call, then observes refusal, zero admissions and
+no file. Tests use in-process duplex MCP streams and actual Unix broker streams;
+this is not a separate-process proxy escape or native Codex isolation test.
+
+Cancellation notifications close the session when consumed. Because calls are
+serial, this is not an immediate interrupt of an in-flight request. Host-side
+revocation is independent. EOF, proxy cancellation and transport closure do not
+prove that an already-admitted operation stopped; the host must settle the broker
+and persist independent evidence before fencing. Endpoint authentication/handoff,
+actual store journal wiring, durable shutdown/restart reconciliation, CLI startup
+pins and native conformance remain required. Native Codex writing stays refused.
