@@ -155,8 +155,15 @@ The product exists to remove session babysitting without hiding authority, uncer
 - Completion requires all required checks, declared deliverables, clean handoff state, unresolved-decision closure, and an independent accepted verdict.
 - Conductor, or a verifier under Conductor control, executes required checks against a
   recorded immutable tree hash. Worker-provided output is a claim, not verification.
-- The task worktree is write-fenced during verification. Mutation invalidates the
-  verdict and returns the task to a non-terminal state.
+- Verification consumes an identified immutable candidate; checks and the independent
+  verdict must bind that same source hash. A changed candidate cannot reuse prior
+  acceptance evidence.
+- In the bounded execution profile, the task worktree is write-fenced during
+  verification. In the explicitly selected full-capability profile, verification
+  uses a separately captured or authenticated imported candidate; this does not
+  claim that the original workspace or unrestricted descendants are write-fenced.
+  Preserve unresolved execution ownership and refuse conflicting retry/reassignment.
+  See [the selected execution boundary](FULL_CAPABILITY_EXECUTION.md).
 - A verifier is a distinct agent identity without write access to the task worktree;
   its verdict references the immutable tree hash and check-execution records.
 - `completed` is terminal unless a new task or explicit reopen event is created.
