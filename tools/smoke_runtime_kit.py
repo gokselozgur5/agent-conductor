@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 
-from package_runtime import verify
+sys.dont_write_bytecode = True
 
 
 def operator_ready(status):
@@ -21,6 +21,8 @@ def operator_ready(status):
 
 
 def smoke(kit):
+    from package_runtime import verify
+
     kit = kit.resolve(strict=True)
     verified = verify(kit)
     with tempfile.TemporaryDirectory(prefix='ac-kit-') as temporary:
@@ -70,6 +72,7 @@ def smoke(kit):
             if process.returncode != 0:
                 raise RuntimeError(f'packaged runtime exited with status {process.returncode}')
         assert subprocess.check_output(['git', '-C', str(project), 'status', '--porcelain']) == b''
+    verify(kit)
     return dict(verified, health='ready', empty_tasks=True, graceful_stop=True,
                 original_project_unchanged=True, model_calls=False)
 

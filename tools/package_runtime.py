@@ -9,9 +9,10 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import sys
 import tarfile
 
-from package_local import BINARIES
+sys.dont_write_bytecode = True
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -23,6 +24,8 @@ def digest(path):
 
 def verify(directory):
     """Check an extracted kit's complete file set and content hashes."""
+    from package_local import BINARIES
+
     directory = directory.resolve(strict=True)
     manifest_path = directory / 'manifest.json'
     if manifest_path.is_symlink() or not manifest_path.is_file():
@@ -53,6 +56,8 @@ def verify(directory):
 
 def package(bin_dir, destination):
     """Package a clean checkout and caller-built binaries; CI supplies build proof."""
+    from package_local import BINARIES
+
     def git(*args):
         return subprocess.check_output(['git', '-C', str(REPO), *args])
 

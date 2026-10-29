@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import package_runtime
+from package_local import BINARIES
 from smoke_runtime_kit import operator_ready
 
 
@@ -45,7 +46,7 @@ class RuntimePackageTests(unittest.TestCase):
         self.commit()
         self.bin = self.root / 'bin'
         self.bin.mkdir()
-        for name in package_runtime.BINARIES:
+        for name in BINARIES:
             path = self.bin / name
             path.write_text('#!/bin/sh\nexit 0\n')
             path.chmod(0o755)
@@ -55,6 +56,22 @@ class RuntimePackageTests(unittest.TestCase):
         subprocess.run(['git', '-C', str(self.repo), '-c', 'user.name=Fixture',
                         '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
                         'commit', '-qm', 'Fixture'], check=True)
+
+    def test_packaged_commands_preserve_manifest_after_use(self):
+        source = Path(__file__).resolve().parents[1] / 'tools'
+        for name in ('conductor', 'adapter_pins.py', 'package_local.py',
+                     'package_runtime.py', 'smoke_runtime_kit.py'):
+            (self.repo / 'tools' / name).write_bytes((source / name).read_bytes())
+        self.commit()
+        kit = self.root / 'kit'
+        package_runtime.package(self.bin, kit)
+        for name, arguments in [('conductor', ['--help']),
+                                ('smoke_runtime_kit.py', ['--help']),
+                                ('package_runtime.py', ['--verify', str(kit)])]:
+            subprocess.run([sys.executable, '-E', '-s', str(kit / 'tools' / name),
+                            *arguments], check=True, capture_output=True, timeout=15)
+            package_runtime.verify(kit)
+        self.assertEqual(list(kit.rglob('__pycache__')), [])
 
     def test_archive_hashes_modes_and_exclusion_of_ignored_state(self):
         (self.repo / 'state').mkdir()
@@ -110,7 +127,7 @@ class RuntimePackageTests(unittest.TestCase):
             package_runtime.verify(self.root / 'kit')
 
     def test_missing_binary_and_existing_destination_are_preserved(self):
-        executable = self.bin / package_runtime.BINARIES[0]
+        executable = self.bin / BINARIES[0]
         executable.chmod(0o644)
         with self.assertRaisesRegex(ValueError, 'every native runtime binary'):
             package_runtime.package(self.bin, self.root / 'missing')
