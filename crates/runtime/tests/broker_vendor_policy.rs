@@ -36,9 +36,11 @@ fn broker_policy_quotes_path_without_expanding_tools_or_embedding_capability() {
             pair[1].as_str()
         })
         .collect();
-    assert_eq!(overrides.len(), 7);
+    assert_eq!(overrides.len(), 9);
     assert!(overrides.contains(&"features.shell_tool=false"));
     assert!(overrides.contains(&"features.multi_agent=false"));
+    assert!(overrides.contains(&"features.plugins=false"));
+    assert!(overrides.contains(&"features.remote_plugin=false"));
     let server = overrides.last().unwrap();
     assert!(server.contains(&format!(
         "command={}",
