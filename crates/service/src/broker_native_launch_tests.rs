@@ -827,6 +827,15 @@ async fn owned_session_vendor_handoff_requires_exact_packet_and_single_issuance(
     for cancel_before in [false, true] {
         let setup = native_launch_setup(false).await;
         let (pin, packet) = persist_vendor_packet(&setup).await;
+        // Hash every fixture command before a live broker lease exists.
+        let mut changed = packet.clone();
+        changed.objective.push_str(" substituted");
+        let changed_objective = prepared_test_vendor(&pin, &changed, &setup.wrapper);
+        changed = packet.clone();
+        changed.contract.task_id = "another-task".into();
+        let changed_task = prepared_test_vendor(&pin, &changed, &setup.wrapper);
+        let prepared = prepared_test_vendor(&pin, &packet, &setup.wrapper);
+        let repeated = prepared_test_vendor(&pin, &packet, &setup.wrapper);
         let acknowledged = crate::prepare_native_broker(
             &setup.store,
             &setup.binding,
@@ -848,28 +857,12 @@ async fn owned_session_vendor_handoff_requires_exact_packet_and_single_issuance(
             )
             .await
             .unwrap();
-        let mut changed = packet.clone();
-        changed.objective.push_str(" substituted");
-        assert!(
-            session
-                .vendor_command(prepared_test_vendor(&pin, &changed, &setup.wrapper))
-                .await
-                .is_err()
-        );
-        changed = packet.clone();
-        changed.contract.task_id = "another-task".into();
-        assert!(
-            session
-                .vendor_command(prepared_test_vendor(&pin, &changed, &setup.wrapper))
-                .await
-                .is_err()
-        );
+        assert!(session.vendor_command(changed_objective).await.is_err());
+        assert!(session.vendor_command(changed_task).await.is_err());
         if cancel_before {
             session.cancel().await.unwrap();
         }
-        let result = session
-            .vendor_command(prepared_test_vendor(&pin, &packet, &setup.wrapper))
-            .await;
+        let result = session.vendor_command(prepared).await;
         if cancel_before {
             assert!(result.is_err());
         } else {
@@ -882,12 +875,7 @@ async fn owned_session_vendor_handoff_requires_exact_packet_and_single_issuance(
             );
             assert!(!spec.arguments.iter().any(|value| value.contains(secret)));
             assert!(!format!("{spec:?}").contains(secret));
-            assert!(
-                session
-                    .vendor_command(prepared_test_vendor(&pin, &packet, &setup.wrapper))
-                    .await
-                    .is_err()
-            );
+            assert!(session.vendor_command(repeated).await.is_err());
             session.cancel().await.unwrap();
         }
         session
