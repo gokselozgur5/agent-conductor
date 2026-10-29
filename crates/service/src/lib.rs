@@ -3598,6 +3598,7 @@ mod effect_tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     async fn assert_auxiliary_preack_recovery(
         service: &PersistentControlService<FixedClock>,
         store: &Store,
@@ -3684,6 +3685,7 @@ mod effect_tests {
         assert_paged_auxiliary_recovery(service, store, root, &input, &receipt, &work).await;
     }
 
+    #[cfg(target_os = "macos")]
     async fn assert_native_auxiliary_origin(
         store: &Store,
         input: &agent_conductor_store::AuxiliaryPreparation,
@@ -3708,6 +3710,7 @@ mod effect_tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     async fn assert_paged_auxiliary_recovery(
         service: &PersistentControlService<FixedClock>,
         store: &Store,
@@ -3765,6 +3768,7 @@ mod effect_tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     async fn seed_invalid_auxiliary_page(store: &Store, root: &std::path::Path, token: &str) {
         use sqlx::Connection;
         let mut c = sqlx::SqliteConnection::connect(&format!(
