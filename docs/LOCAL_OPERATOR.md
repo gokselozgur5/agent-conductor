@@ -205,3 +205,20 @@ After stopping and reconciling the runtime, `tools/conductor backup DESTINATION`
 exports private state and `tools/conductor verify-backup DESTINATION` checks it
 without starting workers. See [OPERATOR_BACKUP.md](OPERATOR_BACKUP.md) for the
 fencing requirements, external dependencies and pending restore limitations.
+
+## Host-local prebuilt preview
+
+`tools/package_local.py --bin-dir /absolute/built/bin --accepted-plan /private/accepted-plan.json --destination /new/private/bundle`
+creates a separate bundle with exact binaries, operator tools, documentation and
+a content manifest. It never copies model credentials, project files or runtime
+state, and refuses an existing destination or changed adapter binary. Packaging
+is not adapter conformance or full release acceptance. Use an already accepted
+Claude-writer/Codex-reviewer plan; the profile remains specific to this host.
+
+Inside the bundle, `./conductor init --project /absolute/git-project --port 8788`
+selects the bundled binaries. `./conductor plan` selects its accepted profile by
+default, so no private test-plan path or build toolchain is needed to operate it.
+The remaining arguments and authorization rules are identical to `tools/conductor`.
+The manifest records whether packaging source was dirty and hashes all shipped
+files. Use a clean committed source and separately validate the actual workflow
+before handing a bundle to an operator.
