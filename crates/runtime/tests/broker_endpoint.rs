@@ -340,6 +340,11 @@ async fn pinned_codex_broker_traversal_read_is_denied() {
 async fn pinned_codex_broker_traversal_write_is_denied() {
     codex_probe("broker-write-traversal").await;
 }
+#[tokio::test]
+#[ignore = "requires pinned Codex; forced disabled command must not execute"]
+async fn pinned_codex_forced_command_is_denied() {
+    codex_probe("command-denied").await;
+}
 async fn codex_probe(mode: &str) {
     let root = private_tempdir();
     let directory = private_tempdir();

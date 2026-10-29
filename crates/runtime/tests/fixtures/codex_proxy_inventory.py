@@ -5,6 +5,7 @@ import zlib
 import http.server
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -21,6 +22,8 @@ ready = threading.Event()
 mode = os.environ.get("CONDUCTOR_PROXY_CALLS", "inventory")
 execute_calls = mode != "inventory"
 authorized = mode == "approved"
+command_probe = mode == "command-denied"
+command_marker = destination / "forbidden-command-marker"
 image_probe = mode in ("image-inside", "image-outside", "image-symlink")
 broker_probe = mode in ("broker-read-outside", "broker-write-outside",
                         "broker-read-traversal", "broker-write-traversal")
@@ -77,7 +80,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             outputs.append(matches[0]['output'])
             encoded = json.dumps(matches[0]['output'])
             expected = ('written' if step == 1 else 'native codex proxy') if authorized else 'requires approval'
-            if broker_probe:
+            if command_probe:
+                assert any(word in encoded.lower() for word in ('unknown', 'unsupported', 'unrecognized', 'not found')), 'Command did not receive explicit dispatch refusal'
+                assert not command_marker.exists(), 'Disabled command executed'
+            elif broker_probe:
                 assert '-32602: invalid file operation' in encoded.lower(), 'Outside path was not rejected by broker request validation'
             elif image_probe:
                 image_present = contains_image(body.get('input', []))
@@ -101,6 +107,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if writing:
                     arguments.update(contents='forbidden outside write', expected_sha256=None)
                 item['arguments'] = json.dumps(arguments)
+            if command_probe:
+                item.pop('namespace')
+                item['name'] = 'exec_command'
+                item['arguments'] = json.dumps({'cmd': 'printf forbidden > ' + shlex.quote(str(command_marker))})
             if image_probe:
                 item.pop('namespace')
                 item['name'] = 'view_image'
@@ -176,6 +186,7 @@ if not (authorized or broker_probe):
         args += ['-c', f'mcp_servers.conductor_files.tools.{name}.approval_mode="prompt"']
 args += arguments[exec_index:]
 environment = {'HOME': str(home), 'CODEX_HOME': str(home), 'PATH': '/usr/bin:/bin',
+    'NO_PROXY': '127.0.0.1,localhost',
     'TMPDIR': os.environ['TMPDIR'], 'CONDUCTOR_FIXTURE_KEY': 'synthetic-local-only',
     'CONDUCTOR_BROKER_HANDOFF': os.environ['CONDUCTOR_BROKER_HANDOFF']}
 child = None
@@ -217,6 +228,8 @@ for tool in ('conductor_read_text', 'conductor_write_text'):
     assert sum(name.endswith(tool) for name in found) == 1, 'Expected broker tool missing or duplicated'
 for log in ('stdout.log', 'stderr.log', 'tools.json'):
     assert capability not in (destination / log).read_bytes(), 'Capability leaked into fixture log'
+if command_probe:
+    assert not command_marker.exists(), 'Disabled command created a file'
 if broker_probe:
     if broker_read:
         assert outside_target.read_bytes() == outside_canary
@@ -225,7 +238,7 @@ if broker_probe:
     for log in ('stdout.log', 'stderr.log', 'tools.json'):
         assert outside_canary not in (destination / log).read_bytes()
 receipt = {'pinned_codex': True, 'tool_call_mode': mode, 'capability_absent_from_model_requests_and_logs': True, 'real_proxy_initialized': True, 'broker_tools_discovered': 2,
-           'command_tools_absent': True, 'model_backend_invoked': False,
+           'command_tools_absent': True, 'forced_command_refused': command_probe, 'model_backend_invoked': False,
            'broker_path_denial': mode if broker_probe else None, 'image_access_control': mode if image_probe else None, 'file_tools_called': authorized or broker_probe, 'unapproved_call_refused': mode == 'denied', 'codex_child_stopped': child.poll() is not None}
 if execute_calls:
     assert len(outputs) == (2 if authorized else 1) and child.returncode == 0
