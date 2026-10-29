@@ -191,3 +191,66 @@ fn encoded_instruction_expansion_is_bounded_before_launch() {
         Err(VendorError::Encoding)
     ));
 }
+
+#[test]
+fn broker_codex_command_keeps_direct_files_read_only_and_contract_unchanged() {
+    let (_directory, pin, mut packet) = fixture(AdapterKind::Codex);
+    packet.contract.authority.allow_workspace_commands = false;
+    let before = serde_json::to_vec(&packet).unwrap();
+    let spec = conductor_runtime::broker_codex_command(
+        &pin,
+        &packet,
+        BTreeMap::new(),
+        &pin.executable,
+        &pin.executable_sha256,
+    )
+    .unwrap();
+    assert_eq!(serde_json::to_vec(&packet).unwrap(), before);
+    assert!(
+        spec.arguments
+            .iter()
+            .any(|arg| arg.contains(":workspace_roots\"=\"read\""))
+    );
+    assert!(
+        !spec
+            .arguments
+            .iter()
+            .any(|arg| arg.contains(":workspace_roots\"=\"write\""))
+    );
+    assert!(
+        spec.arguments
+            .iter()
+            .any(|arg| arg == "features.shell_tool=false")
+    );
+    assert!(
+        spec.arguments
+            .iter()
+            .any(|arg| arg.contains("mcp_servers.conductor_files="))
+    );
+    assert!(!spec.environment.contains_key("CONDUCTOR_BROKER_HANDOFF"));
+    assert!(native_vendor_command(&pin, &packet, BTreeMap::new()).is_err());
+    assert!(conductor_runtime::native_writer_launch(&pin, &packet, BTreeMap::new()).is_err());
+    packet.contract.authority.allow_workspace_commands = true;
+    assert!(
+        conductor_runtime::broker_codex_command(
+            &pin,
+            &packet,
+            BTreeMap::new(),
+            &pin.executable,
+            &pin.executable_sha256,
+        )
+        .is_err()
+    );
+    packet.contract.authority.allow_workspace_commands = false;
+    packet.contract.authority.write_roots.clear();
+    assert!(
+        conductor_runtime::broker_codex_command(
+            &pin,
+            &packet,
+            BTreeMap::new(),
+            &pin.executable,
+            &pin.executable_sha256,
+        )
+        .is_err()
+    );
+}

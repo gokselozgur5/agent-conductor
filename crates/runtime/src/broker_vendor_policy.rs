@@ -45,3 +45,31 @@ pub fn codex_broker_tool_options(
     .flat_map(|value| ["-c".to_owned(), value.to_owned()])
     .collect())
 }
+
+/// Construct a command-free Codex writer command with read-only direct files.
+/// Broker writes require the separately owned live session; the caller must add
+/// its handoff only to child environment after release and enforce OS confinement.
+/// Does not launch, authorize a fresh broker or establish native writer acceptance.
+/// # Errors
+/// Refuses non-Codex/command-capable contracts, missing scoped write authority,
+/// changed vendor/proxy pins and unsupported authentication environment entries.
+pub fn broker_codex_command(
+    pin: &crate::VendorPin,
+    packet: &crate::ResumePacket,
+    authentication: std::collections::BTreeMap<String, String>,
+    proxy: &Path,
+    approved_proxy_sha256: &str,
+) -> Result<crate::ProcessSpec, VendorError> {
+    if pin.kind != crate::AdapterKind::Codex
+        || packet.contract.authority.allow_workspace_commands
+        || packet.contract.authority.write_roots != [packet.contract.workspace.clone()]
+    {
+        return Err(VendorError::Capability);
+    }
+    let options = codex_broker_tool_options(proxy, approved_proxy_sha256)?;
+    let mut spec = crate::vendor::vendor_command(pin, packet, authentication, true)?;
+    // Prefix trusted global options before the existing exec subcommand. Never
+    // append options after the task prompt or mutate the frozen contract.
+    spec.arguments.splice(0..0, options);
+    Ok(spec)
+}
