@@ -63,7 +63,7 @@ impl Store {
                     .ok_or_else(|| StoreError::Integrity("invalid wake subscription".into()))
             })
             .transpose()?;
-            let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running')").fetch_one(&mut *writer).await?;
+            let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=workflow_dispatch.task_id)").fetch_one(&mut *writer).await?;
             if pending >= 256 { return Err(StoreError::Integrity("workflow queue capacity reached".into())); }
             sqlx::query("INSERT INTO workflow_dispatch(task_id,plan_json,status,created_at_ms,updated_at_ms) VALUES (?,?,'queued',?,?)")
                 .bind(task_id).bind(plan).bind(now).bind(now).execute(&mut *writer).await?;
@@ -110,9 +110,9 @@ impl Store {
         let result = async {
             let current: i64 = sqlx::query_scalar("SELECT boot_generation FROM runtime_metadata WHERE singleton = 1").fetch_one(&mut *writer).await?;
             if current != generation { return Err(StoreError::Integrity("stale dispatcher boot".into())); }
-            let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_dispatch WHERE status = 'running'").fetch_one(&mut *writer).await?;
+            let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_dispatch WHERE status = 'running' AND NOT EXISTS (SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=workflow_dispatch.task_id)").fetch_one(&mut *writer).await?;
             if running != 0 { return Ok(None); }
-            let rows = sqlx::query_as::<_, WorkflowDispatch>(&format!("{SELECT} WHERE status = 'queued' ORDER BY created_at_ms,task_id LIMIT 256")).fetch_all(&mut *writer).await?;
+            let rows = sqlx::query_as::<_, WorkflowDispatch>(&format!("{SELECT} WHERE status = 'queued' AND NOT EXISTS (SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=workflow_dispatch.task_id) ORDER BY created_at_ms,task_id LIMIT 256")).fetch_all(&mut *writer).await?;
             let mut selected = None;
             for row in rows {
                 let Some(dependencies) = crate::workflow_dependencies::eligible_sources(&mut writer,&row.task_id).await? else { continue; };
@@ -195,7 +195,7 @@ impl Store {
         let version =
             i64::try_from(version).map_err(|_| StoreError::Integrity("version overflow".into()))?;
         let mut writer = self.inner.writer.lock().await;
-        let changed = sqlx::query("UPDATE workflow_dispatch SET status='queued',resume_version=?,outcome_json=NULL,updated_at_ms=? WHERE task_id=? AND status IN ('finished','needs_recovery') AND (SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running')) < 256")
+        let changed = sqlx::query("UPDATE workflow_dispatch SET status='queued',resume_version=?,outcome_json=NULL,updated_at_ms=? WHERE task_id=? AND status IN ('finished','needs_recovery') AND (SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=workflow_dispatch.task_id)) < 256")
             .bind(version).bind(now).bind(task_id).execute(&mut *writer).await?.rows_affected();
         if changed != 1 {
             return Err(StoreError::Integrity(
@@ -210,7 +210,7 @@ impl Store {
     /// # Errors
     /// Returns database errors.
     pub async fn interrupted_workflows(&self) -> Result<Vec<WorkflowDispatch>, StoreError> {
-        Ok(sqlx::query_as::<_,WorkflowDispatch>(&format!("{SELECT} WHERE status='needs_recovery' AND auto_recovery_count=0 ORDER BY created_at_ms,task_id LIMIT 256")).fetch_all(&self.inner.readers).await?)
+        Ok(sqlx::query_as::<_,WorkflowDispatch>(&format!("{SELECT} WHERE status='needs_recovery' AND auto_recovery_count=0 AND NOT EXISTS (SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=workflow_dispatch.task_id) ORDER BY created_at_ms,task_id LIMIT 256")).fetch_all(&self.inner.readers).await?)
     }
     /// Requeues at most once automatically, bound to the active daemon boot.
     /// # Errors
@@ -227,7 +227,7 @@ impl Store {
         let generation =
             i64::try_from(generation).map_err(|_| StoreError::BootGenerationOverflow)?;
         let mut writer = self.inner.writer.lock().await;
-        let changed=sqlx::query("UPDATE workflow_dispatch SET status='queued',resume_version=?,auto_recovery_count=1,outcome_json=NULL,updated_at_ms=? WHERE task_id=? AND status='needs_recovery' AND auto_recovery_count=0 AND (SELECT boot_generation FROM runtime_metadata WHERE singleton=1)=? AND (SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running'))<256")
+        let changed=sqlx::query("UPDATE workflow_dispatch SET status='queued',resume_version=?,auto_recovery_count=1,outcome_json=NULL,updated_at_ms=? WHERE task_id=? AND status='needs_recovery' AND auto_recovery_count=0 AND (SELECT boot_generation FROM runtime_metadata WHERE singleton=1)=? AND (SELECT COUNT(*) FROM workflow_dispatch WHERE status IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=workflow_dispatch.task_id))<256")
             .bind(version).bind(now).bind(task_id).bind(generation).execute(&mut *writer).await?.rows_affected();
         if changed == 1 {
             self.signal_dispatch();

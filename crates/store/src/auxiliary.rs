@@ -163,12 +163,12 @@ impl Store {
         Ok(())
     }
 
-    /// Unknown auxiliary execution blocks recovery independently of writer fences.
+    /// Unknown auxiliary execution and legacy ownership block recovery independently of writer fences.
     /// # Errors
     /// Returns database errors; never interprets missing process observations.
     pub async fn has_pending_auxiliary(&self, task_id: &str) -> Result<bool, StoreError> {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM auxiliary_invocations WHERE task_id=? AND state='pending'",
+            "SELECT (SELECT COUNT(*) FROM auxiliary_invocations WHERE task_id=?1 AND state='pending') + (SELECT COUNT(*) FROM legacy_auxiliary_ownership WHERE task_id=?1)",
         )
         .bind(task_id)
         .fetch_one(&self.inner.readers)

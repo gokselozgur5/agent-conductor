@@ -43,6 +43,7 @@ class BackupTests(unittest.TestCase):
               CREATE TABLE projects(canonical_path TEXT,filesystem_identity TEXT,git_common_dir_identity TEXT);
               CREATE TABLE executions(state TEXT,packet_json TEXT);
               CREATE TABLE auxiliary_invocations(state TEXT);
+              CREATE TABLE legacy_auxiliary_ownership(task_id TEXT);
               CREATE TABLE leases(status TEXT);
               CREATE TABLE effect_intents(status TEXT);
               CREATE TABLE recovery_authority(singleton INTEGER, authority_id TEXT);
@@ -60,7 +61,7 @@ class BackupTests(unittest.TestCase):
     def test_snapshot_preserves_bytes_modes_and_database(self):
         before = backup.inventory(self.state, backup.SKIP)
         result = backup.backup(self.state, self.target)
-        self.assertEqual(result['schema'], 21)
+        self.assertEqual(result['schema'], 22)
         manifest = json.loads((self.target / 'manifest.json').read_text())
         self.assertEqual(manifest['entries'], backup.inventory(self.target / 'state'))
         self.assertEqual(before, backup.inventory(self.state, backup.SKIP))
@@ -73,6 +74,13 @@ class BackupTests(unittest.TestCase):
         with sqlite3.connect(self.state / 'state.sqlite3') as db:
             db.execute("insert into auxiliary_invocations values('pending')")
         with self.assertRaisesRegex(ValueError, 'unresolved auxiliary'):
+            backup.backup(self.state, self.target)
+        self.assertFalse(self.target.exists())
+
+    def test_legacy_auxiliary_uncertainty_refuses_cold_backup(self):
+        with sqlite3.connect(self.state / 'state.sqlite3') as db:
+            db.execute("insert into legacy_auxiliary_ownership values('legacy-task')")
+        with self.assertRaisesRegex(ValueError, 'legacy auxiliary ownership unresolved'):
             backup.backup(self.state, self.target)
         self.assertFalse(self.target.exists())
 

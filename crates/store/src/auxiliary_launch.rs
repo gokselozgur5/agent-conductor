@@ -126,7 +126,7 @@ impl Store {
     pub async fn pending_auxiliary_invocations(
         &self,
     ) -> Result<Vec<AuxiliaryInvocation>, StoreError> {
-        let rows=sqlx::query("SELECT CASE WHEN length(preparation_json)<=16384 THEN preparation_json ELSE 'oversized' END AS preparation_json,CASE WHEN launch_binding_json IS NULL OR length(launch_binding_json)<=16384 THEN launch_binding_json ELSE 'oversized' END AS launch_binding_json,CASE WHEN process_json IS NULL OR length(process_json)<=4096 THEN process_json ELSE 'oversized' END AS process_json,release_recorded FROM auxiliary_invocations WHERE state='pending' LIMIT 129").fetch_all(&self.inner.readers).await?;
+        let rows=sqlx::query("SELECT CASE WHEN length(preparation_json)<=16384 THEN preparation_json ELSE 'oversized' END AS preparation_json,CASE WHEN launch_binding_json IS NULL OR length(launch_binding_json)<=16384 THEN launch_binding_json ELSE 'oversized' END AS launch_binding_json,CASE WHEN process_json IS NULL OR length(process_json)<=4096 THEN process_json ELSE 'oversized' END AS process_json,release_recorded FROM auxiliary_invocations WHERE state='pending' AND NOT EXISTS (SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=auxiliary_invocations.task_id) LIMIT 129").fetch_all(&self.inner.readers).await?;
         if rows.len() > 128 {
             return Err(invalid());
         }

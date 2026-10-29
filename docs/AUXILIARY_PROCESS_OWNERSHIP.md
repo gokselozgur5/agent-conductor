@@ -45,9 +45,27 @@ owning runtime. The transaction refuses any launch binding, process identity,
 release authorization or changed generation. It cannot be used as restart proof;
 audit failure preserves pending ownership. Errors after launch binding require supervisor evidence. A wrapper killed
 before receipt publication, malformed launch input or a failure before it accepts
-the launch still leaves uncertainty; absence is never a no-launch receipt. Legacy schema-19 verification work and
-schema-20 pending invocations lack supervisor metadata and require an explicit
-migration policy before deployment. Complete boundary coverage, operator/invariant reporting and host recovery
+the launch still leaves uncertainty; absence is never a no-launch receipt. Schema 22 preserves legacy uncertainty separately from invocation evidence.
+A noncompleted task with current or historical verification and no auxiliary
+invocation receives a `legacy_auxiliary_ownership` marker; an existing pending
+invocation without a launch binding also receives one. Task aggregates and old
+invocations remain unchanged. Completed history and fresh tasks are not marked;
+already bound pending invocations retain their existing receipt recovery path.
+
+The marker blocks continuation, direct claims, dispatch admission, new writer
+executions and auxiliary launches. Persisted legacy queue entries are excluded
+from selection and active queue capacity so they do not block unrelated work.
+`check-invariants` reports `legacy_auxiliary_ownership_unknown` with a bounded
+list and total count. Backup/restore validation refuses these markers even when
+the writer is fenced. Reopening the database neither duplicates nor clears them.
+
+Before upgrading, finish ordinary legacy verification under the old runtime
+where possible. If ownership is already uncertain, preserve the state and
+artifacts: do not delete the marker, fabricate an invocation or treat cancellation
+as settlement. No acknowledgement or clear-marker command is provided. A verified
+legacy settlement/host-recovery procedure is still required before deployment
+can be claimed complete. This barrier prevents unsafe reuse; it does not resolve
+unknown historical processes or certify arbitrary escaped descendants. Complete boundary coverage, operator/invariant reporting and host recovery
 remain required. Actual native crash controls now cover both a running required
 check and an independently observed verifier child: after daemon death, private
 settlement is audited before the replacement writer is prepared, and each task

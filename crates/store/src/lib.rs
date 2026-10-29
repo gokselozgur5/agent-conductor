@@ -815,6 +815,20 @@ impl Store {
             });
         }
 
+        let legacy_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM legacy_auxiliary_ownership")
+                .fetch_one(&self.inner.readers)
+                .await?;
+        if legacy_count != 0 {
+            let tasks: Vec<(String,String)> = sqlx::query_as("SELECT substr(task_id,1,256),reason FROM legacy_auxiliary_ownership ORDER BY task_id LIMIT 128")
+                .fetch_all(&self.inner.readers).await?;
+            violations.push(RuntimeInvariantViolation {
+                code: "legacy_auxiliary_ownership_unknown".into(),
+                summary: "legacy verification lacks auxiliary settlement evidence; continuation and backup remain refused".into(),
+                context_json: serde_json::json!({"count":legacy_count,"tasks":tasks,"limit":128}).to_string(),
+            });
+        }
+
         Ok(violations)
     }
 }
