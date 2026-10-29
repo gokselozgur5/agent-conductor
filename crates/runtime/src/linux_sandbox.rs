@@ -192,6 +192,16 @@ pub fn exec_linux_check(request: &LinuxCheckRequest) -> Result<(), Box<dyn std::
     cmd.arg("--bind")
         .arg(&request.workspace)
         .arg(&request.workspace);
+    // Seal the synthetic parent directories too, not only the host read roots.
+    // Nonrecursive remounts retain the separate writable workspace mount.
+    cmd.args([
+        "--remount-ro",
+        "/",
+        "--remount-ro",
+        "/dev",
+        "--remount-ro",
+        "/proc",
+    ]);
     cmd.arg("--chdir").arg(&request.workspace);
     cmd.arg("--seccomp").arg(program.as_raw_fd().to_string());
     cmd.arg("--")
