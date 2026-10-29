@@ -4,6 +4,10 @@ mod contract;
 mod execution_account;
 #[cfg(unix)]
 pub use execution_account::*;
+#[cfg(unix)]
+mod full_capability;
+#[cfg(unix)]
+pub use full_capability::*;
 mod privacy;
 pub use privacy::redact_credentials;
 
