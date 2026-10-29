@@ -288,7 +288,7 @@ async fn run(store: &Store, owner: Owner, delivery: Option<&EventDelivery>) -> R
         ),
     }
 }
-async fn snapshot(connection: &mut SqliteConnection) -> Vec<(String, String)> {
+pub(super) async fn snapshot(connection: &mut SqliteConnection) -> Vec<(String, String)> {
     let tables:Vec<String>=sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetch_all(&mut *connection).await.unwrap();
     let mut result = vec![];
     for table in tables {
@@ -577,7 +577,7 @@ async fn cancel_legacy_host_witness_and_settlement_rolls_back_all_tables() {
     }
 }
 
-async fn auxiliary_origin_fixture(
+pub(super) async fn auxiliary_origin_fixture(
     mode: &str,
 ) -> (
     tempfile::TempDir,

@@ -20,10 +20,10 @@ and run through the workspace test command.
 | Durable ACK/release authorization before Release delivery | `auxiliary-postack-check-v1` | `auxiliary-postack-verifier-v1` | PID-preserving stdin relay; authorization is not delivery |
 | Payload running during daemon loss | `auxiliary-recovery-v1` | `auxiliary-verifier-recovery-v1` | Owned process group; no generic escaped-session containment |
 | Private terminal proof before terminal delivery/result publication | `auxiliary-terminal-check-v1` | `auxiliary-terminal-verifier-v1` | PID-preserving stdout relay |
-| Settlement commit before domain publication | Store publication preconditions/rollback | Same role controls | Dedicated abrupt process control still required |
-| During domain publication transaction | Injected SQL error rolls back domain/link/audit | Same role controls | SQL exception is not abrupt process death |
+| Settled ownership with result transaction interrupted at first task write | Abrupt child exit; exact pre-publication snapshot restored | Same, separate role | Store fixture; not daemon continuation orchestration |
+| During domain publication transaction | Abrupt exits at task and publication-link writes | Same, separate role | Synthetic validated store batch; not a native adapter result |
 | After check result, before verifier accepts launch | Prior check publication preserved in verifier unaccepted-launch fixture | Not applicable | Does not isolate the immediate post-commit scheduling boundary |
-| After verifier verdict, before task completion | Not applicable | No dedicated abrupt control in this inventory | Still required |
+| After verifier result publication, before task completion | Check result has equivalent after-commit exit/replay control | Abrupt store child exit after publication commit; exact batch retained, replay adds nothing | Full domain verdict-to-completion daemon interruption still required |
 | After completed task, before dispatch bookkeeping | Reopened completion is stable in native recovery fixtures | Same workflow outcome | Orderly final restart is not abrupt termination at this exact boundary |
 
 `transaction_cancellation::auxiliary_admission_survives_process_death_on_both_sides`
@@ -33,6 +33,20 @@ unwinding; reopening must reproduce the complete prior database snapshot. After
 commit, reopening must retain the exact preparation, admission origin and audit,
 with pending ownership and no launch/process/release. It also checks database
 integrity. This adds process-death coverage to existing async cancellation tests.
+
+`auxiliary_crash_tests::publication_survives_abrupt_exit_and_replay` runs six
+real children: each role exits at the task write, at the final publication-link
+write, or immediately after the commit returns. Before-commit exits must restore
+the entire database snapshot, including the settled invocation and absent result.
+After reopening, the same result is applied if necessary and then replayed without
+any database change. Task aggregate/version, result audit payload, invocation link,
+idempotency outcome and single transition are checked; changed result identity is
+refused. Execution, invocation and host evidence remain unchanged.
+
+The publication fixture uses synthetic store batches and settlement metadata. It
+does not prove native child settlement or domain-level completion orchestration;
+those require their separately identified controls. All child exit cases use
+bounded parent waits and independent temporary databases.
 
 The unaccepted-launch fixtures retain pending ownership without a native claim or
 receipt through two same-boot daemon restarts. They refuse replacement execution
@@ -46,7 +60,7 @@ They do not erase either field to fit the no-ACK path. Both complete one
 continuation, with old settlement audited before replacement execution and no
 old-invocation result publication.
 
-Prioritize the remaining publication transaction and filesystem boundaries next.
+Prioritize the remaining domain completion orchestration and filesystem boundaries next.
 Do not aggregate these short native controls into a seven-day run or describe
 synthetic host epochs as physical reboot acceptance. Full operational recovery,
 privacy, supported Linux hosts and release acceptance remain separate gates.
