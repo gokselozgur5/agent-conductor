@@ -23,7 +23,9 @@ def main():
     if len(executables) != 1:
         raise SystemExit('Expected one compiled cross-UID integration test')
     # Do not forward credentials, Cargo configuration, or the caller's HOME.
-    temporary = Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+    # RUNNER_TEMP can have private ancestors that correctly exclude nobody.
+    # The Rust fixture creates its own owned directory here; never chmod runner HOME.
+    temporary = Path('/tmp').resolve(strict=True)
     subprocess.run(
         ['sudo', '-n', '/usr/bin/env', '-i', 'PATH=/usr/bin:/bin',
          f'TMPDIR={temporary}', str(executables[0]), '--ignored', '--exact',

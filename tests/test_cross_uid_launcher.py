@@ -34,7 +34,7 @@ class CrossUidLauncherTests(unittest.TestCase):
                 run_cross_uid_test.main()
             command = run.call_args_list[1].args[0]
             self.assertEqual(command[:6], ['sudo', '-n', '/usr/bin/env', '-i',
-                                          'PATH=/usr/bin:/bin', f'TMPDIR={Path(directory).resolve()}'])
+                                          'PATH=/usr/bin:/bin', f'TMPDIR={Path("/tmp").resolve()}'])
             self.assertNotIn('-E', command)
             self.assertNotIn('/private-home', command)
             self.assertNotIn('must-not-forward', command)
