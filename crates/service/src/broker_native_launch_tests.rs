@@ -340,6 +340,15 @@ async fn native_ack_audit_failure_retains_intent_and_never_releases_writer() {
 
 #[tokio::test]
 async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
+    preowner_drop_control(false).await;
+}
+
+#[tokio::test]
+async fn registered_broker_recovers_after_drop_before_release() {
+    preowner_drop_control(true).await;
+}
+
+async fn preowner_drop_control(registered: bool) {
     let NativeLaunchSetup {
         root,
         store,
@@ -370,6 +379,13 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
         .await
         .is_err()
     );
+    if registered {
+        drop(
+            RegisteredBrokerJournal::register(store.clone(), binding.clone())
+                .await
+                .unwrap(),
+        );
+    }
     drop(acknowledged);
     let directory = conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -396,7 +412,7 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
         before
     );
     assert!(store.file_broker_owner(&binding).await.is_err());
-    assert!(store.file_broker_status(&binding).await.is_err());
+    assert_eq!(store.file_broker_status(&binding).await.is_ok(), registered);
     assert!(
         store
             .execution_has_unresolved_file_broker(&binding.execution_token)
@@ -405,6 +421,19 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
     );
     assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
     assert_preowner_restart(&root, &store, &binding).await;
+    if registered {
+        assert!(store.file_broker_status(&binding).await.unwrap().closed);
+        assert!(
+            crate::recover_unregistered_broker_from_receipt(
+                &store,
+                &binding,
+                binding.boot_generation + 1,
+                broker_owner_audit("registered-strict-replay")
+            )
+            .await
+            .is_err()
+        );
+    }
 }
 
 async fn assert_preowner_restart(
@@ -449,7 +478,7 @@ async fn assert_preowner_restart(
         &service.clone().broker_preowner_cursor
     ));
     assert!(
-        !crate::recover_unregistered_broker_from_receipt(
+        !crate::recover_unowned_broker_from_receipt(
             store,
             binding,
             generation,

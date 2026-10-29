@@ -734,3 +734,25 @@ This supersedes the preceding explicit-only discovery limitation for unregistere
 ACK-bearing preparations. Registered-but-unowned brokers, pre-ACK uncertainty,
 full journal/release supervision, vendor admission and operational acceptance
 remain outstanding.
+
+
+## Registered pre-owner recovery (issue #98)
+
+The automatic scan now also includes ACK-bearing preparations with a broker
+registration but no release owner and no file operation, including completed
+operations. Discovery remains bounded to 128 independently decoded candidates;
+the existing cursor and one-host-sample-per-page behavior are unchanged.
+
+`recover_unowned_broker_from_receipt` uses the same independent ACK/launch/private
+receipt verification as the strict unregistered API. The store requires exact
+registration binding and matching preparation/registration states, refuses any
+owner or operation, and closes both records with the audit in one transaction.
+Exact receipt replay adds no event. The original unregistered APIs still refuse
+registered records; discovery itself is never permission to close or release.
+
+Five contradictory-evidence controls assert full database snapshot preservation.
+An actual runner is registered and dropped before Release, then recovered after
+store reopen and a new generation beyond 129 malformed preparations. No file is
+written and no workflow continuation is admitted. This resolves the preceding
+registered-but-unowned gap; pre-ACK uncertainty, full journal/release supervision,
+vendor admission and operational acceptance remain open.

@@ -4,20 +4,27 @@ For the current requirement-by-requirement delivery gaps, see
 [Delivery acceptance audit](DELIVERY_ACCEPTANCE.md). Later sections retain
 historical evidence and must not be read as current feature inventories.
 
-## Current baseline and prelaunch foundation
+## Current baseline and broker recovery
 
-PRs #88, #90 and #91 are merged into main at
-`285aa0c4aaa636e789eaf8726270dc1319d138c2`. The exact integration head and
-post-merge main CI passed on macOS and Linux. The delivered operator bundle and
-existing runtimes were not upgraded by this merge; full product acceptance
-remains open.
+PRs #93, #95 and #97 are merged. Main at
+`af36e843e41d7c154a61a22aea3ea550206bc2e6` passed post-merge CI on macOS and
+Linux. The delivered operator bundle and existing runtimes remain unchanged.
 
-Issue #92 tracks the schema-29 broker prelaunch persistence foundation on
-`codex/broker-launch-small`. Seven small implementation commits add immutable
-launch intent, exact registration/ACK identity binding, atomic receipt closure,
-and unresolved-preparation barriers and diagnostics. Store regressions pass;
-production native launch composition and pre-owner receipt recovery remain
-unfinished. This branch does not admit native Codex writers.
+The service persists fresh prelaunch intent, observes the actual wrapper Ready,
+and records its ACK before returning runner and journal handles. Opt-in workflow
+recovery scans bounded pages of ACK-bearing preparations and verifies private
+NeverReleased receipts before closing unresolved launch ownership.
+
+The issue #98 candidate extends recovery to registered brokers without release
+ownership or any file operation. Registration and preparation close atomically;
+contradictory evidence remains unresolved. The real-runner regression registers
+then drops before Release, reopens the store at a new generation and recovers
+beyond 129 malformed preparations. This does not fence the execution or accept a
+task. See [the broker design](CODEX_WRITER_DESIGN.md) for proof boundaries.
+
+Pre-ACK reconciliation, full journal/release lifetime supervision, native vendor
+admission, OS denial controls and operational acceptance remain incomplete.
+This candidate does not enable native Codex writers or establish full acceptance.
 
 ## Historical auxiliary candidate evidence
 
