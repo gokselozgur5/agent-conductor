@@ -24,7 +24,9 @@ The example only demonstrates process execution; replace it with the actual
 project acceptance command. An explicit `/bin/sh -c` definition authorizes that
 shell command. Optional repeated `--toolchain-root` arguments grant canonical
 read-only toolchain directories, not network or write access. The current
-executor requires macOS Seatbelt; other hosts fail closed.
+executor uses macOS Seatbelt or the Linux helper and bubblewrap backend.
+See [Linux check setup](LINUX_CHECKS.md) for prerequisites and native-host
+evidence. Unsupported hosts or unavailable isolation fail closed.
 
 Each invocation requires a new destination. Capture refuses source links and
 special files, verifies the resulting manifest hash against the expected source,
@@ -50,9 +52,18 @@ to that disposable check tree. Never reuse it as verification source or evidence
 
 The internal `PersistentControlService::execute_required_check` port connects the
 executor to durable task state. It loads exact argv from the persisted attempt
-packet rather than taking a command from worker output. It requires the execution
-to be fenced, no remaining unfenced execution for the task, the same current
-attempt/worker/epoch, a required check and a bound `snapshot:<sha256>` source.
+packet rather than taking a command from worker output. It requires matching
+packet/execution identity, the same current attempt/worker/epoch, a required check
+and a bound `snapshot:<sha256>` source. Capture eligibility accepts a fenced
+execution, an identified successfully exited full-capability execution, or an
+authenticated account-channel candidate with an imported snapshot. Any other
+unfenced execution for the task blocks capture. Account checks additionally bind
+the selected source to the imported snapshot digest.
+
+Eligibility to inspect an immutable candidate does not prove that an unrestricted
+worker or its descendants have lost machine-wide write authority. It does not
+authorize reassignment of the original workspace or retry of an uncertain live
+execution. See [full-capability execution](FULL_CAPABILITY_EXECUTION.md).
 
 After execution it reloads those bindings under the lifecycle mutation lock and
 requires the task version to be unchanged. Only then does it transactionally
@@ -62,5 +73,12 @@ capture/isolation failures and concurrent lifecycle changes publish no result.
 The real-process service regression covers successful publication and a task
 cancelled while its check is executing. Neither path records a verifier verdict.
 
-This internal port is not yet dispatched by the daemon scheduler or the local
-`run-check` command. The operator CLI remains a standalone check tool.
+The normal daemon workflow dispatches required checks through this port after
+capturing the candidate. Independent review is invoked only when every required
+check returns `Passed`; a nonpassing check prevents completion. The standalone
+`run-check` command still does not publish authoritative task state.
+
+After an unsuccessful workflow, inspect the recorded checks and retained source
+before choosing another action. Restart may move an unresolved unrestricted task
+from `verifying` to `blocked` while preserving those records. That state change
+does not turn a failed check into a pass or grant retry authority.
