@@ -10,14 +10,33 @@ use tokio::{
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
 };
 
+/// Account request binds the native launch to the pre-recorded receiver identity.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountRunnerRequest {
+    pub launch: AccountNativeLaunch,
+    pub identity: crate::RunnerProcessIdentity,
+}
+
 pub struct AccountRunnerConnection {
     input: OwnedWriteHalf,
     output: BufReader<OwnedReadHalf>,
     packet_sha256: String,
+    receiver_identity: crate::RunnerProcessIdentity,
     frame: Vec<u8>,
 }
 
 impl AccountRunnerConnection {
+    #[must_use]
+    pub fn packet_sha256(&self) -> &str {
+        &self.packet_sha256
+    }
+
+    #[must_use]
+    pub fn receiver_identity(&self) -> &crate::RunnerProcessIdentity {
+        &self.receiver_identity
+    }
+
     /// Verify account/packet binding, then await the caller's durable ACK and
     /// current lease before Release. The callback must enforce current ownership.
     /// No child identity is supplied: the account receiver is not our owned child.
@@ -26,6 +45,7 @@ impl AccountRunnerConnection {
     pub async fn connect<F, Fut>(
         address: &AccountChannelAddress,
         launch: &AccountNativeLaunch,
+        identity: &crate::RunnerProcessIdentity,
         record_ack: F,
     ) -> Result<Self, Error>
     where
@@ -41,7 +61,11 @@ impl AccountRunnerConnection {
             .as_ref()
             .ok_or(Error::Protocol)?
             .account;
-        if digest != address.packet_sha256 || account.uid != address.worker_uid {
+        if digest != address.packet_sha256
+            || account.uid != address.worker_uid
+            || identity.packet_sha256 != digest
+            || identity.argument().is_err()
+        {
             return Err(Error::Protocol);
         }
         let stream = crate::connect_account_channel(address, Duration::from_secs(5))
@@ -52,9 +76,15 @@ impl AccountRunnerConnection {
             input,
             output: BufReader::new(output),
             packet_sha256: digest,
+            receiver_identity: identity.clone(),
             frame: Vec::new(),
         };
-        connection.send(launch).await?;
+        connection
+            .send(&AccountRunnerRequest {
+                launch: launch.clone(),
+                identity: identity.clone(),
+            })
+            .await?;
         let RunnerEvent::Ready { acknowledgement } =
             tokio::time::timeout(Duration::from_secs(5), connection.event())
                 .await

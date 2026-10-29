@@ -95,6 +95,7 @@ async fn serve(account_native: bool) -> Result<(), ()> {
     .map_err(|_| ())?;
     serve_io(
         account_native,
+        false,
         identity,
         BufReader::new(tokio::io::stdin()),
         tokio::io::stdout(),
@@ -122,12 +123,13 @@ async fn serve_account_channel(arguments: &[String]) -> Result<(), ()> {
         .await
         .map_err(|_| ())?;
     let (input, output) = stream.into_split();
-    serve_io(true, Some(identity), BufReader::new(input), output).await
+    serve_io(true, true, Some(identity), BufReader::new(input), output).await
 }
 
 #[allow(clippy::too_many_lines)]
 async fn serve_io(
     account_native: bool,
+    account_channel: bool,
     identity: Option<conductor_runtime::RunnerProcessIdentity>,
     mut input: impl AsyncBufRead + Unpin,
     writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -139,7 +141,14 @@ async fn serve_io(
     )
     .await
     .map_err(|_| ())??;
-    let launch: RunnerLaunch = if account_native {
+    let launch: RunnerLaunch = if account_channel {
+        let request: conductor_runtime::AccountRunnerRequest =
+            serde_json::from_slice(&bytes).map_err(|_| ())?;
+        if identity.as_ref() != Some(&request.identity) {
+            return Err(());
+        }
+        request.launch.prepare().map_err(|_| ())?
+    } else if account_native {
         serde_json::from_slice::<conductor_runtime::AccountNativeLaunch>(&bytes)
             .map_err(|_| ())?
             .prepare()
