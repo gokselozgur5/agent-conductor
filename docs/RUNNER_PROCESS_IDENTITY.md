@@ -146,3 +146,28 @@ passed. A separate fresh-authority fixture imported completed synthetic rows fro
 schema 17: migration preserved task aggregates and unknown legacy process fields,
 the old binary refused schema 18, and the new binary reopened. This is migration
 compatibility evidence, not cross-path recovery or proof of orphan fencing.
+
+## Expected identity before spawn (migration 19)
+
+New service launches generate the wrapper UUID before preparing the execution and
+persist it as `expected_wrapper_identity` in the preparation transaction. The same
+UUID is passed to the wrapper and later required by ACK. A different UUID refuses
+without changing the execution, audit or replay receipt. A preparation replay
+never grants another spawn; a changed expected UUID is an idempotency collision.
+The expected identity survives a failed spawn and database reopen.
+
+This is intent, not an observed process. `wrapper_identity` and `process_json`
+remain absent until ACK. Legacy preparations keep NULL and retain their original
+serialized form; no identifier is inferred or backfilled. Malformed non-NULL
+identifiers refuse at preparation and record decoding. An audit failure rolls
+back the preparation and identity together. The new migration requires matching
+backup tools and binaries; do not use these tools against the running schema-18
+service until the normal verified upgrade procedure is complete.
+
+This change is the prerequisite for a trusted never-released receipt, not that
+receipt's implementation. Pre-release failure still remains blocked after restart.
+Recovery must require an exact expected identity, packet and attempt in a private
+receipt published only after the trusted wrapper irrevocably abandons its path to
+worker spawn. PID absence, prepared state, the expected UUID or a forged argv tag
+alone must never authorize a fence. Existing restricted-writer receipt and finite
+continuation gates remain unchanged.

@@ -171,6 +171,7 @@ mod tests {
         let record = ExecutionRecord {
             process: None,
             preparation: ExecutionPreparation {
+                expected_wrapper_identity: None,
                 effect_token: "token".into(),
                 task_id: "task".into(),
                 attempt_id: "attempt".into(),

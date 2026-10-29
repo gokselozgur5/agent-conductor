@@ -2,6 +2,11 @@
 
 ## Current result
 
+Candidate migration 19 persists the expected wrapper UUID before spawn and checks
+ACK against that intent. Legacy rows stay unknown. Never-released receipt recovery
+is still pending; expected identity alone grants no fence or retry. This candidate
+is not installed in the existing schema-18 operator runtime.
+
 Migration 18 binds parent-observed native PID/start/host/boot metadata to durable
 wrapper acknowledgement, before release. Missing or malformed metadata refuses
 new authority-bound ACKs; legacy records remain unknown. Diagnostics distinguish

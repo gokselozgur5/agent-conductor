@@ -66,7 +66,9 @@ impl<C: Clock> PersistentControlService<C> {
         self.validate_runtime_owner(&launch.packet).await?;
         let packet_json =
             serde_json::to_string(&launch.packet).map_err(|_| runtime_error("packet encoding"))?;
+        let wrapper_identity = Uuid::now_v7().to_string();
         let input = ExecutionPreparation {
+            expected_wrapper_identity: Some(wrapper_identity.clone()),
             effect_token: effect_token.into(),
             task_id: launch.packet.contract.task_id.clone(),
             attempt_id: launch.packet.contract.attempt_id.clone(),
@@ -109,7 +111,6 @@ impl<C: Clock> PersistentControlService<C> {
                 .await?;
             self.validate_runtime_owner(&launch.packet).await?;
         }
-        let wrapper_identity = Uuid::now_v7().to_string();
         let identity = self.process_tag(&record, &wrapper_identity).await?;
         let mut acknowledged = None;
         let acknowledgement_slot = &mut acknowledged;

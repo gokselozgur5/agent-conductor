@@ -397,6 +397,7 @@ fn preparation() -> ExecutionPreparation {
         serde_json::json!({"contract":{"task_id":"task","attempt_id":"attempt","lease_epoch":7}})
             .to_string();
     ExecutionPreparation {
+        expected_wrapper_identity: None,
         effect_token: "token".into(),
         task_id: "task".into(),
         attempt_id: "attempt".into(),

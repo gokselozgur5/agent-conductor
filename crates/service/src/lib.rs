@@ -2398,6 +2398,66 @@ mod effect_tests {
         );
     }
 
+    #[tokio::test]
+    async fn failed_spawn_retains_expected_identity_without_ack_or_fence() {
+        use agent_conductor_store::{EffectAudit, ExecutionState};
+        let (directory, store) = lifecycle_store().await;
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .unwrap();
+        let (_, token) = claim_task(&service).await;
+        store
+            .claim_effect(
+                &token,
+                "runner",
+                10000,
+                EffectAudit {
+                    id: "claim",
+                    actor_id: "runtime",
+                    correlation_id: &token,
+                    now_ms: 100,
+                },
+            )
+            .await
+            .unwrap();
+        let launch = runtime_launch(directory.path());
+        let missing = directory.path().join("missing-wrapper");
+        assert!(
+            service
+                .launch_controlled_execution(&missing, &launch, &token, "runner")
+                .await
+                .is_err()
+        );
+        let record = store.execution(&token).await.unwrap().unwrap();
+        assert_eq!(record.state, ExecutionState::Prepared);
+        assert!(record.preparation.expected_wrapper_identity.is_some());
+        assert!(record.wrapper_identity.is_none());
+        assert!(record.process.is_none());
+        assert!(store.has_unfenced_execution("task").await.unwrap());
+        assert!(
+            service
+                .launch_controlled_execution(&missing, &launch, &token, "runner")
+                .await
+                .is_err()
+        );
+        assert_eq!(store.execution(&token).await.unwrap().unwrap(), record);
+    }
+
+    fn assert_launch_binding(record: &agent_conductor_store::ExecutionRecord) {
+        assert!(record.preparation.expected_wrapper_identity.is_some());
+        assert_eq!(
+            record.preparation.expected_wrapper_identity,
+            record.wrapper_identity
+        );
+        assert!(
+            record
+                .process
+                .as_ref()
+                .is_some_and(|process| process.pid > 0)
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn controlled_launch_records_ack_refuses_replay_and_expired_renewal() {
@@ -2446,12 +2506,7 @@ mod effect_tests {
             .await
             .expect("launch");
         assert_eq!(record.state, ExecutionState::Started);
-        assert!(
-            record
-                .process
-                .as_ref()
-                .is_some_and(|process| process.pid > 0)
-        );
+        assert_launch_binding(&record);
         assert_eq!(
             store.execution(&token).await.expect("read"),
             Some(record.clone())
@@ -2550,6 +2605,7 @@ mod effect_tests {
             store
                 .prepare_execution(
                     &ExecutionPreparation {
+                        expected_wrapper_identity: None,
                         effect_token: token.clone(),
                         task_id: "task".into(),
                         attempt_id: "attempt".into(),
@@ -3201,6 +3257,7 @@ mod effect_tests {
             let record = store
                 .prepare_execution(
                     &ExecutionPreparation {
+                        expected_wrapper_identity: None,
                         effect_token: token.clone(),
                         task_id: "task".into(),
                         attempt_id: "attempt".into(),
@@ -3337,6 +3394,7 @@ mod effect_tests {
             .expect("effect claim");
         let input = runtime_launch(directory.path());
         let preparation = ExecutionPreparation {
+            expected_wrapper_identity: None,
             effect_token: token.clone(),
             task_id: "task".into(),
             attempt_id: "attempt".into(),

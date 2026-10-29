@@ -7,6 +7,9 @@ use super::{EffectAudit, Store, StoreError};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionPreparation {
+    /// Expected wrapper identity, persisted before spawn; not an acknowledgement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_wrapper_identity: Option<String>,
     pub effect_token: String,
     pub task_id: String,
     pub attempt_id: String,
@@ -271,9 +274,9 @@ impl Store {
             return Ok((record, false));
         }
         require_live(&mut tx, input, audit.now_ms).await?;
-        sqlx::query("INSERT INTO executions (effect_token, task_id, attempt_id, lease_epoch, runner_id, packet_json, packet_sha256, state, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)")
+        sqlx::query("INSERT INTO executions (effect_token, task_id, attempt_id, lease_epoch, runner_id, packet_json, packet_sha256, expected_wrapper_identity, state, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)")
             .bind(&input.effect_token).bind(&input.task_id).bind(&input.attempt_id).bind(input.lease_epoch)
-            .bind(&input.runner_id).bind(&input.packet_json).bind(&input.packet_sha256)
+            .bind(&input.runner_id).bind(&input.packet_json).bind(&input.packet_sha256).bind(&input.expected_wrapper_identity)
             .bind(audit.now_ms).bind(audit.now_ms).execute(&mut *tx).await?;
         append_audit(&mut tx, input, "execution.prepared", &audit, "{}").await?;
         tx.commit().await?;
@@ -383,6 +386,11 @@ fn apply_update(
             if record.state != ExecutionState::Prepared
                 || wrapper_identity.trim().is_empty()
                 || wrapper_identity.len() > 256
+                || record
+                    .preparation
+                    .expected_wrapper_identity
+                    .as_ref()
+                    .is_some_and(|expected| expected != wrapper_identity)
                 || *packet_sha256 != record.preparation.packet_sha256
             {
                 return Err(invalid());
@@ -459,6 +467,7 @@ async fn require_live(
 }
 
 fn validate_preparation(input: &ExecutionPreparation) -> Result<(), StoreError> {
+    validate_expected_identity(input.expected_wrapper_identity.as_deref())?;
     if input.packet_json.len() > 256 * 1024
         || input.lease_epoch <= 0
         || [
@@ -506,8 +515,11 @@ async fn append_audit(
     Ok(())
 }
 fn decode(row: sqlx::sqlite::SqliteRow) -> Result<ExecutionRecord, StoreError> {
+    let expected_wrapper_identity: Option<String> = row.try_get("expected_wrapper_identity")?;
+    validate_expected_identity(expected_wrapper_identity.as_deref())?;
     Ok(ExecutionRecord {
         preparation: ExecutionPreparation {
+            expected_wrapper_identity,
             effect_token: row.try_get("effect_token")?,
             task_id: row.try_get("task_id")?,
             attempt_id: row.try_get("attempt_id")?,
@@ -538,4 +550,14 @@ fn decode_process(json: Option<String>) -> Result<Option<ExecutionProcess>, Stor
         Ok(process)
     })
     .transpose()
+}
+
+fn validate_expected_identity(identity: Option<&str>) -> Result<(), StoreError> {
+    if let Some(identity) = identity {
+        let uuid = uuid::Uuid::parse_str(identity).map_err(|_| invalid())?;
+        if uuid.is_nil() || uuid.to_string() != identity {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
