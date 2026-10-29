@@ -256,3 +256,30 @@ impl Store {
         Ok(true)
     }
 }
+
+impl Store {
+    pub(crate) async fn file_broker_recovery_diagnostic(
+        &self,
+    ) -> Result<Option<crate::RuntimeInvariantViolation>, StoreError> {
+        use sqlx::Row;
+        let rows=sqlx::query("SELECT substr(b.invocation_id,1,256) AS invocation_id,substr(e.task_id,1,256) AS task_id,b.state,COUNT(*) OVER() AS total FROM file_brokers b JOIN executions e ON e.effect_token=b.execution_token LEFT JOIN tasks t ON t.id=e.task_id LEFT JOIN leases l ON l.attempt_id=e.attempt_id JOIN runtime_metadata r ON r.singleton=1 JOIN recovery_authority a ON a.singleton=1 WHERE (b.state='open' AND (json_extract(b.binding_json,'$.boot_generation') IS NOT r.boot_generation OR json_extract(b.binding_json,'$.authority_id') IS NOT a.authority_id OR e.state!='started' OR t.state NOT IN ('claimed','running') OR l.status IS NOT 'active')) OR (b.state='closed' AND EXISTS(SELECT 1 FROM file_operations o WHERE o.invocation_id=b.invocation_id AND o.completed_at_ms IS NULL)) ORDER BY b.invocation_id LIMIT 128")
+            .fetch_all(&self.inner.readers).await?;
+        let Some(first) = rows.first() else {
+            return Ok(None);
+        };
+        let total: i64 = first.try_get("total")?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            records.push(serde_json::json!({
+                "invocation_id":row.try_get::<String,_>("invocation_id")?,
+                "task_id":row.try_get::<String,_>("task_id")?,
+                "state":row.try_get::<String,_>("state")?,
+            }));
+        }
+        Ok(Some(crate::RuntimeInvariantViolation{
+            code:"file_broker_recovery_pending".into(),
+            summary:"file broker ownership remains unresolved; preserve files and operation evidence before continuation or backup".into(),
+            context_json:serde_json::json!({"count":total,"brokers":records,"limit":128}).to_string(),
+        }))
+    }
+}

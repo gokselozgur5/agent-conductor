@@ -843,6 +843,9 @@ impl Store {
         if let Some(diagnostic) = self.auxiliary_recovery_diagnostic().await? {
             violations.push(diagnostic);
         }
+        if let Some(diagnostic) = self.file_broker_recovery_diagnostic().await? {
+            violations.push(diagnostic);
+        }
 
         Ok(violations)
     }
@@ -1195,6 +1198,8 @@ async fn persist_in_transaction(
 
 mod file_broker;
 pub use file_broker::{FileBrokerBinding, FileBrokerStatus};
+#[cfg(test)]
+mod file_broker_barrier_tests;
 #[cfg(test)]
 mod file_broker_crash_tests;
 #[cfg(test)]

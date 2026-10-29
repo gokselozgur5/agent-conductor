@@ -227,8 +227,8 @@ These fixtures use synthetic acknowledged execution setup. Database reopen and
 new runtime generation checks are not abrupt process-death or physical power-loss
 acceptance. Pending work remains inspectable across generations and is never
 inferred complete from current file contents. Automatic reconciliation, a durable
-broker shutdown receipt, production transport, inventory/backup/continuation
-barriers and native adapter launch remain required before enabling this route.
+broker shutdown receipt, production transport and native adapter launch remain required before enabling
+this route; ownership barriers are implemented below.
 No execution fencing or task completion is changed by these records.
 
 ## Abrupt process-exit controls
@@ -253,6 +253,44 @@ open preserves state and a new generation refuses old-owner mutation.
 
 These are real process exits with synthetic acknowledged execution state and
 no model calls. They are not SIGKILL during a filesystem syscall, machine power
-loss, native proxy survival or accepted writer fencing. The unclosed broker and
-its pending evidence still need integration into production observation, backup,
-continuation and verified shutdown/recovery before native launch can be enabled.
+loss, native proxy survival or accepted writer fencing. The ownership barriers below preserve the unclosed broker and its pending
+evidence. Verified shutdown/recovery and native transport still remain required
+before native launch can be enabled.
+
+
+## Ownership barriers (schema 27)
+
+`unresolved_file_broker_tasks` projects every open broker and any contradictory
+closed broker with an incomplete operation onto its execution's task. SQLite
+triggers refuse execution fencing, a new attempt/execution, task progression into
+claim/verification/completion, auxiliary admission, and new/advanced dispatch
+admission while that ownership remains unresolved. The existing-attempt upsert
+path remains available for heartbeat, expiry/release and cancellation bookkeeping;
+blocking it would prevent the controller from stopping work safely.
+
+Queue candidate and automatic recovery queries exclude unresolved tasks before
+applying their limits. Explicit and successor requeue refuse without publishing
+assignment/audit changes. Existing running work still consumes the normal global
+running limit; an open broker does not create extra dispatch capacity. Completed
+dispatch reconciliation also refuses unresolved broker ownership even if a
+historical execution already claims to be fenced.
+
+The invariant report exposes bounded invocation/task/state diagnostics for old
+or contradictory ownership, with total count and a 128-record detail limit.
+Normal active brokers do not themselves make the runtime unhealthy. A closed
+record with an unknown operation remains unhealthy. Diagnostics omit binding
+payloads, file paths and contents and do not repair state. Cold backup refuses
+both open brokers and incomplete operations before creating a destination.
+
+Regression controls exercise the actual execution update API, manual/automatic/
+successor continuation, direct SQL refusal and full-table rollback, closed
+positive controls, queue fairness and running capacity, lifecycle diagnostics,
+and backup refusal/closed success. A separate production persistence regression
+reproduced an overly broad initial attempt-insert trigger blocking heartbeat;
+the corrected identity guard allows renewal/release and still refuses a new
+attempt until closure. The pre-fix failure and final result are retained.
+
+These barriers prevent other lifecycle paths from treating unresolved file work
+as settled. They do not prove that a caller's closure assertion stopped a native
+writer. A distinct verified broker shutdown/recovery receipt, private transport
+and OS isolation acceptance remain required before enabling Codex writes.

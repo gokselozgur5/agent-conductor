@@ -66,7 +66,7 @@ async fn ownership_clear(
     attempt: &str,
     worker: &str,
 ) -> Result<bool, StoreError> {
-    let valid:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?2 AND task_id=?1 AND worker_id=?3 AND ended_at_ms IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM leases WHERE task_id=?1 AND status IN ('active','recovery_pending')) AND NOT EXISTS(SELECT 1 FROM executions WHERE task_id=?1 AND state!='fenced') AND NOT EXISTS(SELECT 1 FROM auxiliary_invocations WHERE task_id=?1 AND state='pending') AND NOT EXISTS(SELECT 1 FROM legacy_auxiliary_ownership WHERE task_id=?1) AND EXISTS(SELECT 1 FROM audit_events WHERE task_id=?1 AND kind='complete' AND CASE WHEN length(payload_json)<=1048576 AND json_valid(payload_json) THEN json_extract(payload_json,'$[0]')=?1 AND json_extract(payload_json,'$[1].kind.type')='complete' AND json_extract(payload_json,'$[1].kind.observed_source')=?4 AND json_extract(payload_json,'$[1].expected_version')=?5 ELSE 0 END)")
+    let valid:i64=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?2 AND task_id=?1 AND worker_id=?3 AND ended_at_ms IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM leases WHERE task_id=?1 AND status IN ('active','recovery_pending')) AND NOT EXISTS(SELECT 1 FROM executions WHERE task_id=?1 AND state!='fenced') AND NOT EXISTS(SELECT 1 FROM auxiliary_invocations WHERE task_id=?1 AND state='pending') AND NOT EXISTS(SELECT 1 FROM legacy_auxiliary_ownership WHERE task_id=?1) AND NOT EXISTS(SELECT 1 FROM unresolved_file_broker_tasks WHERE task_id=?1) AND EXISTS(SELECT 1 FROM audit_events WHERE task_id=?1 AND kind='complete' AND CASE WHEN length(payload_json)<=1048576 AND json_valid(payload_json) THEN json_extract(payload_json,'$[0]')=?1 AND json_extract(payload_json,'$[1].kind.type')='complete' AND json_extract(payload_json,'$[1].kind.observed_source')=?4 AND json_extract(payload_json,'$[1].expected_version')=?5 ELSE 0 END)")
         .bind(id).bind(attempt).bind(worker).bind(source).bind(version-1).fetch_one(db).await?;
     Ok(valid == 1)
 }
@@ -251,15 +251,19 @@ mod tests {
     }
     #[tokio::test]
     async fn unfinished_process_ownership_blocks_completed_dispatch_reconciliation() {
-        for auxiliary in [false, true] {
+        for ownership in ["execution", "auxiliary", "broker"] {
             let (_root, store) = fixture().await;
             seed(&store, "task").await;
             {
                 let mut db = store.inner.writer.lock().await;
                 db.execute("INSERT INTO effect_intents(token,task_id,attempt_id,lease_epoch,correlation_id,effect_kind,request_json,status,created_at_ms,updated_at_ms) VALUES('effect','task','attempt:task',1,'fixture','worker.spawn','{}','claimed',0,0); INSERT INTO executions(effect_token,task_id,attempt_id,lease_epoch,runner_id,packet_json,packet_sha256,state,created_at_ms,updated_at_ms) VALUES('effect','task','attempt:task',1,'runner','{}','hash','started',0,0);").await.unwrap();
-                if auxiliary {
+                if ownership == "auxiliary" {
                     db.execute("UPDATE executions SET state='fenced'; INSERT INTO auxiliary_invocations(invocation_id,task_id,execution_token,preparation_json,boot_generation,state,created_at_ms) VALUES('aux','task','effect','{}',1,'pending',0);").await.unwrap();
                 }
+            }
+            if ownership == "broker" {
+                // Historical contradictory fixture: broker still open despite an old fence.
+                store.inner.writer.lock().await.execute("UPDATE executions SET state='fenced'; INSERT INTO file_brokers(invocation_id,execution_token,binding_json,state,created_at_ms) VALUES('broker','effect','{}','open',0)").await.unwrap();
             }
             let before =
                 crate::transaction_cancellation::snapshot(&mut *store.inner.writer.lock().await)
