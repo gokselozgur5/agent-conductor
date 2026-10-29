@@ -63,6 +63,7 @@ mod check_execution;
 #[cfg(unix)]
 mod checkpoint;
 mod clock;
+mod decision_privacy;
 mod evidence;
 #[cfg(unix)]
 mod instruction_policy;
@@ -266,7 +267,8 @@ impl<C: Clock> PersistentControlService<C> {
     }
 
     fn task_response(&self, row: PersistedTask) -> Result<TaskResponse, ErrorBody> {
-        let task: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
+        let mut task: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
+        decision_privacy::redact_task(&mut task);
         let lease_observation =
             lease_observation::observe(&task, self.clock.read(self.boot_generation));
         Ok(TaskResponse {
@@ -594,6 +596,7 @@ impl<C: Clock> PersistentControlService<C> {
             let mut value: CommandAppliedResponse =
                 serde_json::from_str(&json).map_err(json_error)?;
             value.replayed = true;
+            decision_privacy::redact_task(&mut value.task.aggregate);
             return Ok(value);
         }
         let (batch, response) = self
@@ -605,6 +608,7 @@ impl<C: Clock> PersistentControlService<C> {
                 let mut value: CommandAppliedResponse =
                     serde_json::from_str(&outcome_json).map_err(json_error)?;
                 value.replayed = true;
+                decision_privacy::redact_task(&mut value.task.aggregate);
                 Ok(value)
             }
         }
@@ -620,7 +624,16 @@ impl<C: Clock> PersistentControlService<C> {
         self.validate_execution_fence(&row.id, &command).await?;
         let old: Task = serde_json::from_str(&row.aggregate_json).map_err(json_error)?;
         let clock = self.clock.read(self.boot_generation);
-        let applied = apply(&old, &command, clock).map_err(rejection_error)?;
+        let mut applied = apply(&old, &command, clock).map_err(rejection_error)?;
+        // Validate the original bounded input first. Keep its request_hash so
+        // distinct secrets cannot collapse into the same idempotent request.
+        let mut command = command;
+        let request_json = if decision_privacy::redact_command(&mut command.kind) {
+            applied = apply(&old, &command, clock).map_err(rejection_error)?;
+            serde_json::to_string(&(row.id.as_str(), &command)).map_err(json_error)?
+        } else {
+            request_json
+        };
         let attempt = attempt_requires_persistence(&old, &applied.task);
         let capability_hash = if attempt {
             self.attempt_capability_hash(&applied.task).await?
@@ -628,7 +641,7 @@ impl<C: Clock> PersistentControlService<C> {
             None
         };
         let effects = effect_appends(&applied.task, &command, &applied.effects, clock)?;
-        let response = CommandAppliedResponse {
+        let mut response = CommandAppliedResponse {
             task: TaskResponse {
                 lease_observation: None,
                 project_id: row.project_id,
@@ -640,6 +653,7 @@ impl<C: Clock> PersistentControlService<C> {
             replayed: false,
             effect_tokens: effects.iter().map(|e| e.token.clone()).collect(),
         };
+        decision_privacy::redact_task(&mut response.task.aggregate);
         let batch = CommitBatch {
             actor_id: command.actor.id.0.clone(),
             idempotency_key: command.idempotency_key.0.clone(),
@@ -1584,6 +1598,7 @@ mod effect_tests {
         include!("broker_journal_tests.rs");
     }
     include!("checkpoint_tests.rs");
+    include!("decision_privacy_tests.rs");
     include!("reassignment_tests.rs");
     include!("unowned_tests.rs");
     include!("full_capture_tests.rs");
