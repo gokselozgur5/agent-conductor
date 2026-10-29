@@ -65,6 +65,7 @@ def package(bin_dir, accepted_plan, destination):
         (destination / directory).mkdir(mode=0o700)
     for name in BINARIES:
         shutil.copy2(bin_dir / name, destination / 'bin' / name)
+    shutil.copytree(REPO / 'crates/store/migrations', destination / 'crates/store/migrations')
     for path in REPO.joinpath('tools').iterdir():
         if path.is_file() and (path.suffix == '.py' or path.name == 'conductor'):
             shutil.copy2(path, destination / 'tools' / path.name)

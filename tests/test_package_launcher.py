@@ -70,4 +70,8 @@ class PackageLauncherTests(unittest.TestCase):
             saved = json.loads((destination / 'accepted-adapters.json').read_text())
             self.assertEqual(saved['full_capability'], profile)
             self.assertIn('docs/FULL_CAPABILITY_EXECUTION.md', manifest['files'])
+            self.assertIn('crates/store/migrations/0030_capture_eligibility.sql', manifest['files'])
+            source = Path(__file__).resolve().parents[1] / 'crates/store/migrations'
+            for migration in source.glob('*.sql'):
+                self.assertEqual((destination / 'crates/store/migrations' / migration.name).read_bytes(), migration.read_bytes())
             self.assertNotIn('ANTHROPIC_API_KEY', json.dumps(saved))
