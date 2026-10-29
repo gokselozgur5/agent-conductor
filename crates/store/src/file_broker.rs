@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Connection, SqliteConnection};
 #[path = "file_broker_launch.rs"]
 mod launch;
+#[path = "file_broker_launch_binding.rs"]
+mod launch_binding;
 #[path = "file_broker_launch_prepare.rs"]
 mod launch_prepare;
 pub use launch::FileBrokerLaunchBinding;
@@ -114,6 +116,7 @@ impl Store {
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
         live(&mut tx, b).await?;
+        launch_binding::registered_binding(&mut tx, b).await?;
         if sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM file_brokers WHERE invocation_id=?")
             .bind(&b.invocation_id)
             .fetch_one(&mut *tx)

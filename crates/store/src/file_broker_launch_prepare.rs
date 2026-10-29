@@ -113,6 +113,10 @@ mod tests {
                 .await
                 .unwrap()
         );
+        assert_eq!(store.file_broker_launch(&binding).await.unwrap(), launch);
+        let mut rebound = binding.clone();
+        rebound.root_identity_sha256 = "f".repeat(64);
+        assert!(store.file_broker_launch(&rebound).await.is_err());
         let before = snapshot(&mut *store.inner.writer.lock().await).await;
         let mut changed = launch;
         changed.wrapper_sha256 = "f".repeat(64);
