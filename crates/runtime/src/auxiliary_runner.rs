@@ -16,7 +16,7 @@ use tokio::{
 };
 
 const INPUT_LIMIT: usize = 4 * 1024 * 1024;
-const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+const OUTPUT_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Sent on the private stdin pipe, never saved or formatted with Debug.
 #[derive(Serialize, Deserialize)]
@@ -96,6 +96,12 @@ fn invalid() -> io::Error {
         "auxiliary protocol or evidence invalid",
     )
 }
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 fn canonical_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|v| !v.is_nil() && v.to_string() == value)
 }
@@ -122,7 +128,7 @@ impl AuxiliaryLaunch {
     pub fn validate(&self) -> io::Result<()> {
         if self.version != 1
             || !canonical_uuid(&self.invocation_id)
-            || !canonical_uuid(&self.authority_id)
+            || !valid_digest(&self.authority_id)
             || self.boot_generation == 0
             || !self.executable.is_absolute()
             || !self.directory.is_absolute()
@@ -132,7 +138,7 @@ impl AuxiliaryLaunch {
             || self
                 .arguments
                 .iter()
-                .any(|a| a.len() > 16384 || a.contains('\0'))
+                .any(|a| a.len() > 65536 || a.contains('\0'))
             || self.environment.len() > 128
             || self.environment.iter().any(|(k, v)| {
                 k.is_empty()
@@ -146,7 +152,7 @@ impl AuxiliaryLaunch {
             || self.heartbeat_timeout_ms == 0
             || self.heartbeat_timeout_ms > 30_000
             || self.output_limit == 0
-            || self.output_limit > 1024 * 1024
+            || self.output_limit > 2 * 1024 * 1024
         {
             return Err(invalid());
         }
@@ -231,7 +237,7 @@ pub fn read_auxiliary_receipt(
     expected.process.host.validate()?;
     if expected.version != 1
         || expected.boot_generation == 0
-        || !canonical_uuid(&expected.authority_id)
+        || !valid_digest(&expected.authority_id)
         || expected.process.pid == 0
         || expected.process.start_marker.is_empty()
         || expected.process.start_marker.len() > 128

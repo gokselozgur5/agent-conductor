@@ -14,21 +14,33 @@ changed identity reuse refuses. One pending invocation excludes another for
 that task. Admission requires the current verifying task/source, a fenced writer,
 no unfenced writer and the current runtime generation.
 
-Normal completion records settlement only after the owned process primitive
-returns with group absence confirmed. A clean leader exit now also checks group
-absence; it never signals a numeric identity after reaping. Runtime errors with
-uncertain settlement leave the invocation pending. Settlement and audit are
-atomic and tied to the original runtime generation. Direct claim/requeue and continuation refuse while
-any auxiliary invocation remains pending, independently of the writer fence.
+Schema 21 binds the exact launch digest, wrapper path/hash and private receipt
+root before supervisor creation. The parent independently samples the Ready PID,
+kernel birth and host epoch, then atomically records that identity and release
+authorization before writing Release. Replays grant neither spawn nor release.
+Task/version/source/authority/boot ownership is rechecked at both admission steps.
+The runtime authority is the existing 64-character digest, not an invocation UUID.
 
-This is an intermediate implementation, not complete issue acceptance. Pending
-invocations have no durable process identity or restart-verifiable terminal
-receipt yet. A crash can therefore leave a task conservatively blocked even
-after its check exits. The next stage must provide a tagged wrapper identity,
-birth/host binding and release handshake, private terminal proof, bounded
-reconciliation and stale-publication refusal for checks and verifiers. Existing
-schema-19 verification work has no auxiliary record and needs an explicit
-migration/recovery policy before deployment.
+Both native required checks and independent review use this session. The client
+renews while awaiting a bounded terminal frame without discarding partial reads.
+A terminal event alone cannot publish results: the service must first verify the
+private receipt against persisted launch/process identity and unchanged wrapper
+pin. Settlement and audit commit together. Restart reconciliation accepts an old
+invocation's proof only under the current runtime generation and same authority;
+it runs before interrupted workflow admission. Direct claim/requeue, reassignment
+and continuation refuse pending auxiliary ownership independently of writer fences.
+
+This remains intermediate issue acceptance. Pre-acknowledgement crashes have no
+persisted observed process identity, so their receipts remain unresolved rather
+than inventing an ACK. Capture/admission failures before a bound supervisor also
+need a precise no-launch settlement path. Legacy schema-19 verification work and
+schema-20 pending invocations lack supervisor metadata and require an explicit
+migration policy before deployment. Complete boundary coverage, operator/invariant reporting and host recovery
+remain required. Actual native crash controls now cover both a running required
+check and an independently observed verifier child: after daemon death, private
+settlement is audited before the replacement writer is prepared, and each task
+completes with one automatic continuation. These two boundaries do not cover
+the complete fault matrix.
 
 The shared cold-database validator refuses pending auxiliary invocations for
 backup and restore paths, even if no live writer remains. Before merge/deployment,
@@ -41,9 +53,8 @@ short native run closes FR-6/NFR-1 or the seven-day requirement.
 ## Auxiliary supervisor protocol candidate
 
 `conductor-runner --auxiliary INVOCATION_UUID` implements a separate bounded
-protocol. It is tested directly with controlled shell processes; service calls
-still use the prior direct process path until the persistence/client integration
-is complete. This mode alone does not enable automatic recovery.
+protocol. Native service check/review calls now use it through `AuxiliarySession`.
+Controlled shell tests exercise the transport independently of model behavior.
 
 The parent supplies one private stdin launch frame. It includes authority and
 boot identity, an immutable invocation UUID, canonical working/receipt paths,
@@ -74,9 +85,22 @@ and every mismatch against trusted invocation/authority/boot/launch/process
 expectations. No diagnostic or receipt reader signals an old numeric PID. Partial
 publication is not accepted as completion and cannot be repaired by guessing.
 
-Next integration must persist the launch digest and independently observed
-supervisor identity before Release, retain the wrapper pin and safe receipt root,
-renew/control the session, and reconcile exact terminal evidence transactionally
-before releasing pending ownership. Bind check/verdict publication to that same
-invocation. Do not serialize credentials into the database to reconstruct a launch;
-recovery needs its digest and terminal proof, not the secret launch environment.
+The persisted launch digest covers the final executable, complete argv and
+private environment. Secret launch bytes are never stored to support recovery;
+its persisted digest and terminal proof are sufficient. The initial definition
+record remains distinct from that final launch binding. Check result and verifier
+publication retain their task/version/source revalidation after settlement.
+
+## Local validation
+
+Build matching workspace binaries before the service's actual-supervisor tests:
+
+```sh
+cargo build --workspace
+CONDUCTOR_TEST_BIN_DIR="$PWD/target/debug" cargo test --workspace --all-features
+```
+
+When using `CARGO_TARGET_DIR`, set the binary directory to that target's `debug`
+directory instead. CI builds the binaries first and supplies this explicit path;
+tests do not silently use a runner from another checkout or skip the production
+supervision path when it is unavailable.

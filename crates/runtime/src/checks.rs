@@ -64,6 +64,35 @@ pub async fn execute_check(
     toolchain_roots: &[PathBuf],
     cancellation: watch::Receiver<bool>,
 ) -> Result<CheckReceipt, CheckError> {
+    let prepared = prepare_check(
+        source,
+        inventory,
+        expected_source_sha256,
+        destination,
+        check,
+        toolchain_roots,
+    )?;
+    let result = run_process(&prepared.spec, cancellation).await;
+    Ok(prepared.finish(result))
+}
+
+/// Captured check input and approved isolated process specification.
+pub struct PreparedCheck {
+    pub spec: crate::ProcessSpec,
+    receipt: CheckReceipt,
+}
+
+/// Captures and validates a disposable check before a separately supervised launch.
+/// # Errors
+/// Same capture, definition and isolation refusals as `execute_check`.
+pub fn prepare_check(
+    source: &Path,
+    inventory: &[String],
+    expected_source_sha256: &str,
+    destination: &Path,
+    check: &CheckDefinition,
+    toolchain_roots: &[PathBuf],
+) -> Result<PreparedCheck, CheckError> {
     if check.id.trim().is_empty()
         || check.id.len() > 256
         || check.argv.is_empty()
@@ -100,7 +129,7 @@ pub async fn execute_check(
         Duration::from_millis(check.timeout_ms),
     )
     .map_err(|_| CheckError::Isolation)?;
-    let mut receipt = CheckReceipt {
+    let receipt = CheckReceipt {
         check_id: check.id.clone(),
         source_sha256,
         definition_sha256,
@@ -109,23 +138,31 @@ pub async fn execute_check(
         stdout_sha256: None,
         stderr_sha256: None,
     };
-    match run_process(&spec, cancellation).await {
-        Ok(output) => {
-            receipt.exit_code = output.exit_code;
-            receipt.stdout_sha256 = Some(digest(&output.stdout));
-            receipt.stderr_sha256 = Some(digest(&output.stderr));
-            receipt.outcome = if output.exit_code == Some(0) {
-                CheckOutcome::Passed
-            } else {
-                CheckOutcome::Failed
-            };
+    Ok(PreparedCheck { spec, receipt })
+}
+impl PreparedCheck {
+    /// Converts an observed process result into source-bound check evidence.
+    #[must_use]
+    pub fn finish(self, result: Result<crate::ProcessOutput, ProcessError>) -> CheckReceipt {
+        let mut receipt = self.receipt;
+        match result {
+            Ok(output) => {
+                receipt.exit_code = output.exit_code;
+                receipt.stdout_sha256 = Some(digest(&output.stdout));
+                receipt.stderr_sha256 = Some(digest(&output.stderr));
+                receipt.outcome = if output.exit_code == Some(0) {
+                    CheckOutcome::Passed
+                } else {
+                    CheckOutcome::Failed
+                };
+            }
+            Err(ProcessError::Timeout) => receipt.outcome = CheckOutcome::TimedOut,
+            Err(ProcessError::Cancelled) => receipt.outcome = CheckOutcome::Cancelled,
+            Err(ProcessError::OutputLimit) => receipt.outcome = CheckOutcome::OutputLimit,
+            Err(_) => {}
         }
-        Err(ProcessError::Timeout) => receipt.outcome = CheckOutcome::TimedOut,
-        Err(ProcessError::Cancelled) => receipt.outcome = CheckOutcome::Cancelled,
-        Err(ProcessError::OutputLimit) => receipt.outcome = CheckOutcome::OutputLimit,
-        Err(_) => {}
+        receipt
     }
-    Ok(receipt)
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))

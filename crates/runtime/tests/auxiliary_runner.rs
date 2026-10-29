@@ -29,7 +29,7 @@ fn fixture(script: &str) -> (tempfile::TempDir, AuxiliaryLaunch) {
     let launch = AuxiliaryLaunch {
         version: 1,
         invocation_id: uuid::Uuid::now_v7().to_string(),
-        authority_id: uuid::Uuid::now_v7().to_string(),
+        authority_id: "a".repeat(64),
         boot_generation: 9,
         receipt_root: root.join("receipts"),
         executable,
@@ -345,7 +345,7 @@ async fn receipt_permission_schema_size_and_scope_mutations_are_refused() {
     for field in 0..4 {
         let mut changed = receipt.clone();
         match field {
-            0 => changed.authority_id = uuid::Uuid::now_v7().to_string(),
+            0 => changed.authority_id = "b".repeat(64),
             1 => changed.launch_sha256 = "0".repeat(64),
             2 => changed.process.host.boot_id = "0".repeat(64),
             _ => changed.observation = AuxiliaryObservation::OwnedGroupSettled,

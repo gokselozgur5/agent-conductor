@@ -13,6 +13,7 @@ impl<C: Clock> PersistentControlService<C> {
     /// Returns storage errors; missing fence evidence never grants admission.
     pub async fn recover_interrupted_workflows(&self) -> Result<usize, StoreError> {
         self.recover_fenced_receipts().await?;
+        self.recover_auxiliary_receipts().await?;
         let _guard = self.mutations.lock().await;
         let mut count = 0;
         for job in self.store.interrupted_workflows().await? {

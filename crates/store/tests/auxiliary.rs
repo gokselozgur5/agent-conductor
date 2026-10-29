@@ -236,3 +236,205 @@ async fn audit_failure_rolls_back_admission_and_settlement() {
     );
     assert!(store.has_pending_auxiliary("task").await.unwrap());
 }
+
+fn binding() -> agent_conductor_store::AuxiliaryLaunchBinding {
+    agent_conductor_store::AuxiliaryLaunchBinding {
+        launch_sha256: "c".repeat(64),
+        authority_id: "d".repeat(64),
+        receipt_root: "/private/receipts".into(),
+        wrapper_path: "/private/wrapper".into(),
+        wrapper_sha256: "e".repeat(64),
+    }
+}
+fn process() -> agent_conductor_store::ExecutionProcess {
+    agent_conductor_store::ExecutionProcess {
+        platform: "linux".into(),
+        host_id: "a".repeat(64),
+        boot_id: "b".repeat(64),
+        pid: 123,
+        start_marker: "linux-start-ticks:12".into(),
+    }
+}
+fn proof(input: &AuxiliaryPreparation) -> String {
+    let binding = binding();
+    let process = process();
+    serde_json::json!({"version":1,"invocation_id":input.invocation_id,"authority_id":binding.authority_id,"boot_generation":input.boot_generation,"launch_sha256":binding.launch_sha256,"process":{"host":{"platform":process.platform,"host_id":process.host_id,"boot_id":process.boot_id},"pid":process.pid,"start_marker":process.start_marker},"observation":"owned_group_settled"}).to_string()
+}
+
+#[tokio::test]
+async fn launch_and_release_replay_never_grant_another_external_action() {
+    let (_dir, store, input, mut connection) = fixture().await;
+    sqlx::query("UPDATE recovery_authority SET authority_id=?")
+        .bind(binding().authority_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    store
+        .prepare_auxiliary_once(&input, audit("prepare"))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .authorize_auxiliary_release(&input, &binding(), &process(), audit("no-launch"))
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .bind_auxiliary_launch(&input, &binding(), audit("bind"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .bind_auxiliary_launch(&input, &binding(), audit("bind-replay"))
+            .await
+            .unwrap()
+    );
+    let mut changed = binding();
+    changed.launch_sha256 = "f".repeat(64);
+    assert!(
+        store
+            .bind_auxiliary_launch(&input, &changed, audit("changed"))
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE tasks SET version=3")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .authorize_auxiliary_release(&input, &binding(), &process(), audit("stale-task"))
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE tasks SET version=2")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .authorize_auxiliary_release(&input, &binding(), &process(), audit("release"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .authorize_auxiliary_release(&input, &binding(), &process(), audit("release-replay"))
+            .await
+            .unwrap()
+    );
+    let mut changed = process();
+    changed.pid += 1;
+    assert!(
+        store
+            .authorize_auxiliary_release(&input, &binding(), &changed, audit("pid-changed"))
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .settle_auxiliary(&input, audit("unproven-settlement"))
+            .await
+            .is_err()
+    );
+    let pending = store.pending_auxiliary_invocations().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].release_recorded);
+    assert_eq!(pending[0].process, Some(process()));
+}
+
+#[tokio::test]
+async fn verified_old_boot_settlement_requires_current_authority_and_atomic_audit() {
+    let (_dir, store, input, mut connection) = fixture().await;
+    sqlx::query("UPDATE recovery_authority SET authority_id=?")
+        .bind(binding().authority_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    store
+        .prepare_auxiliary_once(&input, audit("prepare"))
+        .await
+        .unwrap();
+    store
+        .bind_auxiliary_launch(&input, &binding(), audit("bind"))
+        .await
+        .unwrap();
+    store
+        .authorize_auxiliary_release(&input, &binding(), &process(), audit("release"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runtime_metadata SET boot_generation=2")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .settle_auxiliary_proof(
+                &input,
+                &binding(),
+                &process(),
+                1,
+                &proof(&input),
+                audit("stale-runtime")
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .settle_auxiliary_proof(
+                &input,
+                &binding(),
+                &process(),
+                2,
+                "{}",
+                audit("unbound-proof")
+            )
+            .await
+            .is_err()
+    );
+    sqlx::query("CREATE TRIGGER reject_aux_proof BEFORE INSERT ON audit_events WHEN NEW.kind='auxiliary.proof_settled' BEGIN SELECT RAISE(ABORT,'injected'); END;").execute(&mut connection).await.unwrap();
+    assert!(
+        store
+            .settle_auxiliary_proof(
+                &input,
+                &binding(),
+                &process(),
+                2,
+                &proof(&input),
+                audit("audit-failure")
+            )
+            .await
+            .is_err()
+    );
+    assert!(store.has_pending_auxiliary("task").await.unwrap());
+    sqlx::query("DROP TRIGGER reject_aux_proof")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    store
+        .settle_auxiliary_proof(
+            &input,
+            &binding(),
+            &process(),
+            2,
+            &proof(&input),
+            audit("settle"),
+        )
+        .await
+        .unwrap();
+    store
+        .settle_auxiliary_proof(
+            &input,
+            &binding(),
+            &process(),
+            2,
+            &proof(&input),
+            audit("settle-replay"),
+        )
+        .await
+        .unwrap();
+    assert!(!store.has_pending_auxiliary("task").await.unwrap());
+}

@@ -96,3 +96,8 @@ pub use unstarted_receipt::*;
 mod auxiliary_runner;
 #[cfg(unix)]
 pub use auxiliary_runner::*;
+
+#[cfg(unix)]
+mod auxiliary_client;
+#[cfg(unix)]
+pub use auxiliary_client::*;

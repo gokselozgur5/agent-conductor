@@ -27,7 +27,7 @@ pub struct AuxiliaryPreparation {
 }
 
 impl AuxiliaryPreparation {
-    fn validate(&self) -> Result<(), StoreError> {
+    pub(crate) fn validate(&self) -> Result<(), StoreError> {
         let uuid = uuid::Uuid::parse_str(&self.invocation_id).map_err(|_| invalid())?;
         let hash = |s: &str| {
             s.len() == 64
@@ -89,7 +89,7 @@ impl Store {
         if owned != 1 {
             return Err(invalid());
         }
-        sqlx::query("INSERT INTO auxiliary_invocations VALUES (?,?,?,?,?,'pending',?,NULL)")
+        sqlx::query("INSERT INTO auxiliary_invocations (invocation_id,task_id,execution_token,preparation_json,boot_generation,state,created_at_ms,settled_at_ms) VALUES (?,?,?,?,?,'pending',?,NULL)")
             .bind(&input.invocation_id)
             .bind(&input.task_id)
             .bind(&input.execution_token)
@@ -116,9 +116,12 @@ impl Store {
         let encoded = serde_json::to_string(input).map_err(|_| invalid())?;
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin().await?;
-        let row = sqlx::query("SELECT a.preparation_json,a.state,r.boot_generation FROM auxiliary_invocations a JOIN runtime_metadata r ON r.singleton=1 WHERE a.invocation_id=?")
+        let row = sqlx::query("SELECT a.preparation_json,a.state,a.launch_binding_json,r.boot_generation FROM auxiliary_invocations a JOIN runtime_metadata r ON r.singleton=1 WHERE a.invocation_id=?")
             .bind(&input.invocation_id).fetch_optional(&mut *tx).await?.ok_or_else(invalid)?;
-        if row.try_get::<String, _>("preparation_json")? != encoded
+        if row
+            .try_get::<Option<String>, _>("launch_binding_json")?
+            .is_some()
+            || row.try_get::<String, _>("preparation_json")? != encoded
             || row.try_get::<i64, _>("boot_generation")? != input.boot_generation
         {
             return Err(invalid());

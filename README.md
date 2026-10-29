@@ -71,7 +71,8 @@ Development gates:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo build --workspace
+CONDUCTOR_TEST_BIN_DIR="${CARGO_TARGET_DIR:-$PWD/target}/debug" cargo test --workspace --all-features
 ```
 
 ## Retained Python spike

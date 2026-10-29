@@ -37,11 +37,13 @@ jobs:
       - name: Run strict Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Run workspace tests
-        run: cargo test --workspace --all-features
-
       - name: Build operator integration binaries
         run: cargo build --workspace
+
+      - name: Run workspace tests
+        env:
+          CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
+        run: cargo test --workspace --all-features
 
       - name: Check operator recovery and publication refusals
         env:

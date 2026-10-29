@@ -10,7 +10,7 @@ use conductor_protocol::{CommandAppliedResponse, Request, Response};
 use conductor_runtime::{
     AdapterIdentity, AdapterKind, AttemptContract, CapabilityEnvelope, CheckDefinition,
     CheckOutcome, CheckReceipt, NetworkPolicy, ResumePacket, VendorPin, interpret_vendor_output,
-    native_vendor_command, run_process, snapshot_git,
+    native_vendor_command, snapshot_git,
 };
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::DirBuilderExt;
@@ -254,6 +254,7 @@ impl<C: Clock> PersistentControlService<C> {
                     token,
                     &check.id,
                     &CheckWorkspace {
+                        wrapper: plan.wrapper.clone(),
                         source: artifacts.join("source/tree"),
                         inventory: inventory.to_vec(),
                         destination: artifacts.join(format!("check-{index}")),
@@ -572,14 +573,18 @@ impl<C: Clock> PersistentControlService<C> {
             .map_err(|_| invalid("verifier adapter refused plan"))?;
         let (_sender, cancellation) = watch::channel(false);
         let usage_invocation = Uuid::now_v7().to_string();
-        let output = run_process(&spec, cancellation).await.map_err(|error| {
-            invalid(match error {
-                conductor_runtime::ProcessError::Timeout => "verifier deadline elapsed",
-                conductor_runtime::ProcessError::OutputLimit => "verifier output limit exceeded",
-                _ => "verifier execution failed",
-            })
-        })?;
-        self.finish_auxiliary(&invocation).await?;
+        let output = self
+            .supervise_auxiliary(&invocation, &spec, &plan.wrapper, cancellation)
+            .await?
+            .map_err(|error| {
+                invalid(match error {
+                    conductor_runtime::ProcessError::Timeout => "verifier deadline elapsed",
+                    conductor_runtime::ProcessError::OutputLimit => {
+                        "verifier output limit exceeded"
+                    }
+                    _ => "verifier execution failed",
+                })
+            })?;
         self.record_vendor_usage(&packet, "reviewer", &usage_invocation, &output.stdout)
             .await?;
         let candidate = interpret_vendor_output(&packet, &output)

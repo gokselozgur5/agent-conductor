@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 #[cfg(unix)]
 mod auxiliary;
+mod auxiliary_supervision;
 mod check_execution;
 #[cfg(unix)]
 mod checkpoint;
@@ -2420,7 +2421,7 @@ mod effect_tests {
         .await
         .unwrap();
         sqlx::query("INSERT INTO executions(effect_token,task_id,attempt_id,lease_epoch,runner_id,packet_json,packet_sha256,state,created_at_ms,updated_at_ms) SELECT token,task_id,attempt_id,lease_epoch,'fixture','{}','hash','fenced',0,0 FROM effect_intents").execute(&mut connection).await.unwrap();
-        sqlx::query("INSERT INTO auxiliary_invocations SELECT 'aux',task_id,effect_token,'{}',1,'pending',0,NULL FROM executions").execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO auxiliary_invocations (invocation_id,task_id,execution_token,preparation_json,boot_generation,state,created_at_ms,settled_at_ms) SELECT 'aux',task_id,effect_token,'{}',1,'pending',0,NULL FROM executions").execute(&mut connection).await.unwrap();
         assert!(!store.has_unfenced_execution("task").await.unwrap());
         for kind in [
             CommandKind::RequeueExpired,
@@ -3244,6 +3245,7 @@ mod effect_tests {
         use agent_conductor_domain::{CheckId, RequiredCheck, SourceIdentity};
         use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionUpdate};
         use conductor_runtime::{CheckDefinition, CheckOutcome, snapshot_paths};
+        use sqlx::Connection;
         for cancel in [false, true] {
             let (directory, store) = lifecycle_store().await;
             let service =
@@ -3370,7 +3372,24 @@ mod effect_tests {
                     .await
                     .unwrap();
             }
+            // This production-path test requires the matching workspace runner build.
+            let mut authority_connection = sqlx::SqliteConnection::connect(&format!(
+                "sqlite://{}",
+                directory.path().join("state.sqlite3").display()
+            ))
+            .await
+            .unwrap();
+            sqlx::query("UPDATE recovery_authority SET authority_id=?")
+                .bind("a".repeat(64))
+                .execute(&mut authority_connection)
+                .await
+                .unwrap();
             let workspace = CheckWorkspace {
+                wrapper: std::path::PathBuf::from(
+                    std::env::var("CONDUCTOR_TEST_BIN_DIR")
+                        .expect("build workspace binaries and set CONDUCTOR_TEST_BIN_DIR"),
+                )
+                .join("conductor-runner"),
                 source,
                 inventory,
                 destination: directory.path().join("check"),

@@ -69,24 +69,6 @@ impl<C: Clock> PersistentControlService<C> {
         }
         Ok(input)
     }
-
-    pub(super) async fn finish_auxiliary(
-        &self,
-        input: &AuxiliaryPreparation,
-    ) -> Result<(), StoreError> {
-        let id = Uuid::now_v7().to_string();
-        self.store
-            .settle_auxiliary(
-                input,
-                EffectAudit {
-                    id: &id,
-                    actor_id: "conductor-runtime",
-                    correlation_id: &input.invocation_id,
-                    now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
-                },
-            )
-            .await
-    }
 }
 fn invalid() -> StoreError {
     StoreError::Integrity("auxiliary invocation admission refused".into())

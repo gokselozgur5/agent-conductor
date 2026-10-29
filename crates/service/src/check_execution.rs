@@ -5,13 +5,14 @@ use agent_conductor_domain::{
     SourceIdentity, Task, TaskState,
 };
 use agent_conductor_store::{ExecutionState, PersistedTask, StoreError};
-use conductor_runtime::{CheckDefinition, CheckOutcome, CheckReceipt, ResumePacket, execute_check};
+use conductor_runtime::{CheckDefinition, CheckOutcome, CheckReceipt, ResumePacket, prepare_check};
 use std::path::PathBuf;
 use tokio::sync::watch;
 use uuid::Uuid;
 
 /// Trusted runtime-selected paths, never interpreted from vendor output.
 pub struct CheckWorkspace {
+    pub wrapper: PathBuf,
     pub source: PathBuf,
     pub inventory: Vec<String>,
     pub destination: PathBuf,
@@ -55,21 +56,27 @@ impl<C: Clock> PersistentControlService<C> {
                 &definition,
             )
             .await?;
-        let receipt = execute_check(
+        let prepared = prepare_check(
             &workspace.source,
             &workspace.inventory,
             &before.digest,
             &workspace.destination,
             &before.definition,
             &workspace.toolchain_roots,
-            cancellation,
         )
-        .await
         .map_err(|_| invalid("required check capture or isolation failed"))?;
+        let result = self
+            .supervise_auxiliary(
+                &invocation,
+                &prepared.spec,
+                &workspace.wrapper,
+                cancellation,
+            )
+            .await?;
+        let receipt = prepared.finish(result);
         if receipt.outcome == CheckOutcome::InfrastructureError {
             return Err(invalid("check process settlement is uncertain"));
         }
-        self.finish_auxiliary(&invocation).await?;
         let _guard = self.mutations.lock().await;
         let after = self.check_context(execution_token, check_id).await?;
         if before.task.version != after.task.version
