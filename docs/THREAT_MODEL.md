@@ -60,6 +60,10 @@ allowlisted environment construction, redaction tests, bounded context assembly,
 credential-free workers by default, secret-pattern preflight, and no transcript
 publication without explicit authority.
 
+For the implemented question/rationale boundary and its legacy-record limits,
+see [decision text privacy](DECISION_PRIVACY.md). This is one covered surface,
+not proof that every output and context field has been audited.
+
 ### Vendor drift changes lifecycle semantics
 
 A CLI update changes hooks, exit behavior, or session recovery. Control: pinned or

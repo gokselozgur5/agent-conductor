@@ -1,0 +1,26 @@
+# Decision text privacy
+
+The service applies the runtime's literal credential-shape redaction policy to
+decision questions and resolution rationales. New decision commands validate the
+original input before redaction. The original request hash remains the
+idempotency identity, so two different credentials cannot turn different
+requests into an identical replay merely because their display text matches.
+
+The sanitized decision text is used in the task mutation, audit payload and
+stored command response. Task reads, paginated/list views, replay responses and
+workflow context also sanitize legacy decision fields on output. Reading an old
+record does not rewrite that record. Source-finalization transactions use their
+authoritative task mutation, rather than rebuilding state from a display response.
+
+Only question and rationale text is transformed. Decision IDs, actors, versions,
+capabilities, source identities and packet hashes retain their existing meaning.
+This policy does not erase original operator plan files or historical database
+bytes, detect arbitrary secrets, or establish a complete privacy audit for other
+free-text fields, artifacts, logs and event payloads.
+
+Regression coverage includes a previously failing initial-decision canary,
+durable task/audit/outcome inspection, ordinary replay and conflicting requests
+whose redacted text is identical, oversized input refusal before redaction,
+legacy task/list/page/replay views without record mutation, and legacy decision
+context without authority expansion. Tests use synthetic canaries and no vendor
+credentials or model calls.

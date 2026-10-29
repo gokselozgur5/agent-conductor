@@ -129,7 +129,7 @@ impl<C: Clock> PersistentControlService<C> {
             };
             let request_json = serde_json::to_string(&(row.id.as_str(), &command))
                 .map_err(|_| invalid("source command serialization failed"))?;
-            let (batch, response) = self
+            let (batch, _) = self
                 .prepare_command_batch(
                     row.clone(),
                     command,
@@ -138,8 +138,15 @@ impl<C: Clock> PersistentControlService<C> {
                 )
                 .await
                 .map_err(|_| invalid("source lifecycle preparation failed"))?;
-            row.aggregate_json = serde_json::to_string(&response.task.aggregate)
-                .map_err(|_| invalid("source aggregate serialization failed"))?;
+            // Build the next transaction from authoritative state, never the
+            // display response (which may redact legacy decision text).
+            row.aggregate_json.clone_from(
+                &batch
+                    .task
+                    .as_ref()
+                    .ok_or_else(|| invalid("source lifecycle task mutation missing"))?
+                    .aggregate_json,
+            );
             batches.push(batch);
         }
         self.store.persist_sequence(&batches).await?;
