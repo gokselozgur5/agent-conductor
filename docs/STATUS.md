@@ -17,16 +17,22 @@ never substitutes for a successful check or verdict. See
 [AUXILIARY_PROCESS_OWNERSHIP.md](AUXILIARY_PROCESS_OWNERSHIP.md) for the contracts,
 fixtures and precise refusal paths.
 
-The schema-25 implementation passes 336 local workspace Rust tests and 73 Python
-tests, strict Clippy, formatting and build checks. Positive native boot changes
+The schema-25 implementation passes 337 local workspace Rust tests with the recovery
+diagnostic, strict Clippy, formatting and build checks. The earlier schema-25
+implementation passed 73 Python tests; this Rust-only diagnostic did not rerun
+that unchanged Python suite. Positive native boot changes
 remain synthetic tests; real same-boot observation and supervisor controls do
 not establish physical reboot acceptance. Hosted CI is currently refused before
 steps by the account payment/spending-limit check. Local tests do not resolve
 that external blocker or provide unrun Linux acceptance.
 
-Next acceptance work: complete the role-specific abrupt-death matrix, especially
-verifier pre-ACK and terminal-proof/result-publication boundaries; expose the
-remaining operator recovery state; finish physical host recovery, native
+Controlled native verifier pre-ACK and both terminal-proof/before-result
+publication crash boundaries now pass, with one continuation and no old-result
+publication. Nonlegacy pending ownership from another daemon generation is
+reported by a bounded `auxiliary_recovery_pending` invariant diagnostic.
+
+Next acceptance work: complete the remaining abrupt-death matrix and operator
+recovery reporting; finish physical host recovery, native
 endurance, privacy and supported-host/release checks. Keep the existing
 control-plane-only soak separate from full native/v1 acceptance. No automatic
 reboot, marker deletion, fabricated receipt or CI-policy bypass is authorized by

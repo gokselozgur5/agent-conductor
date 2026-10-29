@@ -234,3 +234,32 @@ async fn append_audit(
 fn invalid() -> StoreError {
     StoreError::Integrity("invalid auxiliary invocation ownership".into())
 }
+
+impl Store {
+    pub(crate) async fn auxiliary_recovery_diagnostic(
+        &self,
+    ) -> Result<Option<crate::RuntimeInvariantViolation>, StoreError> {
+        // One read snapshot supplies both the total and bounded details. Do not
+        // decode untrusted launch/preparation data or infer native settlement.
+        let rows = sqlx::query("SELECT substr(a.invocation_id,1,256) AS invocation_id,substr(a.task_id,1,256) AS task_id,a.boot_generation,r.boot_generation AS current_generation,COUNT(*) OVER() AS total FROM auxiliary_invocations a JOIN runtime_metadata r ON r.singleton=1 WHERE a.state='pending' AND r.boot_generation>0 AND a.boot_generation!=r.boot_generation AND NOT EXISTS(SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=a.task_id) ORDER BY a.invocation_id LIMIT 128")
+            .fetch_all(&self.inner.readers).await?;
+        let Some(first) = rows.first() else {
+            return Ok(None);
+        };
+        let total: i64 = first.try_get("total")?;
+        let generation: i64 = first.try_get("current_generation")?;
+        let mut invocations = Vec::with_capacity(rows.len());
+        for row in rows {
+            invocations.push(serde_json::json!({
+                "invocation_id": row.try_get::<String, _>("invocation_id")?,
+                "task_id": row.try_get::<String, _>("task_id")?,
+                "generation": row.try_get::<i64, _>("boot_generation")?,
+            }));
+        }
+        Ok(Some(crate::RuntimeInvariantViolation {
+            code: "auxiliary_recovery_pending".into(),
+            summary: "auxiliary ownership from another daemon generation remains unresolved; preserve state and artifacts until verified settlement; continuation and backup remain refused".into(),
+            context_json: serde_json::json!({"count":total,"current_generation":generation,"invocations":invocations,"limit":128}).to_string(),
+        }))
+    }
+}

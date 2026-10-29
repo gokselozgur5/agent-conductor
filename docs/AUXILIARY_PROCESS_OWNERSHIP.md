@@ -80,6 +80,31 @@ escaped-descendant containment. Keep sandbox enforcement and source immutability
 separate from process settlement. Neither a passing store test nor a passing
 short native run closes FR-6/NFR-1 or the seven-day requirement.
 
+## Recovery diagnostics
+
+`check-invariants` reports `auxiliary_recovery_pending` when a nonlegacy pending
+invocation belongs to a different persisted daemon generation. It reports the
+total count and at most 128 invocation/task IDs with their stored generation,
+plus the current generation. A single query supplies the count and sample.
+Preparation, launch, process, receipt and host JSON are never included or decoded
+for this diagnostic. Malformed ownership data cannot hide a pending row.
+
+Ordinary current-generation work is not flagged by this diagnostic. Legacy
+markers retain their separate report; settled invocations are excluded. This is
+an observation of unresolved persisted ownership, not proof of process liveness,
+a safe PID to signal, or permission to reboot. Preserve state and artifacts;
+continuation and backup remain refused until supported recovery verifies
+settlement. The diagnostic neither clears records nor changes recovery policy.
+
+Controlled native crash evidence additionally covers verifier pre-ACK and both
+roles after private terminal receipt publication but before terminal delivery and
+domain result publication. The terminal relay preserves the native wrapper PID.
+Each run completes with one automatic continuation, no old invocation result,
+settlement audited before replacement execution, unchanged original project files
+(excluding Git metadata), and stable completion after another daemon restart.
+These controlled boundaries do not establish the entire fault matrix or generic
+escaped-process containment.
+
 ## Auxiliary supervisor protocol candidate
 
 `conductor-runner --auxiliary INVOCATION_UUID` implements a separate bounded

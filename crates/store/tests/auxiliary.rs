@@ -904,6 +904,21 @@ async fn pending_recovery_remains_bounded_without_refusing_large_inventory() {
         input.invocation_id = uuid::Uuid::now_v7().to_string();
         sqlx::query("INSERT INTO auxiliary_invocations(invocation_id,task_id,execution_token,preparation_json,boot_generation,state,created_at_ms) VALUES(?,?,?,?,1,'pending',0)").bind(&input.invocation_id).bind(&id).bind(&id).bind(serde_json::to_string(&input).unwrap()).execute(&mut c).await.unwrap();
     }
+    c.execute("UPDATE runtime_metadata SET boot_generation=2")
+        .await
+        .unwrap();
+    let diagnostics = store.check_runtime_invariants().await.unwrap();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|v| v.code == "auxiliary_recovery_pending")
+        .unwrap();
+    let context: serde_json::Value = serde_json::from_str(&diagnostic.context_json).unwrap();
+    assert_eq!(context["count"], 130);
+    assert_eq!(context["invocations"].as_array().unwrap().len(), 128);
+    assert_eq!(context["limit"], 128);
+    c.execute("UPDATE runtime_metadata SET boot_generation=1")
+        .await
+        .unwrap();
     let first = store
         .pending_auxiliary_invocations()
         .await
@@ -1281,4 +1296,72 @@ async fn origin_settlement_refuses_foreign_changed_and_contradictory_evidence() 
         .unwrap();
         assert_eq!(n, 0);
     }
+}
+
+#[tokio::test]
+async fn old_auxiliary_uncertainty_is_visible_without_exposing_payloads() {
+    let (_dir, store, input, mut c) = fixture().await;
+    store
+        .prepare_auxiliary_once(&input, audit("prepare"))
+        .await
+        .unwrap();
+    let code = "auxiliary_recovery_pending";
+    assert!(
+        !store
+            .check_runtime_invariants()
+            .await
+            .unwrap()
+            .iter()
+            .any(|v| v.code == code)
+    );
+    c.execute("UPDATE runtime_metadata SET boot_generation=2; UPDATE auxiliary_invocations SET preparation_json=json_quote('private-invalid-payload')").await.unwrap();
+    let report = store.check_runtime_invariants().await.unwrap();
+    let item = report
+        .iter()
+        .find(|v| v.code == code)
+        .expect("old pending ownership must be visible");
+    assert!(!item.context_json.contains("private-invalid-payload"));
+    let context: serde_json::Value = serde_json::from_str(&item.context_json).unwrap();
+    assert_eq!(context["count"], 1);
+    assert_eq!(
+        context["invocations"][0]["invocation_id"],
+        input.invocation_id
+    );
+    assert_eq!(context["invocations"][0]["task_id"], "task");
+    assert_eq!(context["invocations"][0]["generation"], 1);
+    assert_eq!(context["current_generation"], 2);
+    assert!(store.has_pending_auxiliary("task").await.unwrap());
+    c.execute("UPDATE auxiliary_invocations SET boot_generation=3")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .check_runtime_invariants()
+            .await
+            .unwrap()
+            .iter()
+            .any(|v| v.code == code)
+    );
+    c.execute(
+        "INSERT INTO legacy_auxiliary_ownership VALUES('task','verification_without_invocation',0)",
+    )
+    .await
+    .unwrap();
+    assert!(
+        !store
+            .check_runtime_invariants()
+            .await
+            .unwrap()
+            .iter()
+            .any(|v| v.code == code)
+    );
+    c.execute("DELETE FROM legacy_auxiliary_ownership; UPDATE auxiliary_invocations SET state='settled',settled_at_ms=1").await.unwrap();
+    assert!(
+        !store
+            .check_runtime_invariants()
+            .await
+            .unwrap()
+            .iter()
+            .any(|v| v.code == code)
+    );
 }

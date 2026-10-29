@@ -835,6 +835,10 @@ impl Store {
             });
         }
 
+        if let Some(diagnostic) = self.auxiliary_recovery_diagnostic().await? {
+            violations.push(diagnostic);
+        }
+
         Ok(violations)
     }
 }
