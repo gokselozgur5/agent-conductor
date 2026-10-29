@@ -47,12 +47,19 @@ Exact source `ae57be781a847be423dc44009f22f0bb2d1f51a4` passed these actual Linu
 boundary and source-binding tests in [CI run 40948331899](https://github.com/gokselozgur5/agent-conductor/actions/runs/40948331899).
 The macOS regression job passed in the same run. Local strict Clippy checks also
 passed for both Linux x86_64 and arm64 targets. Compilation for an architecture
-is not runtime acceptance: Linux arm64 runtime and personal vendor reviewer
-acceptance still require their own evidence.
+is not runtime acceptance. Native arm64 evidence was subsequently obtained below;
+personal vendor reviewer acceptance remains a separate gate.
 
 The observed Linux runner was Ubuntu 26.04 x86_64 with bubblewrap package
 `0.11.1-1ubuntu0.3`. This is the tested host, not proof that every distribution
 or bubblewrap version supports the required features and namespace policy.
+
+Source `f8fb6b74925772df10bcc9119ba8208768fcfe92` passed the full native arm64 job
+in [CI run 40949494563](https://github.com/gokselozgur5/agent-conductor/actions/runs/40949494563),
+alongside macOS and Linux x86_64. The job explicitly verified `aarch64`, ran the
+isolated filesystem/socket/syscall/descriptor and source-binding tests, and passed
+the controlled receiving-worker test under UID 65534. This is runtime evidence
+on the selected hosted image, not personal vendor account acceptance.
 
 The upstream [bubblewrap manual](https://github.com/containers/bubblewrap/blob/main/bwrap.xml)
 defines the namespace, mount and seccomp options. Its
