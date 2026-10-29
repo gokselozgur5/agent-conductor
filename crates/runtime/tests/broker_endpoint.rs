@@ -309,6 +309,16 @@ async fn pinned_codex_image_outside_root_is_denied() {
 async fn pinned_codex_image_symlink_outside_root_is_denied() {
     codex_probe("image-symlink").await;
 }
+#[tokio::test]
+#[ignore = "requires pinned Codex; outside broker read canary never reaches model"]
+async fn pinned_codex_broker_outside_read_is_denied() {
+    codex_probe("broker-read-outside").await;
+}
+#[tokio::test]
+#[ignore = "requires pinned Codex; outside broker write never creates a file"]
+async fn pinned_codex_broker_outside_write_is_denied() {
+    codex_probe("broker-write-outside").await;
+}
 async fn codex_probe(mode: &str) {
     let root = private_tempdir();
     let directory = private_tempdir();
