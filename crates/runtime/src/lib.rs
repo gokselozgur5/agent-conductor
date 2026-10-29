@@ -1,5 +1,9 @@
 //! Execution contracts outside the lifecycle domain. Vendor output never grants authority.
+#[cfg(unix)]
+mod account_channel;
 mod contract;
+#[cfg(unix)]
+pub use account_channel::*;
 #[cfg(unix)]
 mod execution_account;
 #[cfg(unix)]
