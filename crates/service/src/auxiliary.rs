@@ -7,6 +7,33 @@ use std::path::Path;
 use uuid::Uuid;
 
 impl<C: Clock> PersistentControlService<C> {
+    /// Only for synchronous preparation that cannot spawn a supervisor/payload.
+    /// Never wrap the launch/session call or infer this result during recovery.
+    pub(super) async fn auxiliary_prelaunch_result<T>(
+        &self,
+        input: &AuxiliaryPreparation,
+        result: Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let id = Uuid::now_v7().to_string();
+                self.store
+                    .abandon_auxiliary_before_launch(
+                        input,
+                        EffectAudit {
+                            id: &id,
+                            actor_id: "conductor-runtime",
+                            correlation_id: &input.invocation_id,
+                            now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+                        },
+                    )
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
     pub(super) async fn begin_review_auxiliary(
         &self,
         task: &Task,

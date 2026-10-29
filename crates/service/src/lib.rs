@@ -3395,6 +3395,77 @@ mod effect_tests {
                 destination: directory.path().join("check"),
                 toolchain_roots: vec![],
             };
+            if !cancel {
+                for missing_wrapper in [false, true] {
+                    let failed_workspace = CheckWorkspace {
+                        wrapper: if missing_wrapper {
+                            directory.path().join("absent-runner")
+                        } else {
+                            workspace.wrapper.clone()
+                        },
+                        source: workspace.source.clone(),
+                        inventory: if missing_wrapper {
+                            workspace.inventory.clone()
+                        } else {
+                            vec!["absent-input".into()]
+                        },
+                        destination: directory.path().join(if missing_wrapper {
+                            "bad-wrapper"
+                        } else {
+                            "bad-capture"
+                        }),
+                        toolchain_roots: vec![],
+                    };
+                    let (_sender, receiver) = tokio::sync::watch::channel(false);
+                    assert!(
+                        service
+                            .execute_required_check(&token, "test", &failed_workspace, receiver)
+                            .await
+                            .is_err()
+                    );
+                    assert!(!store.has_pending_auxiliary("task").await.unwrap());
+                    let bound: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auxiliary_invocations WHERE launch_binding_json IS NOT NULL OR process_json IS NOT NULL OR release_recorded!=0").fetch_one(store.readers()).await.unwrap();
+                    assert_eq!(bound, 0);
+                    let row = store.task("task").await.unwrap().unwrap();
+                    let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+                    assert!(task.verification.unwrap().checks.is_empty());
+                }
+                let row = store.task("task").await.unwrap().unwrap();
+                let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+                let artifacts = directory.path().join("bad-review");
+                fs::create_dir_all(artifacts.join("review-input")).unwrap();
+                let source_identity = format!("snapshot:{digest}");
+                let invocation = service
+                    .begin_review_auxiliary(&task, &input.packet, &source_identity, &artifacts)
+                    .await
+                    .unwrap();
+                let baseline = snapshot_paths(
+                    &workspace.source,
+                    &directory.path().join("review-baseline-fixture"),
+                    &workspace.inventory,
+                )
+                .unwrap();
+                let prepared = crate::workflow_review::prepare_review(
+                    &artifacts,
+                    &baseline,
+                    &workspace.inventory,
+                    &source_identity,
+                );
+                assert!(
+                    service
+                        .auxiliary_prelaunch_result(&invocation, prepared)
+                        .await
+                        .is_err()
+                );
+                assert!(!store.has_pending_auxiliary("task").await.unwrap());
+                let abandoned: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM audit_events WHERE kind='auxiliary.not_launched'",
+                )
+                .fetch_one(store.readers())
+                .await
+                .unwrap();
+                assert_eq!(abandoned, 3);
+            }
             let (_sender, receiver) = tokio::sync::watch::channel(false);
             let execute = service.execute_required_check(&token, "test", &workspace, receiver);
             let interrupt = async {

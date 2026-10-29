@@ -112,15 +112,41 @@ impl Store {
         input: &AuxiliaryPreparation,
         audit: EffectAudit<'_>,
     ) -> Result<(), StoreError> {
+        self.settle_unbound_auxiliary(input, audit, "auxiliary.settled")
+            .await
+    }
+
+    /// Abandons an invocation before supervisor launch was bound.
+    /// The owning caller must know it has not attempted spawn; a missing PID or
+    /// a restart is not that evidence. This transaction excludes launch binding.
+    /// # Errors
+    /// Refuses stale generations, changed preparation or any launch/process state.
+    pub async fn abandon_auxiliary_before_launch(
+        &self,
+        input: &AuxiliaryPreparation,
+        audit: EffectAudit<'_>,
+    ) -> Result<(), StoreError> {
+        self.settle_unbound_auxiliary(input, audit, "auxiliary.not_launched")
+            .await
+    }
+
+    async fn settle_unbound_auxiliary(
+        &self,
+        input: &AuxiliaryPreparation,
+        audit: EffectAudit<'_>,
+        kind: &str,
+    ) -> Result<(), StoreError> {
         input.validate()?;
         let encoded = serde_json::to_string(input).map_err(|_| invalid())?;
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin().await?;
-        let row = sqlx::query("SELECT a.preparation_json,a.state,a.launch_binding_json,r.boot_generation FROM auxiliary_invocations a JOIN runtime_metadata r ON r.singleton=1 WHERE a.invocation_id=?")
+        let row = sqlx::query("SELECT a.preparation_json,a.state,a.launch_binding_json,a.process_json,a.release_recorded,r.boot_generation FROM auxiliary_invocations a JOIN runtime_metadata r ON r.singleton=1 WHERE a.invocation_id=?")
             .bind(&input.invocation_id).fetch_optional(&mut *tx).await?.ok_or_else(invalid)?;
         if row
             .try_get::<Option<String>, _>("launch_binding_json")?
             .is_some()
+            || row.try_get::<Option<String>, _>("process_json")?.is_some()
+            || row.try_get::<i64, _>("release_recorded")? != 0
             || row.try_get::<String, _>("preparation_json")? != encoded
             || row.try_get::<i64, _>("boot_generation")? != input.boot_generation
         {
@@ -132,7 +158,7 @@ impl Store {
         }
         sqlx::query("UPDATE auxiliary_invocations SET state='settled',settled_at_ms=? WHERE invocation_id=?")
             .bind(audit.now_ms).bind(&input.invocation_id).execute(&mut *tx).await?;
-        append_audit(&mut tx, input, "auxiliary.settled", &audit).await?;
+        append_audit(&mut tx, input, kind, &audit).await?;
         tx.commit().await?;
         Ok(())
     }

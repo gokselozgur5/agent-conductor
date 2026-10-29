@@ -82,43 +82,47 @@ impl<C: Clock> PersistentControlService<C> {
         cancellation: watch::Receiver<bool>,
     ) -> Result<Result<ProcessOutput, ProcessError>, StoreError> {
         let (authority, generation) = self.store.runtime_authority().await?;
-        if generation != self.boot_generation {
-            return Err(invalid());
-        }
-        let wrapper = wrapper.canonicalize().map_err(|_| invalid())?;
-        let parent = Path::new(&input.workspace)
-            .parent()
-            .ok_or_else(invalid)?
-            .canonicalize()
-            .map_err(|_| invalid())?;
-        let root = parent.join(format!("auxiliary-{}", input.invocation_id));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&root)
-            .map_err(|_| invalid())?;
-        let executable = spec.executable.canonicalize().map_err(|_| invalid())?;
-        let launch = AuxiliaryLaunch {
-            version: 1,
-            invocation_id: input.invocation_id.clone(),
-            authority_id: authority.ok_or_else(invalid)?,
-            boot_generation: generation,
-            receipt_root: root.clone(),
-            executable_sha256: file_hash(&executable)?,
-            executable,
-            arguments: spec.arguments.clone(),
-            directory: spec.directory.clone(),
-            environment: spec.environment.clone(),
-            timeout_ms: u64::try_from(spec.timeout.as_millis()).map_err(|_| invalid())?,
-            heartbeat_timeout_ms: 3000,
-            output_limit: spec.output_limit,
-        };
-        let binding = AuxiliaryLaunchBinding {
-            launch_sha256: launch.sha256().map_err(|_| invalid())?,
-            authority_id: launch.authority_id.clone(),
-            receipt_root: root.to_str().ok_or_else(invalid)?.into(),
-            wrapper_path: wrapper.to_str().ok_or_else(invalid)?.into(),
-            wrapper_sha256: file_hash(&wrapper)?,
-        };
+        let prepared = (|| {
+            if generation != self.boot_generation {
+                return Err(invalid());
+            }
+            let wrapper = wrapper.canonicalize().map_err(|_| invalid())?;
+            let parent = Path::new(&input.workspace)
+                .parent()
+                .ok_or_else(invalid)?
+                .canonicalize()
+                .map_err(|_| invalid())?;
+            let root = parent.join(format!("auxiliary-{}", input.invocation_id));
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .map_err(|_| invalid())?;
+            let executable = spec.executable.canonicalize().map_err(|_| invalid())?;
+            let launch = AuxiliaryLaunch {
+                version: 1,
+                invocation_id: input.invocation_id.clone(),
+                authority_id: authority.ok_or_else(invalid)?,
+                boot_generation: generation,
+                receipt_root: root.clone(),
+                executable_sha256: file_hash(&executable)?,
+                executable,
+                arguments: spec.arguments.clone(),
+                directory: spec.directory.clone(),
+                environment: spec.environment.clone(),
+                timeout_ms: u64::try_from(spec.timeout.as_millis()).map_err(|_| invalid())?,
+                heartbeat_timeout_ms: 3000,
+                output_limit: spec.output_limit,
+            };
+            let binding = AuxiliaryLaunchBinding {
+                launch_sha256: launch.sha256().map_err(|_| invalid())?,
+                authority_id: launch.authority_id.clone(),
+                receipt_root: root.to_str().ok_or_else(invalid)?.into(),
+                wrapper_path: wrapper.to_str().ok_or_else(invalid)?.into(),
+                wrapper_sha256: file_hash(&wrapper)?,
+            };
+            Ok((wrapper, launch, binding))
+        })();
+        let (wrapper, launch, binding) = self.auxiliary_prelaunch_result(input, prepared).await?;
         let id = Uuid::now_v7().to_string();
         if !self
             .store

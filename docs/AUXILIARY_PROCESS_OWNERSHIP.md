@@ -32,8 +32,12 @@ and continuation refuse pending auxiliary ownership independently of writer fenc
 
 This remains intermediate issue acceptance. Pre-acknowledgement crashes have no
 persisted observed process identity, so their receipts remain unresolved rather
-than inventing an ACK. Capture/admission failures before a bound supervisor also
-need a precise no-launch settlement path. Legacy schema-19 verification work and
+than inventing an ACK. Synchronous capture, review preparation and launch-definition failures now
+settle an unbound invocation with an `auxiliary.not_launched` audit in the same
+owning runtime. The transaction refuses any launch binding, process identity,
+release authorization or changed generation. It cannot be used as restart proof;
+audit failure preserves pending ownership. Errors after launch binding still
+require the separate supervisor evidence path. Legacy schema-19 verification work and
 schema-20 pending invocations lack supervisor metadata and require an explicit
 migration policy before deployment. Complete boundary coverage, operator/invariant reporting and host recovery
 remain required. Actual native crash controls now cover both a running required

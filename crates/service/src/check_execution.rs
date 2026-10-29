@@ -64,7 +64,10 @@ impl<C: Clock> PersistentControlService<C> {
             &before.definition,
             &workspace.toolchain_roots,
         )
-        .map_err(|_| invalid("required check capture or isolation failed"))?;
+        .map_err(|_| invalid("required check capture or isolation failed"));
+        let prepared = self
+            .auxiliary_prelaunch_result(&invocation, prepared)
+            .await?;
         let result = self
             .supervise_auxiliary(
                 &invocation,

@@ -438,3 +438,97 @@ async fn verified_old_boot_settlement_requires_current_authority_and_atomic_audi
         .unwrap();
     assert!(!store.has_pending_auxiliary("task").await.unwrap());
 }
+
+#[tokio::test]
+async fn no_launch_abandonment_requires_current_unbound_owner_and_atomic_audit() {
+    let (_dir, store, preparation, mut connection) = fixture().await;
+    store
+        .prepare_auxiliary_once(&preparation, audit("prepare"))
+        .await
+        .unwrap();
+    connection.execute("CREATE TRIGGER reject_no_launch BEFORE INSERT ON audit_events WHEN NEW.kind='auxiliary.not_launched' BEGIN SELECT RAISE(ABORT,'injected'); END;").await.unwrap();
+    assert!(
+        store
+            .abandon_auxiliary_before_launch(&preparation, audit("failed"))
+            .await
+            .is_err()
+    );
+    assert!(store.has_pending_auxiliary("task").await.unwrap());
+    connection
+        .execute("DROP TRIGGER reject_no_launch; UPDATE runtime_metadata SET boot_generation=2;")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .abandon_auxiliary_before_launch(&preparation, audit("stale"))
+            .await
+            .is_err()
+    );
+    connection
+        .execute("UPDATE runtime_metadata SET boot_generation=1;")
+        .await
+        .unwrap();
+    let mut changed = preparation.clone();
+    changed.definition_sha256 = "c".repeat(64);
+    assert!(
+        store
+            .abandon_auxiliary_before_launch(&changed, audit("changed"))
+            .await
+            .is_err()
+    );
+    store
+        .abandon_auxiliary_before_launch(&preparation, audit("abandon"))
+        .await
+        .unwrap();
+    store
+        .abandon_auxiliary_before_launch(&preparation, audit("replay"))
+        .await
+        .unwrap();
+    assert!(!store.has_pending_auxiliary("task").await.unwrap());
+    assert!(
+        !store
+            .prepare_auxiliary_once(&preparation, audit("no-respawn"))
+            .await
+            .unwrap()
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE kind='auxiliary.not_launched'")
+            .fetch_one(store.readers())
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+
+    for column in ["launch_binding_json", "process_json", "release_recorded"] {
+        let mut next = preparation.clone();
+        next.invocation_id = uuid::Uuid::now_v7().to_string();
+        store
+            .prepare_auxiliary_once(&next, audit(column))
+            .await
+            .unwrap();
+        let value = if column == "release_recorded" {
+            "1"
+        } else {
+            "'{}'"
+        };
+        sqlx::query(&format!(
+            "UPDATE auxiliary_invocations SET {column}={value} WHERE invocation_id=?"
+        ))
+        .bind(&next.invocation_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        assert!(
+            store
+                .abandon_auxiliary_before_launch(&next, audit("refuse-bound"))
+                .await
+                .is_err()
+        );
+        assert!(store.has_pending_auxiliary("task").await.unwrap());
+        // Restore this synthetic corruption before testing the next independent gate.
+        sqlx::query("DELETE FROM auxiliary_invocations WHERE invocation_id=?")
+            .bind(&next.invocation_id)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+    }
+}
