@@ -1,20 +1,23 @@
 use super::*;
 
+const SUPERVISION_SCENARIOS: [&str; 12] = [
+    "success",
+    "nonzero",
+    "revoked",
+    "sender-lost",
+    "expires",
+    "live-revoked",
+    "live-lost",
+    "live-invalid-deadline",
+    "close-fails",
+    "proxy-eof",
+    "proxy-eof-revoked",
+    "proxy-eof-close-fails",
+];
+
 #[tokio::test]
 async fn owned_vendor_supervision_separates_process_exit_and_broker_closure() {
-    for mode in [
-        "success",
-        "nonzero",
-        "revoked",
-        "sender-lost",
-        "expires",
-        "live-revoked",
-        "live-lost",
-        "close-fails",
-        "proxy-eof",
-        "proxy-eof-revoked",
-        "proxy-eof-close-fails",
-    ] {
+    for mode in SUPERVISION_SCENARIOS {
         let setup = native_launch_setup(false).await;
         let hash = conductor_runtime::binary_sha256(&setup.wrapper).unwrap();
         let acknowledged = crate::prepare_native_broker(
@@ -73,6 +76,12 @@ async fn owned_vendor_supervision_separates_process_exit_and_broker_closure() {
             .unwrap();
             if mode == "live-revoked" {
                 authority.as_ref().unwrap().send(None).unwrap();
+            } else if mode == "live-invalid-deadline" {
+                authority
+                    .as_ref()
+                    .unwrap()
+                    .send(Some(setup.launch.maximum_deadline_ms + 1))
+                    .unwrap();
             } else {
                 drop(authority.take());
             }

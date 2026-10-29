@@ -61,12 +61,15 @@ impl NativeBrokerSession {
                 let deadline = *lease.borrow_and_update();
                 let valid = match (deadline, continuous_millis()) {
                     (Some(deadline), Ok(now)) if deadline > now && lease.has_changed().is_ok() => {
-                        if self.renew(deadline).await.is_err() {
-                            return self
-                                .settle_vendor(process.as_mut(), lease, cancel, event)
-                                .await;
+                        match self.renew(deadline).await {
+                            Ok(()) => true,
+                            Err(BrokerError::Refused | BrokerError::Uncertain) => {
+                                return self
+                                    .settle_vendor(process.as_mut(), lease, cancel, event)
+                                    .await;
+                            }
+                            Err(_) => false,
                         }
-                        true
                     }
                     _ => false,
                 };
