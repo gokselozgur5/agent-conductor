@@ -28,8 +28,13 @@ class OperatorProfileTests(unittest.TestCase):
             objective.write_text('Create the requested file.')
             checks = root / 'checks.json'
             checks.write_text('[]')
-            for task, selected in [('full', profile), ('legacy', None)]:
+            target = dict(socket='/receiver-private/control.sock',
+                          artifacts='/receiver-private/artifacts')
+            for task, selected in [('full', profile), ('legacy', None), ('account', profile)]:
                 value = dict(worker=pin, verifier=pin, model_timeout_ms=1000)
+                if task == 'account':
+                    value['worker'] = dict(pin, executable='/receiver-private/vendor')
+                    value['account_worker'] = target
                 if selected is not None:
                     value['full_capability'] = selected
                 template.write_text(json.dumps(value))
@@ -38,6 +43,10 @@ class OperatorProfileTests(unittest.TestCase):
                                 '--objective-file', str(objective), '--checks-file', str(checks)],
                                check=True, capture_output=True, timeout=10)
                 generated = json.loads((root / 'plans' / f'{task}.json').read_text())
+                if task == 'account':
+                    self.assertEqual(generated['account_worker'], target)
+                    self.assertEqual(generated['worker']['executable'], '/receiver-private/vendor')
+                    self.assertEqual(generated['verifier'], pin)
                 if selected is not None:
                     self.assertEqual(generated['full_capability'], selected)
                 else:

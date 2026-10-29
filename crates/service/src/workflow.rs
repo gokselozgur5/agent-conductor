@@ -20,6 +20,9 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeWorkflowPlan {
+    /// Optional persistent receiving-account endpoint. Authentication stays there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_worker: Option<crate::AccountWorkerTarget>,
     /// Explicit machine-wide execution under this OS account's own credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_capability: Option<conductor_runtime::FullCapabilityProfile>,
@@ -86,6 +89,11 @@ struct Assignment {
     epoch: u64,
 }
 
+struct WorkflowCapture<'a> {
+    baseline: &'a conductor_runtime::SnapshotManifest,
+    artifacts: &'a std::path::Path,
+}
+
 impl<C: Clock> PersistentControlService<C> {
     /// Runs one explicitly authorized native task through existing lifecycle
     /// ports. Original project files are never edited or merged. Authentication
@@ -99,6 +107,9 @@ impl<C: Clock> PersistentControlService<C> {
         verifier_authentication: BTreeMap<String, String>,
     ) -> Result<WorkflowOutcome, StoreError> {
         validate_plan(plan)?;
+        if plan.account_worker.is_some() && !worker_authentication.is_empty() {
+            return Err(invalid("account worker uses its own authentication"));
+        }
         if plan.wake_subscription.is_some()
             && self.store.workflow_trigger(&plan.task_id).await?.is_none()
         {
@@ -158,7 +169,10 @@ impl<C: Clock> PersistentControlService<C> {
         } else {
             None
         };
-        let workspace = artifacts.join("work/tree");
+        let workspace = plan.account_worker.as_ref().map_or_else(
+            || artifacts.join("work/tree"),
+            crate::AccountWorkerTarget::workspace,
+        );
         let advisory_context = advisory_context(plan)?;
         let Assignment {
             worker_id,
@@ -190,16 +204,17 @@ impl<C: Clock> PersistentControlService<C> {
             checkpoint: checkpoint.or_else(|| continuing.then(|| "No accepted structured checkpoint is available. Inspect retained unfinished work; preserve existing files and satisfy the original objective.".into())),
             untrusted_context,
         };
-        let candidate = self
-            .execute_workflow_writer(plan, &worker_pin, &packet, &token, worker_authentication)
-            .await?;
-        let baseline_paths = manifest_inventory(&baseline.manifest);
         let captured = self
-            .finalize_native_source(
+            .capture_workflow_writer(
+                plan,
+                &worker_pin,
+                &packet,
                 &token,
-                &candidate,
-                &artifacts.join("source"),
-                &baseline_paths,
+                WorkflowCapture {
+                    baseline: &baseline.manifest,
+                    artifacts: &artifacts,
+                },
+                worker_authentication,
             )
             .await?;
         let source = format!(
@@ -235,6 +250,45 @@ impl<C: Clock> PersistentControlService<C> {
             checks: receipts,
             artifacts,
         })
+    }
+
+    async fn capture_workflow_writer(
+        &self,
+        plan: &NativeWorkflowPlan,
+        worker_pin: &VendorPin,
+        packet: &ResumePacket,
+        token: &str,
+        capture: WorkflowCapture<'_>,
+        worker_authentication: BTreeMap<String, String>,
+    ) -> Result<conductor_runtime::SnapshotManifest, StoreError> {
+        let WorkflowCapture {
+            baseline,
+            artifacts,
+        } = capture;
+        let baseline_paths = manifest_inventory(baseline);
+        if plan.account_worker.is_some() {
+            if !worker_authentication.is_empty() {
+                return Err(invalid("account worker uses its own authentication"));
+            }
+            self.stage_workflow_account(plan, packet, baseline, artifacts)
+                .await?;
+            self.start_workflow_writer(plan, packet, token).await?;
+            self.execute_account_workflow_writer(
+                plan, worker_pin, packet, token, baseline, artifacts,
+            )
+            .await
+        } else {
+            let candidate = self
+                .execute_workflow_writer(plan, worker_pin, packet, token, worker_authentication)
+                .await?;
+            self.finalize_native_source(
+                token,
+                &candidate,
+                &artifacts.join("source"),
+                &baseline_paths,
+            )
+            .await
+        }
     }
 
     async fn execute_workflow_checks(
@@ -316,6 +370,37 @@ impl<C: Clock> PersistentControlService<C> {
         // Validate before claiming the external effect; launch revalidates the pin.
         conductor_runtime::native_writer_launch(worker_pin, packet, worker_authentication.clone())
             .map_err(|_| invalid("worker adapter refused plan"))?;
+        self.start_workflow_writer(plan, packet, token).await?;
+        let (record, connection) = self
+            .launch_native_execution(
+                &plan.wrapper,
+                worker_pin,
+                packet,
+                worker_authentication,
+                token,
+                "native-workflow",
+            )
+            .await?;
+        let (_, candidate) = self
+            .await_native_execution(
+                token,
+                record
+                    .wrapper_identity
+                    .as_deref()
+                    .ok_or_else(|| invalid("wrapper identity absent"))?,
+                packet,
+                connection,
+            )
+            .await?;
+        Ok(candidate)
+    }
+
+    async fn start_workflow_writer(
+        &self,
+        plan: &NativeWorkflowPlan,
+        packet: &ResumePacket,
+        token: &str,
+    ) -> Result<(), StoreError> {
         let now = self.clock.read(self.boot_generation).wall_unix_ms;
         let audit_id = Uuid::now_v7().to_string();
         self.store
@@ -342,28 +427,7 @@ impl<C: Clock> PersistentControlService<C> {
             "start",
         )
         .await?;
-        let (record, connection) = self
-            .launch_native_execution(
-                &plan.wrapper,
-                worker_pin,
-                packet,
-                worker_authentication,
-                token,
-                "native-workflow",
-            )
-            .await?;
-        let (_, candidate) = self
-            .await_native_execution(
-                token,
-                record
-                    .wrapper_identity
-                    .as_deref()
-                    .ok_or_else(|| invalid("wrapper identity absent"))?,
-                packet,
-                connection,
-            )
-            .await?;
-        Ok(candidate)
+        Ok(())
     }
 
     async fn register_workflow_project(
@@ -739,6 +803,12 @@ fn writer_authority(plan: &NativeWorkflowPlan, workspace: PathBuf) -> Capability
 }
 
 pub(super) fn validate_plan(plan: &NativeWorkflowPlan) -> Result<(), StoreError> {
+    if let Some(target) = &plan.account_worker {
+        target.validate()?;
+        if plan.full_capability.is_none() {
+            return Err(invalid("account worker requires full capability profile"));
+        }
+    }
     advisory_context(plan)?;
     conductor_runtime::read_approved_instruction_sources(&plan.instructions)
         .map_err(|_| invalid("approved instruction source changed or unavailable"))?;
@@ -845,6 +915,7 @@ mod tests {
             conformance_sha256: "b".repeat(64),
         };
         NativeWorkflowPlan {
+            account_worker: None,
             full_capability: None,
             wake_subscription: None,
             depends_on: vec![],
@@ -893,6 +964,19 @@ mod tests {
         assert_eq!(authority.network, NetworkPolicy::Unrestricted);
         assert_eq!(authority.write_roots, vec![PathBuf::from("/")]);
         assert!(authority.allow_workspace_commands);
+        selected.account_worker = Some(crate::AccountWorkerTarget {
+            socket: "/receiver-private/worker.sock".into(),
+            artifacts: "/receiver-private/artifacts".into(),
+        });
+        validate_plan(&selected).unwrap();
+        let restored: NativeWorkflowPlan =
+            serde_json::from_slice(&serde_json::to_vec(&selected).unwrap()).unwrap();
+        assert_eq!(
+            restored.account_worker.unwrap().socket,
+            PathBuf::from("/receiver-private/worker.sock")
+        );
+        selected.full_capability = None;
+        assert!(validate_plan(&selected).is_err());
     }
 
     #[test]

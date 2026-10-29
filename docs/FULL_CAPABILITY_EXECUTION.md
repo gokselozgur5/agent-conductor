@@ -163,3 +163,36 @@ while its recorded digest agrees with the task's selected source; blocked record
 lose that eligibility. Reporting alone does not permit capture-based checks.
 Schema 32 persists these separate report/import bindings. This service composition
 does not yet select account transport in the normal daemon workflow.
+
+### Normal workflow selection of an account worker
+
+A native workflow plan may select an existing receiving-account endpoint:
+
+```json
+"account_worker": {
+  "socket": "/shared/worker/control.sock",
+  "artifacts": "/Users/worker/codex/conductor-artifacts"
+}
+```
+
+This requires `full_capability` with the receiving account's exact identity.
+Start `conductor-runner --account-worker SOCKET COORDINATOR_UID` as that account.
+The endpoint parent and artifact directory must already be owned and accessible
+as required by that account; Conductor does not create OS accounts, change HOME
+permissions, or copy credentials. Socket paths must fit the native socket limit.
+The worker uses its own HOME and existing vendor login. Its pinned executable
+path is resolved and hashed by the receiver before ACK; the coordinator still
+validates the independent verifier's local executable.
+
+Normal `conductor plan`, package generation, submission and daemon dispatch
+preserve this selection. Dispatch stages the exact baseline, records ACK before
+Release, waits with lease renewal, imports the candidate, runs required checks,
+and requests independent verification. Live workspace polling skips account
+workspaces; imported snapshots supply final file events. Dependent tasks use
+the accepted coordinator-side snapshot, never a mutable receiving-account tree.
+Operator-pinned instruction paths must be readable by both selected accounts.
+
+A successful peer report is not a local process-exit or write-fence receipt.
+The account execution remains Started/unfenced after candidate acceptance.
+Started-worker interruption/restart recovery and proof using a second OS UID
+remain separate delivery gates.

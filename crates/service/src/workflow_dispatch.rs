@@ -61,6 +61,11 @@ impl<C: Clock> PersistentControlService<C> {
                 } else {
                     codex_auth
                 };
+                let worker_auth = if plan.account_worker.is_some() {
+                    BTreeMap::new()
+                } else {
+                    worker_auth
+                };
                 let execution = if let Some(version) = job.resume_version {
                     self.continue_native_workflow(
                         &plan,
