@@ -36,7 +36,16 @@ pub enum VendorError {
 pub fn native_vendor_command(
     pin: &VendorPin,
     packet: &ResumePacket,
+    authentication_environment: BTreeMap<String, String>,
+) -> Result<ProcessSpec, VendorError> {
+    vendor_command(pin, packet, authentication_environment, false)
+}
+
+pub(crate) fn vendor_command(
+    pin: &VendorPin,
+    packet: &ResumePacket,
     mut authentication_environment: BTreeMap<String, String>,
+    broker_only: bool,
 ) -> Result<ProcessSpec, VendorError> {
     packet.validate().map_err(|_| VendorError::Identity)?;
     let contract = &packet.contract;
@@ -72,7 +81,8 @@ pub fn native_vendor_command(
     }
     let writable = !contract.authority.write_roots.is_empty();
     if (pin.kind == AdapterKind::Claude && contract.authority.allow_workspace_commands)
-        || (pin.kind == AdapterKind::Codex && !contract.authority.allow_workspace_commands)
+        || (pin.kind == AdapterKind::Codex
+            && contract.authority.allow_workspace_commands == broker_only)
     {
         return Err(VendorError::Capability);
     }
@@ -110,7 +120,7 @@ pub fn native_vendor_command(
             "1".into(),
         );
     }
-    let arguments = vendor_arguments(pin.kind, writable, prompt, &root)?;
+    let arguments = vendor_arguments(pin.kind, writable && !broker_only, prompt, &root)?;
     Ok(ProcessSpec {
         executable: pin.executable.clone(),
         arguments,

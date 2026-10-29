@@ -781,3 +781,44 @@ interruptions. Transport EOF alone leaves ownership open. The SQLx transaction
 owner preserves rollback on journal cancellation; already committed effects are
 retained. These controls do not establish vendor confinement, external-effect
 settlement, physical reboot or long-running operational acceptance.
+
+
+## Prepared vendor command and session handoff (issue #102)
+
+`codex_broker_tool_options` validates the canonical proxy path and approved binary
+hash, then emits a fixed two-tool MCP allow list with per-tool approval and a
+prompting server default. The capability value is not accepted by this builder.
+`broker_codex_command` validates the unchanged frozen packet and vendor pin,
+requires command-free scoped write authority, and configures read-only direct
+filesystem access plus the broker tools. Generic native writer admission still
+refuses Codex; command construction is not confinement proof.
+
+`PreparedBrokerVendor` performs binary hashing and command preparation before
+Release. Hashing a large vendor executable after Release can exhaust the broker
+lease before supervision begins. The session consumes this immutable preparation,
+checks the persisted packet hash and task/attempt/epoch/root, and requires an open
+broker with zero operations. Only then does it issue the handoff in child
+environment, once. Changed packets, repeated issuance and cancellation refuse.
+Callers must prevent executable replacement through eventual spawn.
+
+Opt-in tests use the exact Codex0.163.0 binary and a deterministic local provider.
+The real CLI consumes the generated policy and complete command: discovery,
+approved read/write and unapproved zero-operation controls pass. A separate
+owned-service regression uses actual Ready/ACK, journal registration, owner and
+Release, records two operations in SQLite, verifies file bytes and the private
+shutdown receipt, then reopens the database and confirms closed ownership.
+Initial task/conformance identities and provider output are fixture-controlled;
+these are not live inference, native daemon dispatch or OS confinement acceptance.
+
+A proxy may close normally before the Codex process exits. Renewal failure does
+not certify shutdown: the integration control still requires independently
+verified session finish and durable closure. The initial post-release hash failure
+and renewal-after-normal-exit fixture failure remain retained as failed evidence.
+
+
+The measured CLI catalog also contains `view_image`, MCP resource discovery/read,
+goal controls and user-input tools. A two-tool MCP allow list is not a two-tool
+whole-model catalog. Their effects and outside-root access still require explicit
+conformance/OS denial controls before native writer admission. The current tests
+assert absence of command tools and correct broker tools; they do not certify all
+remaining built-in tools as harmless.
