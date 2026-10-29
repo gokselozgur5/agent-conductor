@@ -40,6 +40,14 @@ observed process state accurately.
   It still waits for a durably recorded acknowledgement and a current lease
   before launching. This is receiving-account command preparation; the current
   dispatcher still launches locally and does not yet select a cross-account channel.
+- The runtime's same-host account channel authenticates both kernel peer UIDs
+  and binds one connection to an exact packet hash. It requires an existing
+  receiver-owned directory that the coordinator can traverse; it never changes
+  account credentials or directory permissions. Socket admission alone grants
+  neither execution nor a process identity or fence. Snapshot bytes can cross
+  this channel with the existing independently pinned manifest verification.
+  Native dispatch/process binding and remote-workspace capture are not yet wired
+  to it; same-UID tests do not establish a distinct-account deployment.
 - A successful unrestricted exit can publish a source snapshot for independent
   checks and review. Its execution remains `exited`, not `fenced`. The transactional
   capture-eligibility view admits auxiliary work only for this exact normally
