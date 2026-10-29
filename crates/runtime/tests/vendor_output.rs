@@ -215,3 +215,39 @@ fn durable_receipt_is_private_bound_and_never_overwrites_evidence() {
     write_terminal_receipt(&input, &event).unwrap();
     assert!(read_terminal_receipt(&input).is_err());
 }
+
+#[test]
+fn codex_preflight_diagnostics_never_replace_terminal_success() {
+    use serde_json::json;
+    let packet = packet(AdapterKind::Codex);
+    let diagnostic = json!({"type":"item.completed","item":{"type":"error","message":"Model metadata unavailable; fallback selected"}});
+    let mut events = codex();
+    events.insert(1, diagnostic.clone());
+    let result = interpret_vendor_output(&packet, &output(&events)).unwrap();
+    assert_eq!(result.preflight_diagnostics, 1);
+    assert_eq!(result.text, "candidate change");
+    assert!(!result.file_only_tools);
+    assert!(!format!("{result:?}").contains("fallback"));
+    for mode in 0..7 {
+        let mut events = events.clone();
+        match mode {
+            0 => events[1]["item"]["message"] = json!(null),
+            1 => events[1]["item"]["message"] = json!(" "),
+            2 => {
+                events.remove(1);
+                events.insert(3, diagnostic.clone());
+            }
+            3 => events[4] = json!({"type":"turn.failed","error":{"message":"failed"}}),
+            4 => events[1] = json!({"type":"error","message":"failed"}),
+            5 => {
+                events.pop();
+            }
+            6 => events[3] = diagnostic.clone(),
+            _ => unreachable!(),
+        }
+        assert!(
+            interpret_vendor_output(&packet, &output(&events)).is_err(),
+            "{mode}"
+        );
+    }
+}

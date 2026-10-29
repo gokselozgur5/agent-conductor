@@ -11,6 +11,8 @@ pub struct VendorCandidate {
     pub text: String,
     pub event_count: usize,
     pub failed_tools: usize,
+    /// Nonterminal Codex diagnostics observed before the turn began.
+    pub preflight_diagnostics: usize,
     /// Observed restricted Claude tool envelope; not an OS fence by itself.
     pub file_only_tools: bool,
 }
@@ -21,6 +23,7 @@ impl std::fmt::Debug for VendorCandidate {
             .field("output_sha256", &self.output_sha256)
             .field("event_count", &self.event_count)
             .field("failed_tools", &self.failed_tools)
+            .field("preflight_diagnostics", &self.preflight_diagnostics)
             .finish_non_exhaustive()
     }
 }
@@ -94,6 +97,7 @@ pub fn interpret_vendor_output(
         text: state.text,
         event_count: state.events,
         failed_tools: state.failed_tools,
+        preflight_diagnostics: state.preflight_diagnostics,
         file_only_tools: state.tool_init == Some(true) && !state.non_file_tool,
     })
 }
@@ -103,6 +107,7 @@ struct StreamState {
     terminal: bool,
     text: String,
     failed_tools: usize,
+    preflight_diagnostics: usize,
     turn_started: bool,
     tool_init: Option<bool>,
     non_file_tool: bool,
@@ -191,6 +196,20 @@ impl StreamState {
                             .and_then(Value::as_str)
                             .ok_or(VendorOutputError::Protocol)?
                             .into();
+                    }
+                    // Pinned Codex emits model-metadata warnings before a turn
+                    // as completed error items. Retain their count, never their
+                    // text as a candidate or authority. A successful complete
+                    // turn is still required; in-turn errors remain refused.
+                    Some("error") if !self.turn_started => {
+                        if item
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .is_none_or(|message| message.trim().is_empty())
+                        {
+                            return Err(VendorOutputError::Protocol);
+                        }
+                        self.preflight_diagnostics += 1;
                     }
                     Some("command_execution") => {
                         if item.get("exit_code").and_then(Value::as_i64) != Some(0) {
