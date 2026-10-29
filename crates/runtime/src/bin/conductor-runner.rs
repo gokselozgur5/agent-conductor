@@ -163,18 +163,46 @@ async fn serve_account_worker(arguments: &[String]) -> Result<(), ()> {
         let Ok((stream, digest)) = admitted else {
             continue;
         };
-        let (input, output) = stream.into_split();
-        // A protocol failure closes this connection; no automatic attempt replay.
-        let _ = serve_io(
-            true,
-            true,
-            None,
-            Some(digest),
-            BufReader::new(input),
-            output,
-        )
-        .await;
+        let _ = dispatch_account_request(stream, digest).await;
     }
+}
+
+async fn dispatch_account_request(
+    stream: tokio::net::UnixStream,
+    digest: String,
+) -> Result<(), ()> {
+    let mut reader = BufReader::new(stream);
+    let mut bytes = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_frame(&mut reader, MAX_PACKET_BYTES),
+    )
+    .await
+    .map_err(|_| ())??;
+    if let Ok(request) = serde_json::from_slice::<conductor_runtime::AccountSnapshotRequest>(&bytes)
+    {
+        let prefetched = reader.buffer().to_vec();
+        return conductor_runtime::receive_account_snapshot(
+            reader.into_inner(),
+            prefetched,
+            request,
+            &digest,
+        )
+        .await
+        .map_err(|_| ());
+    }
+    // BufReader can have read payload/control bytes past the JSON newline.
+    // Replay that exact prefix into the existing native protocol, losing none.
+    bytes.extend_from_slice(reader.buffer());
+    let (input, output) = reader.into_inner().into_split();
+    serve_io(
+        true,
+        true,
+        None,
+        Some(digest),
+        BufReader::new(std::io::Cursor::new(bytes).chain(input)),
+        output,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines)]
