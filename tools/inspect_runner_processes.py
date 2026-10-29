@@ -171,6 +171,74 @@ def process_binding(raw, pid, start, host):
         return 'invalid_recorded_process'
 
 
+def recorded_observations(db, authority, host, deadline):
+    """Observe stored PIDs separately; never manufacture a missing observed tag."""
+    if host is None:
+        return dict(status='host_reader_required', observations=[])
+    columns = {row[1] for row in db.execute('pragma table_info(executions)')}
+    if 'process_json' not in columns:
+        return dict(status='legacy_unavailable', observations=[])
+    rows = db.execute('select ' + bounded_column('process_json', 1024) + ',' +
+                      bounded_column('packet_sha256', 64) + ',' +
+                      bounded_column('wrapper_identity', 36) +
+                      ' from executions where process_json is not null limit 4097').fetchall()
+    if len(rows) > 4096:
+        raise ValueError('too_many_recorded_processes')
+    candidates = []
+    invalid = 0
+    foreign = 0
+    for raw, packet, wrapper in rows:
+        try:
+            value = json.loads(raw)
+            pid, start = value['pid'], value['start_marker']
+            binding = process_binding(raw, pid, start, host)
+            if binding == 'host_boot_mismatch':
+                foreign += 1
+                continue
+            pattern = r'linux-start-ticks:[0-9]{1,20}' if value['platform'] == 'linux' else r'macos-start-us:[0-9]{1,20}:[0-9]{1,6}'
+            if binding != 'matching_observation' or not isinstance(start, str) or not re.fullmatch(pattern, start):
+                raise ValueError('invalid')
+            if not isinstance(packet, str) or not re.fullmatch('[0-9a-f]{64}', packet) or expected_binding(wrapper, wrapper) != 'matching_observation':
+                raise ValueError('invalid')
+        except (ValueError, TypeError, KeyError):
+            invalid += 1
+            continue
+        candidates.append((pid, start, packet, wrapper))
+    if len(candidates) > 128:
+        raise ValueError('too_many_recorded_candidates')
+    result = []
+    for pid, start, packet, wrapper in candidates:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('inventory_deadline')
+        item = dict(recorded_pid=pid, recorded_packet_sha256=packet,
+                    recorded_wrapper_identity=wrapper)
+        before = process_birth(pid)
+        if before is None:
+            item['classification'] = 'recorded_process_unavailable'
+        elif before != start:
+            item['classification'] = 'recorded_pid_reused_or_marker_mismatch'
+        else:
+            code, command = ps(['-ww', '-p', str(pid), '-o', 'args='], min(5, remaining))
+            after = process_birth(pid)
+            if after != before:
+                item['classification'] = 'recorded_process_changed_during_read'
+            elif code:
+                item['classification'] = 'recorded_arguments_unavailable'
+            else:
+                tag = parse_tag(command)
+                item['classification'] = ('recorded_process_tag_absent_or_invalid' if tag is None else
+                                          'recorded_process_tag_matches' if tag == (authority, packet, wrapper) else
+                                          'recorded_process_tag_mismatch')
+                item['process_start_observation'] = before
+                item['start_observation_unchanged'] = True
+        result.append(item)
+    if time.monotonic() > deadline:
+        raise ValueError('inventory_deadline')
+    return dict(status='observed', invalid_records=invalid, other_host_boot_records=foreign,
+                observations=result)
+
+
 def inspect(database, host=None):
     database = database.resolve(strict=True)
     deadline = time.monotonic() + 10
@@ -227,6 +295,7 @@ def inspect(database, host=None):
         if not row or not isinstance(row[0], str) or not re.fullmatch('[0-9a-f]{64}', row[0]) or not isinstance(row[1], int) or row[1] <= 0:
             raise ValueError('unbound_runtime_scope')
         matches = correlate(db, row[0], observations)
+        recorded = recorded_observations(db, row[0], host, deadline)
     if time.monotonic() > deadline:
         raise ValueError('inventory_deadline')
     stable = []
@@ -241,6 +310,7 @@ def inspect(database, host=None):
     if time.monotonic() > deadline:
         raise ValueError('inventory_deadline')
     return dict(version=2, discovery='bounded_host_argv_candidates', authority_id=row[0], boot_generation=str(row[1]), observations=stable,
+                recorded_process_inventory=recorded,
                 changed_process_observations=changed,
                 unconfirmed_candidate_observations=unconfirmed,
                 unscoped_runners_on_host=unscoped, unavailable_process_observations=vanished,
