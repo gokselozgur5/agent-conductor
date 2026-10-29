@@ -67,6 +67,27 @@ class MonitorRunTests(unittest.TestCase):
                 self.assertNotIn('PRIVATE_PAYLOAD',text)
                 self.assertEqual(json.loads(text)['status'],'failed')
 
+    def test_stale_control_is_sampled_and_failure_is_durable(self):
+        class Control:
+            task_id = 'owned-control'
+            def sample(self):
+                raise Violation('stale_control_wrong_refusal')
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            with self.assertRaisesRegex(Violation,'stale_control_wrong_refusal'):
+                run_native_monitor(Guard(),lambda:{},root/'run',duration_seconds=.1,interval_seconds=.1,pinned_files=[__file__],stale_control=Control())
+            receipt=json.loads((root/'run/status.json').read_text())
+            self.assertEqual(receipt['status'],'failed')
+            self.assertEqual(receipt['stale_control_task'],'owned-control')
+            self.assertEqual(receipt['samples'],0)
+
+    def test_seven_day_run_requires_stale_control_before_output_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            guard=Guard();guard.max_gap=20
+            with self.assertRaisesRegex(Violation,'soak_stale_control_required'):
+                run_native_monitor(guard,lambda:{},Path(directory)/'run',duration_seconds=604800,interval_seconds=10,pinned_files=[__file__],resources=object())
+            self.assertFalse((Path(directory)/'run').exists())
+
     def test_invalid_budgets_refuse_before_output_creation(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

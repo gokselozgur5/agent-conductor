@@ -184,3 +184,22 @@ unfinished snapshot copy as a completed published source. Both roots remain
 watched after task completion. No baseline is accepted solely because it was the
 first version observed. These checks are sampled integrity observations, not a
 kernel write fence or proof that mutations restored between reads cannot occur.
+
+## Repeated stale-lease control
+
+`NativeStaleControl` creates one fresh synthetic project, worker and task on an
+explicitly owned test daemon. Setup obtains a real grant, pauses/resumes the task,
+and obtains a newer epoch. Each monitor sample submits a heartbeat with the old
+attempt/epoch and the current aggregate version. It requires the specific stale
+identity conflict and exact aggregate equality before renewing the current grant.
+Wrong refusals, changed ownership and failed renewals permanently fail the control.
+
+Pass the initialized control to `run_native_monitor(stale_control=...)`; seven-day
+runs require it. Samples retain each rejection/renewal result and the run identifies
+the control task. The caller explicitly cancels this synthetic task after monitoring
+and owns daemon cleanup. The monitor never selects an existing user task.
+
+This repeated synthetic control exercises the real daemon's lease boundary beside
+native work. It does not repeatedly crash native workers or replace the separate
+actual-native prior-lease recovery proof. It cannot establish arbitrary descendant
+fencing, unobserved mutation absence or full fault-matrix acceptance.
