@@ -34,6 +34,12 @@ observed process state accurately.
 - `native_writer_launch` routes explicit full profiles to Codex `--yolo` or Claude
   `--dangerously-skip-permissions`. Both use the selected account's own HOME and
   configuration. Restricted profiles retain their previous behavior.
+- Full native dispatch sends only the frozen packet and selected vendor pin to
+  the runner's `--account-native` entry. The receiver verifies its OS identity and
+  executable bytes, then builds CLI arguments and HOME locally before Ready.
+  It still waits for a durably recorded acknowledgement and a current lease
+  before launching. This is receiving-account command preparation; the current
+  dispatcher still launches locally and does not yet select a cross-account channel.
 - A successful unrestricted exit can publish a source snapshot for independent
   checks and review. Its execution remains `exited`, not `fenced`. The transactional
   capture-eligibility view admits auxiliary work only for this exact normally
