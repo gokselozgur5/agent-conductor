@@ -327,3 +327,61 @@ async fn native_ack_audit_failure_retains_intent_and_never_releases_writer() {
     assert_eq!(audits, 0);
     assert!(store.file_broker_launch(&binding).await.is_ok());
 }
+
+#[tokio::test]
+async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
+    let NativeLaunchSetup {
+        root: _root,
+        store,
+        binding,
+        launch,
+        endpoint,
+        wrapper,
+    } = native_launch_setup(false).await;
+    let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+    let acknowledged =
+        crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+            .await
+            .unwrap();
+    let expected = acknowledged.runner.identity().clone();
+    let before = store
+        .execution(&binding.execution_token)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.process.as_ref().unwrap().pid, expected.process.pid);
+    drop(acknowledged);
+    let directory = conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if directory.read(&expected).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let receipt = directory.read(&expected).unwrap();
+    assert!(matches!(
+        receipt.observation,
+        conductor_runtime::BrokerShutdownObservation::NeverReleased
+    ));
+    assert_eq!(
+        store
+            .execution(&binding.execution_token)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert!(store.file_broker_owner(&binding).await.is_err());
+    assert!(store.file_broker_status(&binding).await.is_err());
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
+}
