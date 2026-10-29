@@ -90,6 +90,7 @@ async fn unrestricted_capture_preserves_unfenced_state_and_refuses_continuation(
             .is_err()
     );
     assert_failed_capture_ineligible(&service, record, &launch.packet).await;
+    assert_capture_projection_revokes_blocked(&store, &token).await;
 }
 
 fn unrestricted_capture_launch(workspace: &Path) -> conductor_runtime::RunnerLaunch {
@@ -133,4 +134,41 @@ async fn assert_failed_capture_ineligible<C: Clock>(
             .await
             .is_err()
     );
+}
+
+async fn assert_capture_projection_revokes_blocked(store: &Store, token: &str) {
+    use agent_conductor_store::{EffectAudit, ExecutionUpdate};
+    let eligible: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM capture_eligible_executions WHERE effect_token=?")
+            .bind(token)
+            .fetch_one(store.readers())
+            .await
+            .unwrap();
+    assert_eq!(eligible, 1);
+    let record = store.execution(token).await.unwrap().unwrap();
+    store
+        .update_execution(
+            token,
+            record.revision,
+            "block-capture",
+            &ExecutionUpdate::Blocked {
+                reason: "test ambiguous execution".into(),
+            },
+            EffectAudit {
+                id: "block-capture",
+                actor_id: "runtime",
+                correlation_id: token,
+                now_ms: 100,
+            },
+        )
+        .await
+        .unwrap();
+    let eligible: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM capture_eligible_executions WHERE effect_token=?")
+            .bind(token)
+            .fetch_one(store.readers())
+            .await
+            .unwrap();
+    assert_eq!(eligible, 0);
+    assert!(store.has_unfenced_execution("task").await.unwrap());
 }
