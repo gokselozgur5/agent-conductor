@@ -104,9 +104,47 @@ async fn frozen_launch_checks_vendor_identity_and_retains_packet() {
             .observation,
         "full_group_exit"
     );
-    assert_full_group_stop_receipt(launch).await;
+    assert_full_group_stop_receipt(launch.clone()).await;
+    assert_full_profile_never_starts_without_ack(launch).await;
     pin.version = "changed".into();
     assert!(conductor_runtime::full_capability_launch(&pin, &packet).is_err());
+}
+
+async fn assert_full_profile_never_starts_without_ack(mut launch: conductor_runtime::RunnerLaunch) {
+    launch.packet.contract.attempt_id = "unstarted-attempt".into();
+    launch.executable = "/bin/sh".into();
+    launch.arguments = vec!["-c".into(), "touch must-not-start".into()];
+    let identity = conductor_runtime::RunnerProcessIdentity {
+        authority_id: "a".repeat(64),
+        packet_sha256: launch.packet.sha256().unwrap(),
+        wrapper_identity: uuid::Uuid::now_v7().to_string(),
+    };
+    let result = conductor_runtime::RunnerConnection::launch(
+        std::path::Path::new(env!("CARGO_BIN_EXE_conductor-runner")),
+        &launch,
+        Some(&identity),
+        |_, _| async { Err(conductor_runtime::RunnerConnectionError::Persistence) },
+    )
+    .await;
+    assert!(result.is_err());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if conductor_runtime::read_unstarted_receipt(&launch.packet, &identity).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !launch
+            .packet
+            .contract
+            .workspace
+            .join("must-not-start")
+            .exists()
+    );
 }
 
 async fn assert_full_group_stop_receipt(mut launch: conductor_runtime::RunnerLaunch) {
