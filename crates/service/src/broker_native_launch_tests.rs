@@ -589,3 +589,104 @@ async fn owned_session_refuses_release_when_owner_audit_fails() {
     );
     assert!(store.file_broker_status(&binding).await.unwrap().closed);
 }
+
+#[tokio::test]
+async fn owned_session_drop_and_cancelled_finish_retain_durable_ownership() {
+    use std::{future::Future, task::Poll};
+    for cancel_finish in [false, true] {
+        let NativeLaunchSetup {
+            root: _root,
+            store,
+            binding,
+            launch,
+            endpoint,
+            wrapper,
+        } = native_launch_setup(false).await;
+        let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+        let acknowledged =
+            crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+                .await
+                .unwrap();
+        let mut expected = acknowledged.runner.identity().clone();
+        let mut session = acknowledged
+            .release(
+                store.clone(),
+                binding.clone(),
+                continuous_millis().unwrap() + 4000,
+                Duration::from_secs(5),
+                broker_owner_audit("session-drop-owner"),
+            )
+            .await
+            .unwrap();
+        session
+            .renew(continuous_millis().unwrap() + 4000)
+            .await
+            .unwrap();
+        assert!(session.renew(0).await.is_err());
+        let (peer, _) = conductor_runtime::connect_broker_endpoint(
+            session.proxy_handoff(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        if cancel_finish {
+            let mut finish = Box::pin(session.finish(broker_owner_audit("cancelled-close")));
+            std::future::poll_fn(|cx| {
+                assert!(finish.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(finish);
+        } else {
+            drop(session);
+        }
+        expected.observation = conductor_runtime::BrokerShutdownObservation::Revoked {
+            completed_sequence: 0,
+        };
+        let directory =
+            conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if directory.read(&expected).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_progress(&store, &binding, 0, 0).await;
+        assert!(store.file_broker_owner(&binding).await.is_ok());
+        assert_first_write_refused(peer, &binding).await;
+        assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
+        assert!(
+            store
+                .execution_has_unresolved_file_broker(&binding.execution_token)
+                .await
+                .unwrap()
+        );
+        assert!(
+            crate::close_broker_from_receipt(
+                &store,
+                &binding,
+                &expected,
+                &launch.receipt_root,
+                broker_owner_audit("session-drop-independent-close"),
+            )
+            .await
+            .unwrap()
+        );
+    }
+}
+
+async fn assert_first_write_refused(peer: tokio::net::UnixStream, binding: &FileBrokerBinding) {
+    let mut peer = BufReader::new(peer);
+    let mut bytes = serde_json::to_vec(&request(binding)).unwrap();
+    bytes.push(b'\n');
+    let _ = peer.write_all(&bytes).await;
+    let mut reply = String::new();
+    let read = tokio::time::timeout(Duration::from_secs(2), peer.read_line(&mut reply))
+        .await
+        .unwrap();
+    assert!(matches!(read, Ok(0) | Err(_)));
+}
