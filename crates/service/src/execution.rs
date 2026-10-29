@@ -495,8 +495,9 @@ impl<C: Clock> PersistentControlService<C> {
             }
             let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
                 .map_err(|_| runtime_error("stored packet invalid"))?;
-            if packet.contract.adapter.kind != AdapterKind::Claude
-                || packet.contract.authority.allow_workspace_commands
+            if (packet.contract.full_capability.is_none()
+                && (packet.contract.adapter.kind != AdapterKind::Claude
+                    || packet.contract.authority.allow_workspace_commands))
                 || packet
                     .sha256()
                     .map_err(|_| runtime_error("packet hash failed"))?
@@ -549,7 +550,9 @@ impl<C: Clock> PersistentControlService<C> {
         }
         // Old terminal observations still require a durably acknowledged wrapper.
         // An unknown expected identity cannot acquire pre-ACK recovery authority.
-        if record.wrapper_identity.is_none() {
+        // Full-profile terminal observations settle only the supervised group.
+        // Only the earlier no-worker-spawn proof can establish their write fence.
+        if record.wrapper_identity.is_none() || packet.contract.full_capability.is_some() {
             return Ok(None);
         }
         conductor_runtime::read_terminal_receipt(packet)

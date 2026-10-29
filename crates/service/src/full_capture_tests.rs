@@ -90,7 +90,7 @@ async fn unrestricted_capture_preserves_unfenced_state_and_refuses_continuation(
             .is_err()
     );
     assert_failed_capture_ineligible(&service, record, &launch.packet).await;
-    assert_capture_projection_revokes_blocked(&store, &token).await;
+    assert_capture_projection_revokes_blocked(&service, &token).await;
 }
 
 fn unrestricted_capture_launch(workspace: &Path) -> conductor_runtime::RunnerLaunch {
@@ -136,8 +136,12 @@ async fn assert_failed_capture_ineligible<C: Clock>(
     );
 }
 
-async fn assert_capture_projection_revokes_blocked(store: &Store, token: &str) {
+async fn assert_capture_projection_revokes_blocked<C: Clock>(
+    service: &PersistentControlService<C>,
+    token: &str,
+) {
     use agent_conductor_store::{EffectAudit, ExecutionUpdate};
+    let store = &service.store;
     let eligible: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM capture_eligible_executions WHERE effect_token=?")
             .bind(token)
@@ -171,4 +175,9 @@ async fn assert_capture_projection_revokes_blocked(store: &Store, token: &str) {
             .unwrap();
     assert_eq!(eligible, 0);
     assert!(store.has_unfenced_execution("task").await.unwrap());
+    service.recover_fenced_receipts().await.unwrap();
+    assert_eq!(
+        store.execution(token).await.unwrap().unwrap().state,
+        agent_conductor_store::ExecutionState::Blocked
+    );
 }

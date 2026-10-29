@@ -3861,10 +3861,23 @@ mod effect_tests {
             .unwrap();
     }
 
+    fn unstarted_recovery_launch(tree: &Path, mode: &str) -> conductor_runtime::RunnerLaunch {
+        use conductor_runtime::AdapterKind;
+        let mut launch = if mode.starts_with("full") {
+            unrestricted_capture_launch(tree)
+        } else {
+            runtime_launch(&tree.canonicalize().unwrap())
+        };
+        launch.packet.contract.adapter.kind = AdapterKind::Claude;
+        launch.packet.contract.authority.allow_workspace_commands =
+            mode == "commands" || mode.starts_with("full");
+        launch
+    }
+
     #[tokio::test]
     async fn unstarted_recovery_requires_durable_identity_and_preserves_unknown_ack() {
         use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionState};
-        use conductor_runtime::{AdapterKind, RunnerProcessIdentity, write_unstarted_receipt};
+        use conductor_runtime::{RunnerProcessIdentity, write_unstarted_receipt};
         use sqlx::Connection;
         for mode in [
             "valid",
@@ -3872,6 +3885,8 @@ mod effect_tests {
             "wrong_wrapper",
             "wrong_authority",
             "commands",
+            "full",
+            "full_wrong_wrapper",
         ] {
             let (directory, store) = lifecycle_store().await;
             let service =
@@ -3891,9 +3906,7 @@ mod effect_tests {
                 .unwrap();
             let tree = directory.path().join("tree");
             std::fs::create_dir(&tree).unwrap();
-            let mut launch = runtime_launch(&tree.canonicalize().unwrap());
-            launch.packet.contract.adapter.kind = AdapterKind::Claude;
-            launch.packet.contract.authority.allow_workspace_commands = mode == "commands";
+            let launch = unstarted_recovery_launch(&tree, mode);
             let expected = Uuid::now_v7().to_string();
             let preparation = ExecutionPreparation {
                 expected_wrapper_identity: if mode == "legacy" {
@@ -3931,21 +3944,21 @@ mod effect_tests {
                     "a".repeat(64)
                 },
                 packet_sha256: preparation.packet_sha256.clone(),
-                wrapper_identity: if mode == "wrong_wrapper" {
+                wrapper_identity: if mode.ends_with("wrong_wrapper") {
                     Uuid::now_v7().to_string()
                 } else {
                     expected
                 },
             };
             write_unstarted_receipt(&launch.packet, &identity).unwrap();
-            if mode == "valid" {
+            if matches!(mode, "valid" | "full") {
                 refuse_unstarted_fence_audit(&service, &store, &mut db, &token).await;
             }
             service.recover_runtime_observations().await.unwrap();
             let record = store.execution(&token).await.unwrap().unwrap();
             assert_eq!(
                 record.state,
-                if mode == "valid" {
+                if matches!(mode, "valid" | "full") {
                     ExecutionState::Fenced
                 } else {
                     ExecutionState::Blocked
@@ -3954,7 +3967,7 @@ mod effect_tests {
             assert_unstarted_binding(&record, &preparation);
             assert_eq!(
                 store.has_unfenced_execution("task").await.unwrap(),
-                mode != "valid"
+                !matches!(mode, "valid" | "full")
             );
             service.recover_runtime_observations().await.unwrap();
             assert_eq!(store.execution(&token).await.unwrap().unwrap(), record);
