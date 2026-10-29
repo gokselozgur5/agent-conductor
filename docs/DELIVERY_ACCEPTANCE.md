@@ -7,12 +7,19 @@ that scope. Read this current audit before the historical paragraphs in STATUS.
 
 ## Candidate identity
 
-Draft [PR #91](https://github.com/gokselozgur5/agent-conductor/pull/91) combines auxiliary ownership `fafc2a0` (runtime
-implementation through `89a4544`) with native observation `b4b303a`. Their original
-PRs #90 and #88 remain available as separate focused drafts. The operator's existing schema-19 runtime
-has not been upgraded; candidate schema is 28. Main and the running endurance
-fixture have different pinned bytes. Neither is evidence that this combined
-candidate is released or has completed endurance acceptance.
+Main at `a58ae7f41fa89f191ab3c969ac3a81185cabd778` includes merged PR #109
+and the preceding broker, auxiliary and native-observation changes. Schema is 29.
+PR #109 CI and its post-merge run passed on macOS and Linux. These results cover
+the configured CI checks, not Linux native sandbox support or full acceptance.
+Delivered bundles, existing runtimes and the separate endurance fixture retain
+their own pinned versions; repository merges do not upgrade them.
+
+The service-authority candidate drives an already released broker/vendor from
+current task ownership. It checks authority generation, task/attempt/epoch,
+monotonic lease and instructions, caps deadlines at the acknowledged launch
+ceiling, and latches revocation on failure. Controlled native pause testing proves
+process termination and durable broker closure separately. Native daemon Codex
+writer admission and complete execution fencing remain unavailable.
 
 ## Functional audit
 
@@ -56,9 +63,8 @@ intentional safety refusal, not support for both required writer adapters.
 
 `crates/runtime/src/sandbox.rs` explicitly returns `Unsupported` for non-macOS
 hosts. Compiling the Rust core on Linux cannot establish usable native workflows
-there. The current CI matrix does not explicitly cover Linux arm64. Current hosted
-CI refuses before steps due to account billing/spending limits; no Linux result
-can be inferred from local macOS checks. No local Docker, Colima, Lima, Podman or
+there. The current CI matrix does not explicitly cover Linux arm64. The earlier hosted billing failure is no longer the current CI state; the exact
+PR #109 and post-merge runs succeeded on both configured platforms. No local Docker, Colima, Lima, Podman or
 QEMU executable was found during this audit; that is a tooling observation, not
 proof that no Linux execution route exists.
 
