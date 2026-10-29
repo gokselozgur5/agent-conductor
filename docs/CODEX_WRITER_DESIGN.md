@@ -442,3 +442,32 @@ These tests do not prove OS confinement, full privacy coverage, live-model behav
 SQLite journal wiring, durable shutdown evidence, restart reconciliation or
 long-lived idle handling. Native Codex writing remains refused. The handed-off
 Claude-writer/Codex-reviewer release bundle is unchanged by this development.
+
+## Store-backed stream journal
+
+`conductor_service::RegisteredBrokerJournal` now joins the private stream's
+synchronous admission/result ports to the authoritative store. Registration must
+commit fresh before the host exports its handoff. Identical registration returns
+a refusal, and the registration is consumed by one stream server. Every callback
+checks the exact registered scope; only a fresh committed admission permits a
+filesystem effect, and only a fresh committed result permits a success reply.
+Audit events use generated identifiers and retain invocation/sequence metadata,
+not file contents or paths. The existing store transaction owns audit and state
+changes together.
+
+The synchronous bridge is private and runs only on the transport's blocking
+worker while the owning Tokio runtime remains alive. Store errors become fixed
+protocol failures. Dropped registration, aborted serving, pending completion and
+ordinary EOF do not close durable ownership or grant a second operation path.
+A local completed sequence is still not an independently persisted shutdown
+receipt. The caller must pin the actual root to the recorded identity and enforce
+exclusive OS access; this API does not establish those properties.
+
+Regressions join real Unix streams, actual temporary files and SQLite, reopen
+the database before accepting the observed reply, and cover duplicate admission,
+scope mismatch, stale generation, admission audit failure, result audit failure
+and dropped registration. A synthetic acknowledged execution establishes the
+fixture's initial authority; these tests do not prove a native launch or reboot.
+The production native launcher still does not use this bridge. Wiring wrapper
+requests to the daemon owner, independent shutdown evidence, long-lived idle
+handling and OS confinement remain required before enabling Codex writing.

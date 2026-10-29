@@ -1,3 +1,7 @@
+#[cfg(unix)]
+mod broker_journal;
+#[cfg(unix)]
+pub use broker_journal::RegisteredBrokerJournal;
 use std::{
     fs,
     future::Future,
@@ -1537,6 +1541,10 @@ fn hash(v: &str) -> String {
 }
 #[cfg(test)]
 mod effect_tests {
+    #[cfg(unix)]
+    mod broker_journal_tests {
+        include!("broker_journal_tests.rs");
+    }
     include!("checkpoint_tests.rs");
     include!("reassignment_tests.rs");
     include!("unowned_tests.rs");

@@ -63,7 +63,7 @@ fn continuous_now_ms() -> Result<u64, String> {
     Err("suspend-aware monotonic clock is unsupported on this host".to_owned())
 }
 
-fn wall_ms() -> i64 {
+pub(super) fn wall_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| {
