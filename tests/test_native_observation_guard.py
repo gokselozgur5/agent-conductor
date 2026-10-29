@@ -103,6 +103,48 @@ class NativeGuardTests(unittest.TestCase):
             self.monitor()
         self.assertNotIn('PRIVATE', json.dumps(self.report))
 
+class BoardProjectionTests(unittest.TestCase):
+    def test_pages_match_but_missing_duplicate_and_changed_rows_refuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'db'
+            tasks = [dict(id=str(i), version=1) for i in range(3)]
+            with sqlite3.connect(path) as db:
+                db.execute('create table tasks(id,aggregate_json)')
+                db.executemany('insert into tasks values(?,?)', [(x['id'],json.dumps(x)) for x in tasks])
+            def read(after):
+                index = 0 if after is None else int(after)
+                return dict(tasks=[dict(aggregate=tasks[index])], next_after=str(index+1) if index<2 else None)
+            self.assertEqual(guard.board_projection(path,read,time.monotonic()+5),'matching')
+            for rows in [tasks[:2], [tasks[0],tasks[0]], [dict(id='0',version=2),*tasks[1:]]]:
+                with self.assertRaises(guard.Violation):
+                    guard.board_projection(path,lambda _:dict(tasks=[dict(aggregate=x) for x in rows],next_after=None),time.monotonic()+5)
+
+    def test_concurrent_commit_is_unknown_even_if_values_are_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'db'
+            with sqlite3.connect(path) as db:
+                db.execute('create table tasks(id,aggregate_json)')
+                db.execute('insert into tasks values(?,?)',('a','{"id":"a","version":1}'))
+            def read(_):
+                with sqlite3.connect(path) as db:
+                    db.execute('update tasks set aggregate_json=?', ('{"id":"a","version":2}',))
+                with sqlite3.connect(path) as db:
+                    db.execute('update tasks set aggregate_json=?', ('{"id":"a","version":1}',))
+                return dict(tasks=[],next_after=None)
+            self.assertEqual(guard.board_projection(path,read,time.monotonic()+5),'concurrent_change')
+
+    def test_oversized_database_and_cyclic_cursor_refuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'db'
+            with sqlite3.connect(path) as db:
+                db.execute('create table tasks(id,aggregate_json)')
+                db.execute('insert into tasks values(?,?)',('a','x'*1048577))
+            with self.assertRaisesRegex(guard.Violation,'board_database_limit'):
+                guard.board_projection(path,lambda _:None,time.monotonic()+5)
+            with sqlite3.connect(path) as db:db.execute('delete from tasks')
+            with self.assertRaisesRegex(guard.Violation,'board_cursor_invalid'):
+                guard.board_projection(path,lambda _:dict(tasks=[],next_after='a'),time.monotonic()+5)
+
 
 if __name__ == '__main__':
     unittest.main()

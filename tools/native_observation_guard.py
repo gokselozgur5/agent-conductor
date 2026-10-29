@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only sampled native acceptance guard; never process/fencing authority."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -17,6 +18,53 @@ class Violation(RuntimeError):
 def require(condition, code):
     if not condition:
         raise Violation(code)
+
+
+def board_projection(database, read_page, deadline):
+    """Compare all pages only when no SQLite writer committed during observation.
+
+    read_page(after) must use its own bounded transport timeout and return the
+    operator /api/tasks envelope. No aggregate contents leave this function.
+    """
+    with sqlite3.connect(Path(database).as_uri()+'?mode=ro', uri=True, timeout=2) as db:
+        db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+        version = db.execute('pragma data_version').fetchone()[0]
+        expected = {}
+        total = 0
+        for task_id, raw in db.execute("select id,case when typeof(aggregate_json)='text' and length(aggregate_json)<=1048576 then aggregate_json else null end from tasks order by id limit 10001"):
+            require(len(expected) < 10000 and isinstance(raw, str), 'board_database_limit')
+            total += len(raw.encode())
+            require(total <= 64*1024**2, 'board_database_limit')
+            expected[task_id] = json.loads(raw)
+        observed = {}
+        after = None
+        seen = set()
+        total = 0
+        for _ in range(10001):
+            require(time.monotonic() <= deadline, 'board_observation_deadline')
+            page = read_page(after)
+            require(isinstance(page, dict) and isinstance(page.get('tasks'), list), 'board_page_invalid')
+            for row in page['tasks']:
+                require(isinstance(row, dict) and isinstance(row.get('aggregate'), dict), 'board_row_invalid')
+                task = row['aggregate']
+                key = task.get('id')
+                require(isinstance(key, str) and key not in observed, 'board_duplicate_or_invalid_task')
+                total += len(json.dumps(task).encode())
+                require(len(observed) < 10000 and total <= 64*1024**2, 'board_response_limit')
+                observed[key] = task
+            require('next_after' in page, 'board_cursor_missing')
+            after = page['next_after']
+            if after is None:
+                break
+            require(isinstance(after, str) and after not in seen and page['tasks'], 'board_cursor_invalid')
+            seen.add(after)
+        else:
+            raise Violation('board_page_limit')
+        require(time.monotonic() <= deadline, 'board_observation_deadline')
+        if db.execute('pragma data_version').fetchone()[0] != version:
+            return 'concurrent_change'
+        require(observed == expected, 'board_projection_mismatch')
+        return 'matching'
 
 
 def protected_digest(root, deadline):
@@ -65,12 +113,13 @@ class NativeObservationGuard:
     The caller must stop the run if sample() raises and preserve its failure.
     Protected roots must be explicitly selected immutable surfaces, not worker roots.
     """
-    def __init__(self, database, host, protected_roots, *, grace_seconds=10, max_gap_seconds=15):
+    def __init__(self, database, host, protected_roots, *, grace_seconds=10, max_gap_seconds=15, board_reader=None):
         require(host is not None, 'trusted_host_required')
         require(0 <= grace_seconds <= 60 and 0 < max_gap_seconds <= 60, 'invalid_monitor_limits')
         require(0 < len(protected_roots) <= 8, 'protected_roots_required')
         self.database = Path(database).resolve(strict=True)
         self.host = host
+        self.board_reader = board_reader
         self.grace = grace_seconds
         self.max_gap = max_gap_seconds
         self.roots = tuple(Path(p) for p in protected_roots)
@@ -102,10 +151,11 @@ class NativeObservationGuard:
             db.set_progress_handler(lambda: int(time.monotonic()-now > 5), 1000)
             duplicate = db.execute("select 1 from leases where status in ('active','recovery_pending') group by task_id having count(*)>1 limit 1").fetchone()
             require(duplicate is None, 'duplicate_live_lease')
+        board = board_projection(self.database, self.board_reader, now+5) if self.board_reader is not None else 'not_checked'
         report = inspect(self.database, self.host)
         require(self.boot is None or report['boot_generation'] == self.boot, 'native_daemon_restart')
         require(self.authority is None or report['authority_id'] == self.authority, 'native_authority_changed')
-        uncertain = report['changed_process_observations'] != 0 or report['unavailable_process_observations'] != 0
+        uncertain = board == 'concurrent_change' or report['changed_process_observations'] != 0 or report['unavailable_process_observations'] != 0
         self.uncertain_since = (now if self.uncertain_since is None else self.uncertain_since) if uncertain else None
         require(self.uncertain_since is None or now-self.uncertain_since < self.grace, 'native_inventory_uncertain')
         records = report['recorded_process_inventory']
@@ -127,5 +177,5 @@ class NativeObservationGuard:
         self.samples += 1
         return dict(sample=self.samples, boot=self.boot, tagged_observations=len(report['observations']),
                     recorded_observations=len(records['observations']), pending_contradictions=len(suspects),
-                    protected_surfaces=len(self.roots), inventory_uncertain=uncertain,
+                    protected_surfaces=len(self.roots), board_projection=board, inventory_uncertain=uncertain,
                     healthy=not suspects and not uncertain, full_v1_accepted=False)

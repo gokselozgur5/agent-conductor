@@ -37,7 +37,31 @@ This is a sampled detector, not continuous kernel enforcement. Writes restored
 between observations can be missed. Hash equality does not prove a surface is
 unwritable, path observations are not pinned filesystem handles, and PID markers
 are not process handles. It does not enumerate untagged descendants without
-stored identities, compare every board projection, inject stale mutations, cover
+stored identities, inject stale mutations, cover
 every lifecycle/effect crash, or certify seven days of native operation. Every
 sample explicitly keeps `full_v1_accepted` false. Existing control-plane endurance
 runs remain separate and must not be restarted or relabeled as native runs.
+
+
+## Stable board projection observations
+
+Pass `board_reader(after)` to the guard to compare every page of the operator
+`/api/tasks` response with durable task aggregates. The callback must bound its
+transport time and response bytes. The guard limits rows to 10,000, aggregate
+bytes to 64 MiB, each stored aggregate to 1 MiB, and observation time to five
+seconds. Duplicate tasks, missing/cyclic cursors and malformed pages refuse.
+
+SQLite `data_version` is read before the database snapshot and after all API
+pages on the same connection. Any intervening commit makes the observation
+`concurrent_change`, even if values were changed and restored. This is unhealthy
+uncertainty under the existing finite grace window; it cannot count as final
+acceptance. With no intervening commit, any aggregate or membership difference
+fails and latches the run. An omitted reader is explicitly `not_checked`, never
+an implicit claim that board consistency was verified.
+
+Controls cover multiple pages, missing/duplicate/modified rows, concurrent
+commits with restored values, oversized stored data and invalid cursors. Native
+acceptance uses authenticated local HTTP pages during an actual workflow;
+page transport uses a three-second timeout and 4 MiB response bound. This proves
+sampled API/database correspondence, not browser rendering or atomic snapshots
+across arbitrary continuous writers.
