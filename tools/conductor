@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from adapter_pins import accepted_pins
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -195,14 +196,12 @@ def main():
             raise ValueError('task ID must use 1-100 letters, digits, underscores or hyphens')
         template = json.loads(args.from_plan.read_text())
         value = {key: template[key] for key in ('worker', 'verifier', 'model_timeout_ms')}
-        for pin in (value['worker'], value['verifier']):
-            executable = Path(pin['executable']).resolve(strict=True)
-            if hashlib.sha256(executable.read_bytes()).hexdigest() != pin['executable_sha256']:
-                raise ValueError('accepted adapter binary changed; conformance must be revalidated')
-            pin['executable'] = str(executable)
+        value.update(accepted_pins(template))
         value.update(task_id=args.task, project=config['project'], objective=args.objective_file.read_text(), artifacts=str(state / 'artifacts' / args.task), wrapper=str(Path(config['bin_dir']) / 'conductor-runner'), checks=json.loads(args.checks_file.read_text()), toolchain_roots=template.get('toolchain_roots', []), instructions=[])
         if template.get('full_capability') is not None:
             value['full_capability'] = template['full_capability']
+        if template.get('account_worker') is not None:
+            value['account_worker'] = template['account_worker']
         if args.document and not args.workspace_root:
             raise ValueError('--document requires --workspace-root')
         if args.workspace_root:

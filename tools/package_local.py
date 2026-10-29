@@ -9,6 +9,7 @@ import shutil
 import shlex
 import sys
 import subprocess
+from adapter_pins import accepted_pins
 
 REPO = Path(__file__).resolve().parents[1]
 BINARIES = ('conductor-daemon', 'conductorctl', 'conductor-runner')
@@ -47,16 +48,10 @@ def package(bin_dir, accepted_plan, destination):
     bin_dir = bin_dir.resolve(strict=True)
     template = json.loads(accepted_plan.read_text())
     pins = {k: template[k] for k in ('worker', 'verifier', 'model_timeout_ms')}
-    for optional in ('toolchain_roots', 'full_capability'):
+    for optional in ('toolchain_roots', 'full_capability', 'account_worker'):
         if optional in template:
             pins[optional] = template[optional]
-    for role in ('worker', 'verifier'):
-        pin = pins[role]
-        executable = Path(pin['executable']).resolve(strict=True)
-        if not os.access(executable, os.X_OK) or digest(executable) != pin['executable_sha256']:
-            raise ValueError('accepted adapter binary changed')
-        pins[role] = {k: pin[k] for k in ('kind', 'version', 'executable_sha256', 'conformance_sha256')}
-        pins[role]['executable'] = str(executable)
+    pins.update(accepted_pins(template))
     for name in BINARIES:
         if not (bin_dir / name).is_file() or not os.access(bin_dir / name, os.X_OK):
             raise ValueError('build every runtime binary before packaging')

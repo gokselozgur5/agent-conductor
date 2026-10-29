@@ -92,3 +92,13 @@ class PackageLauncherTests(unittest.TestCase):
             for migration in source.glob('*.sql'):
                 self.assertEqual((destination / 'crates/store/migrations' / migration.name).read_bytes(), migration.read_bytes())
             self.assertNotIn('ANTHROPIC_API_KEY', json.dumps(saved))
+            target = dict(socket='/receiver-private/control.sock',
+                          artifacts='/receiver-private/artifacts')
+            remote = dict(pin, executable='/receiver-private/vendor')
+            template.write_text(json.dumps(dict(worker=remote, verifier=pin,
+                model_timeout_ms=1000, full_capability=profile, account_worker=target)))
+            package(binaries, template, root / 'remote-bundle')
+            saved = json.loads((root / 'remote-bundle/accepted-adapters.json').read_text())
+            self.assertEqual(saved['worker'], remote)
+            self.assertEqual(saved['verifier'], pin)
+            self.assertEqual(saved['account_worker'], target)
