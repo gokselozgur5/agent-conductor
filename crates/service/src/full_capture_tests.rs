@@ -6,7 +6,8 @@ async fn unrestricted_capture_preserves_unfenced_state_and_refuses_continuation(
         PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
             .await
             .unwrap();
-    let (task, token) = claim_task(&service).await;
+    // This real-process test exercises capture, not the 9 ms expiry fixture.
+    let (task, token) = claim_task_with_lease(&service, 5000).await;
     let row = store.task("task").await.unwrap().unwrap();
     service
         .apply_row(
@@ -47,7 +48,7 @@ async fn unrestricted_capture_preserves_unfenced_state_and_refuses_continuation(
     let wrapper =
         PathBuf::from(std::env::var("CONDUCTOR_TEST_BIN_DIR").unwrap()).join("conductor-runner");
     let (record, connection) = service
-        .launch_execution(&wrapper, &launch, &token, "runner")
+        .launch_execution(&wrapper, &launch, &token, "runner", None)
         .await
         .unwrap();
     let (_, candidate) = service

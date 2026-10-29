@@ -106,8 +106,54 @@ async fn frozen_launch_checks_vendor_identity_and_retains_packet() {
     );
     assert_full_group_stop_receipt(launch.clone()).await;
     assert_full_profile_never_starts_without_ack(launch).await;
+    assert_account_native_entry(&pin, &packet).await;
     pin.version = "changed".into();
     assert!(conductor_runtime::full_capability_launch(&pin, &packet).is_err());
+}
+
+async fn assert_account_native_entry(pin: &VendorPin, packet: &conductor_runtime::ResumePacket) {
+    use conductor_runtime::{AccountNativeLaunch, RunnerConnection, RunnerEvent};
+    let wrapper = std::path::Path::new(env!("CARGO_BIN_EXE_conductor-runner"));
+    let mut request = AccountNativeLaunch {
+        pin: pin.clone(),
+        packet: packet.clone(),
+    };
+    request.packet.contract.attempt_id = "account-native".into();
+    let mut connection =
+        RunnerConnection::launch_account_native(wrapper, &request, None, |_, _| async {
+            Ok(conductor_runtime::continuous_millis().unwrap() + 1000)
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        connection.event().await.unwrap(),
+        RunnerEvent::Finished {
+            exit_code: Some(0),
+            ..
+        }
+    ));
+    connection.wait().await.unwrap();
+    let mut wrong_account = request.clone();
+    let profile = wrong_account
+        .packet
+        .contract
+        .full_capability
+        .as_mut()
+        .unwrap();
+    profile.account.uid = profile.account.uid.checked_add(1).unwrap();
+    let mut wrong_pin = request;
+    wrong_pin.pin.executable_sha256 = "a".repeat(64);
+    for invalid in [wrong_account, wrong_pin] {
+        let acknowledged = std::sync::atomic::AtomicBool::new(false);
+        let result =
+            RunnerConnection::launch_account_native(wrapper, &invalid, None, |_, _| async {
+                acknowledged.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(conductor_runtime::RunnerConnectionError::Persistence)
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(!acknowledged.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }
 
 async fn assert_full_profile_never_starts_without_ack(mut launch: conductor_runtime::RunnerLaunch) {

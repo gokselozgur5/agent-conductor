@@ -11,6 +11,24 @@ pub struct FullCapabilityProfile {
     pub path: String,
 }
 
+/// Native account entry carries only the frozen contract and selected vendor pin.
+/// The receiving runner builds arguments/environment under its own OS identity.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountNativeLaunch {
+    pub packet: crate::ResumePacket,
+    pub pin: VendorPin,
+}
+
+impl AccountNativeLaunch {
+    /// Revalidates the selected account and binary in the receiving process.
+    /// # Errors
+    /// Refuses non-full profiles, changed pins and the wrong OS account.
+    pub fn prepare(&self) -> Result<crate::RunnerLaunch, crate::VendorError> {
+        full_capability_launch(&self.pin, &self.packet)
+    }
+}
+
 /// Construct the supervised launch from the exact frozen unrestricted packet.
 /// This supplies no claim that arbitrary descendants are confined or fenced.
 /// # Errors

@@ -30,7 +30,7 @@ impl<C: Clock> PersistentControlService<C> {
                 "native adapters require a pinned launch entry",
             ));
         }
-        self.launch_execution(wrapper, launch, effect_token, runner_id)
+        self.launch_execution(wrapper, launch, effect_token, runner_id, None)
             .await
     }
 
@@ -52,7 +52,8 @@ impl<C: Clock> PersistentControlService<C> {
     ) -> Result<(ExecutionRecord, RunnerConnection), StoreError> {
         let launch = conductor_runtime::native_writer_launch(pin, packet, authentication)
             .map_err(|_| runtime_error("native writer adapter refused the contract"))?;
-        self.launch_execution(wrapper, &launch, effect_token, runner_id)
+        let account_pin = packet.contract.full_capability.as_ref().map(|_| pin);
+        self.launch_execution(wrapper, &launch, effect_token, runner_id, account_pin)
             .await
     }
 
@@ -62,6 +63,7 @@ impl<C: Clock> PersistentControlService<C> {
         launch: &RunnerLaunch,
         effect_token: &str,
         runner_id: &str,
+        account_pin: Option<&conductor_runtime::VendorPin>,
     ) -> Result<(ExecutionRecord, RunnerConnection), StoreError> {
         let _guard = self.mutations.lock().await;
         self.validate_runtime_owner(&launch.packet).await?;
@@ -102,66 +104,84 @@ impl<C: Clock> PersistentControlService<C> {
             ));
         }
         if launch.packet.contract.adapter.kind != AdapterKind::Fake {
-            let root = launch.packet.contract.workspace.clone();
-            let manifest =
-                tokio::task::spawn_blocking(move || conductor_runtime::observe_attempt_tree(&root))
-                    .await
-                    .map_err(|_| runtime_error("owned baseline interrupted"))?
-                    .map_err(|_| runtime_error("owned baseline refused"))?;
-            self.publish_owned_scan(effect_token, &launch.packet, manifest, true)
+            self.record_launch_baseline(effect_token, &launch.packet)
                 .await?;
-            self.validate_runtime_owner(&launch.packet).await?;
         }
         let identity = self.process_tag(&record, &wrapper_identity).await?;
         let mut acknowledged = None;
         let acknowledgement_slot = &mut acknowledged;
-        let connection = RunnerConnection::launch(
-            wrapper,
-            launch,
-            identity.as_ref(),
-            |ack, birth| async move {
-                // The wrapper may take time to start. Recheck the monotonic lease,
-                // not just the SQL active flag, immediately before recording its ACK.
-                self.validate_runtime_owner(&launch.packet)
-                    .await
-                    .map_err(|_| RunnerConnectionError::Persistence)?;
-                let audit_id = Uuid::now_v7().to_string();
-                let now = self.clock.read(self.boot_generation);
-                let result = self
-                    .store
-                    .update_execution(
-                        effect_token,
-                        record.revision,
-                        &wrapper_identity,
-                        &ExecutionUpdate::Acknowledge {
-                            wrapper_identity: wrapper_identity.clone(),
-                            packet_sha256: ack.packet_sha256,
-                            process: Some(persisted_process(birth)),
-                        },
-                        EffectAudit {
-                            id: &audit_id,
-                            actor_id: "conductor-runtime",
-                            correlation_id: effect_token,
-                            now_ms: now.wall_unix_ms,
-                        },
-                    )
-                    .await
-                    .map_err(|_| RunnerConnectionError::Persistence)?;
-                // A slow database acknowledgement must not revive an expired lease.
-                let deadline = self
-                    .validate_runtime_owner(&launch.packet)
-                    .await
-                    .map_err(|_| RunnerConnectionError::Persistence)?;
-                *acknowledgement_slot = Some(result);
-                Ok(deadline)
-            },
-        )
-        .await
+        let record_ack = |ack: conductor_runtime::PacketAcknowledgement,
+                          birth: conductor_runtime::ChildIdentity| async move {
+            // The wrapper may take time to start. Recheck the monotonic lease,
+            // not just the SQL active flag, immediately before recording its ACK.
+            self.validate_runtime_owner(&launch.packet)
+                .await
+                .map_err(|_| RunnerConnectionError::Persistence)?;
+            let audit_id = Uuid::now_v7().to_string();
+            let now = self.clock.read(self.boot_generation);
+            let result = self
+                .store
+                .update_execution(
+                    effect_token,
+                    record.revision,
+                    &wrapper_identity,
+                    &ExecutionUpdate::Acknowledge {
+                        wrapper_identity: wrapper_identity.clone(),
+                        packet_sha256: ack.packet_sha256,
+                        process: Some(persisted_process(birth)),
+                    },
+                    EffectAudit {
+                        id: &audit_id,
+                        actor_id: "conductor-runtime",
+                        correlation_id: effect_token,
+                        now_ms: now.wall_unix_ms,
+                    },
+                )
+                .await
+                .map_err(|_| RunnerConnectionError::Persistence)?;
+            // A slow database acknowledgement must not revive an expired lease.
+            let deadline = self
+                .validate_runtime_owner(&launch.packet)
+                .await
+                .map_err(|_| RunnerConnectionError::Persistence)?;
+            *acknowledgement_slot = Some(result);
+            Ok(deadline)
+        };
+        let connection = if let Some(pin) = account_pin {
+            RunnerConnection::launch_account_native(
+                wrapper,
+                &conductor_runtime::AccountNativeLaunch {
+                    packet: launch.packet.clone(),
+                    pin: pin.clone(),
+                },
+                identity.as_ref(),
+                record_ack,
+            )
+            .await
+        } else {
+            RunnerConnection::launch(wrapper, launch, identity.as_ref(), record_ack).await
+        }
         .map_err(|_| runtime_error("wrapper release failed; reconcile durable execution"))?;
         Ok((
             acknowledged.ok_or_else(|| runtime_error("acknowledgement missing"))?,
             connection,
         ))
+    }
+
+    async fn record_launch_baseline(
+        &self,
+        token: &str,
+        packet: &ResumePacket,
+    ) -> Result<(), StoreError> {
+        let root = packet.contract.workspace.clone();
+        let manifest =
+            tokio::task::spawn_blocking(move || conductor_runtime::observe_attempt_tree(&root))
+                .await
+                .map_err(|_| runtime_error("owned baseline interrupted"))?
+                .map_err(|_| runtime_error("owned baseline refused"))?;
+        self.publish_owned_scan(token, packet, manifest, true)
+            .await?;
+        self.validate_runtime_owner(packet).await.map(|_| ())
     }
 
     async fn process_tag(

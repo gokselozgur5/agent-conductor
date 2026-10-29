@@ -1,6 +1,7 @@
 //! Trusted controller connection to one wrapper. Dropping the connection closes
-//! stdin so the independent watchdog can fence workers; never kill the wrapper
-//! first and thereby disable that watchdog.
+//! stdin so the independent watchdog stops the supervised group. This does not
+//! prove detached descendants stopped. Never kill the wrapper first and thereby
+//! disable that watchdog.
 use crate::{PacketAcknowledgement, RunnerControl, RunnerEvent, RunnerLaunch};
 use std::{future::Future, path::Path, process::Stdio, time::Duration};
 use tokio::{
@@ -50,18 +51,68 @@ impl RunnerConnection {
         F: FnOnce(PacketAcknowledgement, crate::ChildIdentity) -> Fut,
         Fut: Future<Output = Result<u64, RunnerConnectionError>>,
     {
-        launch
-            .packet
+        Self::connect(
+            executable,
+            &launch.packet,
+            launch,
+            identity,
+            false,
+            record_acknowledgement,
+        )
+        .await
+    }
+
+    /// Starts the account-native entry; the receiving wrapper, not the sender,
+    /// constructs the native command and validates its local OS account and pin.
+    /// Durable acknowledgement still precedes worker release.
+    /// # Errors
+    /// Refuses invalid packets, receiver identity mismatch and failed persistence.
+    pub async fn launch_account_native<F, Fut>(
+        executable: &Path,
+        launch: &crate::AccountNativeLaunch,
+        identity: Option<&crate::RunnerProcessIdentity>,
+        record_acknowledgement: F,
+    ) -> Result<Self, RunnerConnectionError>
+    where
+        F: FnOnce(PacketAcknowledgement, crate::ChildIdentity) -> Fut,
+        Fut: Future<Output = Result<u64, RunnerConnectionError>>,
+    {
+        Self::connect(
+            executable,
+            &launch.packet,
+            launch,
+            identity,
+            true,
+            record_acknowledgement,
+        )
+        .await
+    }
+
+    async fn connect<F, Fut>(
+        executable: &Path,
+        packet: &crate::ResumePacket,
+        frame: &impl serde::Serialize,
+        identity: Option<&crate::RunnerProcessIdentity>,
+        account_native: bool,
+        record_acknowledgement: F,
+    ) -> Result<Self, RunnerConnectionError>
+    where
+        F: FnOnce(PacketAcknowledgement, crate::ChildIdentity) -> Fut,
+        Fut: Future<Output = Result<u64, RunnerConnectionError>>,
+    {
+        packet
             .validate()
             .map_err(|_| RunnerConnectionError::Protocol)?;
         if !executable.is_absolute() {
             return Err(RunnerConnectionError::Protocol);
         }
-        let packet_sha256 = launch
-            .packet
+        let packet_sha256 = packet
             .sha256()
             .map_err(|_| RunnerConnectionError::Protocol)?;
         let mut command = Command::new(executable);
+        if account_native {
+            command.arg("--account-native");
+        }
         if let Some(identity) = identity {
             if identity.packet_sha256 != packet_sha256 {
                 return Err(RunnerConnectionError::Protocol);
@@ -93,7 +144,7 @@ impl RunnerConnection {
             packet_sha256,
             frame: Vec::new(),
         };
-        connection.send(launch).await?;
+        connection.send(frame).await?;
         let RunnerEvent::Ready { acknowledgement } =
             tokio::time::timeout(Duration::from_secs(5), connection.event())
                 .await
@@ -101,8 +152,7 @@ impl RunnerConnection {
         else {
             return Err(RunnerConnectionError::Protocol);
         };
-        launch
-            .packet
+        packet
             .verify_ack(&acknowledgement)
             .map_err(|_| RunnerConnectionError::Protocol)?;
         // The parent retains an unreaped child. Worker output cannot nominate this PID.
@@ -167,7 +217,7 @@ impl RunnerConnection {
         .await
     }
 
-    /// Requests fencing; the caller must still observe the result and wrapper exit.
+    /// Requests a supervised stop; observe its scoped result and wrapper exit.
     /// # Errors
     /// Fails on transport loss; absence of acknowledgement is not proof of fencing.
     pub async fn cancel(&mut self) -> Result<(), RunnerConnectionError> {

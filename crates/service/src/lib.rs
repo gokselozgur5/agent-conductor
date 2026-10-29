@@ -1818,6 +1818,13 @@ mod effect_tests {
     }
 
     async fn claim_task<C: Clock>(service: &PersistentControlService<C>) -> (Task, String) {
+        claim_task_with_lease(service, 10).await
+    }
+
+    async fn claim_task_with_lease<C: Clock>(
+        service: &PersistentControlService<C>,
+        lease_duration_ms: u64,
+    ) -> (Task, String) {
         let row = service
             .store
             .task("task")
@@ -1860,7 +1867,7 @@ mod effect_tests {
                     CommandKind::Claim {
                         attempt_id: AttemptId("attempt".into()),
                         worker: ActorId("worker".into()),
-                        lease_duration_ms: 10,
+                        lease_duration_ms,
                         worker_margin_ms: 1,
                         recovery_grace_ms: 5,
                     },
@@ -2882,7 +2889,7 @@ mod effect_tests {
             fs::write(&wrapper, format!("#!/bin/sh\nread -r launch\nprintf '%s\\n' '{ready}'\nread -r release\nexec 0<&-\n: > '{}'\nsleep 0.2\nprintf '%s\\n' '{finished}'\n", closed_input.display())).expect("peer");
             fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("mode");
             let (record, connection) = service
-                .launch_execution(&wrapper, &input, &token, "runner")
+                .launch_execution(&wrapper, &input, &token, "runner", None)
                 .await
                 .expect("release");
             let project = store.task("task").await.unwrap().unwrap().project_id;

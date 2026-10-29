@@ -31,8 +31,10 @@ async fn main() {
         } else {
             Err(())
         }
+    } else if arguments.get(1).is_some_and(|v| v == "--account-native") {
+        serve(true).await
     } else {
-        serve().await
+        serve(false).await
     };
     let status = if result.is_err() {
         // No packet, environment, vendor output or credential material in errors.
@@ -82,10 +84,11 @@ async fn emit_terminal(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn serve() -> Result<(), ()> {
-    let identity =
-        conductor_runtime::RunnerProcessIdentity::from_arguments(std::env::args_os().skip(1))
-            .map_err(|_| ())?;
+async fn serve(account_native: bool) -> Result<(), ()> {
+    let identity = conductor_runtime::RunnerProcessIdentity::from_arguments(
+        std::env::args_os().skip(if account_native { 2 } else { 1 }),
+    )
+    .map_err(|_| ())?;
     let mut input = BufReader::new(tokio::io::stdin());
     let bytes = tokio::time::timeout(
         Duration::from_secs(5),
@@ -93,7 +96,14 @@ async fn serve() -> Result<(), ()> {
     )
     .await
     .map_err(|_| ())??;
-    let launch: RunnerLaunch = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    let launch: RunnerLaunch = if account_native {
+        serde_json::from_slice::<conductor_runtime::AccountNativeLaunch>(&bytes)
+            .map_err(|_| ())?
+            .prepare()
+            .map_err(|_| ())?
+    } else {
+        serde_json::from_slice(&bytes).map_err(|_| ())?
+    };
     launch.packet.validate().map_err(|_| ())?;
     if launch.heartbeat_timeout_ms == 0
         || launch.heartbeat_timeout_ms > 30_000
