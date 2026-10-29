@@ -245,6 +245,11 @@ impl<C: Clock> PersistentControlService<C> {
             String::new()
         };
         for record in records {
+            // Account workspaces are observed through explicit snapshot import;
+            // the coordinator must not scan another account's mutable tree.
+            if record.account_channel {
+                continue;
+            }
             let packet =
                 conductor_runtime::ResumePacket::decode(record.preparation.packet_json.as_bytes())
                     .map_err(|_| invalid("invalid owned observation packet"))?;

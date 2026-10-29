@@ -154,9 +154,34 @@ async fn account_result_binds_imported_source_without_local_exit_or_fence() {
         format!("snapshot:{}", manifest.sha256().unwrap())
     );
     assert_account_import_binding(&f, &record).await;
+    assert_account_workspace_not_polled(&f).await;
     assert_capture_projection_revokes_blocked(&f.service, &f.token).await;
     worker.kill().await.unwrap();
     worker.wait().await.unwrap();
+}
+
+async fn assert_account_workspace_not_polled(f: &AccountServiceFixture) {
+    // A coordinator scan would refuse this mutable receiver tree. Account
+    // records must use the imported snapshot, without entering that tree.
+    std::os::unix::fs::symlink("missing", f.packet.contract.workspace.join("foreign-link"))
+        .unwrap();
+    assert!(conductor_runtime::observe_attempt_tree(&f.packet.contract.workspace).is_err());
+    let project = f.store.task("task").await.unwrap().unwrap().project_id;
+    let mut watch = crate::OwnedWatchState::default();
+    assert_eq!(
+        f.service
+            .poll_owned_workspaces(&project, &mut watch, Duration::from_secs(1))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        f.service
+            .poll_owned_workspaces(&project, &mut watch, Duration::from_secs(2))
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
