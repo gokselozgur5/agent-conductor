@@ -13,6 +13,7 @@ pub struct NativeBrokerSession {
     store: Store,
     binding: FileBrokerBinding,
     receipt_root: PathBuf,
+    vendor_available: bool,
 }
 
 impl AcknowledgedBroker {
@@ -53,6 +54,7 @@ impl AcknowledgedBroker {
             store,
             binding,
             receipt_root,
+            vendor_available: true,
         })
     }
 }
@@ -62,6 +64,66 @@ impl NativeBrokerSession {
     #[must_use]
     pub fn proxy_handoff(&self) -> &str {
         self.runner.proxy_handoff()
+    }
+
+    /// Construct one vendor command from this session's exact frozen packet.
+    /// The handoff enters only the returned child environment. Caller must still
+    /// enforce vendor/OS admission and supervise the child with this session.
+    /// # Errors
+    /// Refuses changed task/attempt/root/packet, existing operations, closed broker,
+    /// repeated issuance, requested cancellation or invalid vendor/proxy policy.
+    pub async fn vendor_command(
+        &mut self,
+        pin: &conductor_runtime::VendorPin,
+        packet: &conductor_runtime::ResumePacket,
+        authentication: std::collections::BTreeMap<String, String>,
+        proxy: &std::path::Path,
+        proxy_sha256: &str,
+    ) -> Result<conductor_runtime::ProcessSpec, conductor_runtime::VendorError> {
+        use conductor_runtime::VendorError;
+        let contract = &packet.contract;
+        if !self.vendor_available
+            || contract.task_id != self.binding.task_id
+            || contract.attempt_id != self.binding.attempt_id
+            || i64::try_from(contract.lease_epoch).ok() != Some(self.binding.lease_epoch)
+            || conductor_runtime::broker_root_identity(&contract.workspace)
+                .map_err(|_| VendorError::Identity)?
+                != self.binding.root_identity_sha256
+        {
+            return Err(VendorError::Identity);
+        }
+        let execution = self
+            .store
+            .execution(&self.binding.execution_token)
+            .await
+            .map_err(|_| VendorError::Identity)?
+            .ok_or(VendorError::Identity)?;
+        if packet.sha256().map_err(|_| VendorError::Identity)?
+            != execution.preparation.packet_sha256
+        {
+            return Err(VendorError::Identity);
+        }
+        let status = self
+            .store
+            .file_broker_status(&self.binding)
+            .await
+            .map_err(|_| VendorError::Identity)?;
+        if status.closed || status.admitted != 0 || status.completed != 0 {
+            return Err(VendorError::Identity);
+        }
+        let mut spec = conductor_runtime::broker_codex_command(
+            pin,
+            packet,
+            authentication,
+            proxy,
+            proxy_sha256,
+        )?;
+        spec.environment.insert(
+            conductor_runtime::BROKER_HANDOFF_ENV.into(),
+            self.runner.proxy_handoff().into(),
+        );
+        self.vendor_available = false;
+        Ok(spec)
     }
 
     /// # Errors
@@ -74,6 +136,7 @@ impl NativeBrokerSession {
     /// # Errors
     /// A lost control pipe remains unresolved until independently recovered.
     pub async fn cancel(&mut self) -> Result<(), BrokerError> {
+        self.vendor_available = false;
         self.runner.cancel().await
     }
 
