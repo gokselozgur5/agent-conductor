@@ -22,6 +22,7 @@ ready = threading.Event()
 mode = os.environ.get("CONDUCTOR_PROXY_CALLS", "inventory")
 execute_calls = mode != "inventory"
 authorized = mode == "approved"
+resource_probe = mode == "resource-denied"
 goal_probe = mode == "goal-denied"
 command_probe = mode == "command-denied"
 command_marker = destination / "forbidden-command-marker"
@@ -81,7 +82,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             outputs.append(matches[0]['output'])
             encoded = json.dumps(matches[0]['output'])
             expected = ('written' if step == 1 else 'native codex proxy') if authorized else 'requires approval'
-            if command_probe or goal_probe:
+            if resource_probe:
+                assert '-32601: method unavailable in this session state' in encoded.lower(), 'Resource access did not receive the proxy method refusal'
+            elif command_probe or goal_probe:
                 assert any(word in encoded.lower() for word in ('unknown', 'unsupported', 'unrecognized', 'not found')), 'Disabled tool did not receive explicit dispatch refusal'
                 assert not command_marker.exists(), 'Disabled command executed'
             elif broker_probe:
@@ -112,6 +115,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 item.pop('namespace')
                 item['name'] = 'exec_command'
                 item['arguments'] = json.dumps({'cmd': 'printf forbidden > ' + shlex.quote(str(command_marker))})
+            if resource_probe:
+                item.pop('namespace')
+                item['name'] = 'read_mcp_resource'
+                item['arguments'] = json.dumps({'server': 'conductor_files', 'uri': outside_target.as_uri()})
             if goal_probe:
                 item.pop('namespace')
                 item['name'] = 'create_goal'
@@ -163,6 +170,9 @@ config = {
 arguments = json.loads(os.environ['CONDUCTOR_CODEX_BROKER_ARGUMENTS'])
 assert isinstance(arguments, list) and all(isinstance(value, str) for value in arguments)
 exec_index = arguments.index('exec')
+if resource_probe:
+    outside_target = destination / "synthetic-credentials.txt"
+    outside_target.write_bytes(outside_canary)
 if broker_probe:
     outside_target = destination / 'outside-target.txt'
     task_root = Path(arguments[arguments.index('-C') + 1])
@@ -233,6 +243,10 @@ for tool in ('conductor_read_text', 'conductor_write_text'):
     assert sum(name.endswith(tool) for name in found) == 1, 'Expected broker tool missing or duplicated'
 for log in ('stdout.log', 'stderr.log', 'tools.json'):
     assert capability not in (destination / log).read_bytes(), 'Capability leaked into fixture log'
+if resource_probe:
+    assert outside_target.read_bytes() == outside_canary
+    for log in ("stdout.log", "stderr.log", "tools.json"):
+        assert outside_canary not in (destination / log).read_bytes()
 if command_probe:
     assert not command_marker.exists(), 'Disabled command created a file'
 if broker_probe:
@@ -243,7 +257,7 @@ if broker_probe:
     for log in ('stdout.log', 'stderr.log', 'tools.json'):
         assert outside_canary not in (destination / log).read_bytes()
 receipt = {'pinned_codex': True, 'tool_call_mode': mode, 'capability_absent_from_model_requests_and_logs': True, 'real_proxy_initialized': True, 'broker_tools_discovered': 2,
-           'command_tools_absent': True, 'forced_command_refused': command_probe, 'goal_tools_absent': True, 'forced_goal_refused': goal_probe, 'model_backend_invoked': False,
+           'command_tools_absent': True, 'forced_command_refused': command_probe, 'goal_tools_absent': True, 'forced_goal_refused': goal_probe, 'outside_resource_refused': resource_probe, 'model_backend_invoked': False,
            'broker_path_denial': mode if broker_probe else None, 'image_access_control': mode if image_probe else None, 'file_tools_called': authorized or broker_probe, 'unapproved_call_refused': mode == 'denied', 'codex_child_stopped': child.poll() is not None}
 if execute_calls:
     assert len(outputs) == (2 if authorized else 1) and child.returncode == 0

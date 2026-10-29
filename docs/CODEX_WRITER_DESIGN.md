@@ -957,3 +957,13 @@ documents this feature as controlling persisted goals and automatic continuation
 The actual pinned fixture asserts all three tools are absent and forces a
 `create_goal` call to verify dispatch refusal. This changes only the launched
 broker worker's configuration, not the operator's Codex session or goals.
+
+## Outside resource URI control
+
+The actual pinned harness also exposes `read_mcp_resource`. A deterministic
+provider requests a synthetic outside-root credential canary through a `file://`
+URI on the configured broker server. The proxy must reject `resources/read` with
+its exact method-unavailable error; no file-operation journal entry is allowed.
+The canary remains unchanged and absent from model requests and captured logs.
+This covers the configured proxy's resource path, not arbitrary MCP servers or
+all credential/network surfaces. No real credentials are used by the fixture.

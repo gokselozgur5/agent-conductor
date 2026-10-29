@@ -350,6 +350,11 @@ async fn pinned_codex_forced_command_is_denied() {
 async fn pinned_codex_forced_goal_is_denied() {
     codex_probe("goal-denied").await;
 }
+#[tokio::test]
+#[ignore = "requires pinned Codex; resource reads must not expose an outside canary"]
+async fn pinned_codex_outside_resource_is_denied() {
+    codex_probe("resource-denied").await;
+}
 async fn codex_probe(mode: &str) {
     let root = private_tempdir();
     let directory = private_tempdir();
