@@ -12,6 +12,7 @@ impl<C: Clock> PersistentControlService<C> {
     /// # Errors
     /// Returns storage errors; missing fence evidence never grants admission.
     pub async fn recover_interrupted_workflows(&self) -> Result<usize, StoreError> {
+        self.recover_preowner_broker_receipts().await?;
         self.recover_file_broker_receipts().await?;
         self.recover_fenced_receipts().await?;
         self.recover_auxiliary_receipts().await?;

@@ -103,6 +103,7 @@ pub struct PersistentControlService<C = SystemClock> {
     mutations: Arc<Mutex<()>>,
     auxiliary_recovery_cursor: Arc<Mutex<Option<String>>>,
     broker_recovery_cursor: Arc<Mutex<Option<String>>>,
+    broker_preowner_cursor: Arc<Mutex<Option<String>>>,
     watcher_status: Arc<RwLock<WatcherStatus>>,
     observed_projects: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
 }
@@ -117,6 +118,7 @@ impl<C: Clock> Clone for PersistentControlService<C> {
             mutations: Arc::clone(&self.mutations),
             auxiliary_recovery_cursor: Arc::clone(&self.auxiliary_recovery_cursor),
             broker_recovery_cursor: Arc::clone(&self.broker_recovery_cursor),
+            broker_preowner_cursor: Arc::clone(&self.broker_preowner_cursor),
             watcher_status: Arc::clone(&self.watcher_status),
             observed_projects: Arc::clone(&self.observed_projects),
         }
@@ -201,6 +203,7 @@ impl<C: Clock> PersistentControlService<C> {
             mutations: Arc::new(Mutex::new(())),
             auxiliary_recovery_cursor: Arc::new(Mutex::new(None)),
             broker_recovery_cursor: Arc::new(Mutex::new(None)),
+            broker_preowner_cursor: Arc::new(Mutex::new(None)),
             watcher_status: Arc::new(RwLock::new(WatcherStatus::Disabled)),
             observed_projects: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         };

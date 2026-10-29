@@ -341,7 +341,7 @@ async fn native_ack_audit_failure_retains_intent_and_never_releases_writer() {
 #[tokio::test]
 async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
     let NativeLaunchSetup {
-        root: _root,
+        root,
         store,
         binding,
         launch,
@@ -404,21 +404,30 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
             .unwrap()
     );
     assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
-    assert!(
-        crate::recover_unregistered_broker_from_receipt(
-            &store,
-            &binding,
-            binding.boot_generation,
-            broker_owner_audit("preowner-close")
-        )
+    prepare_broker_restart_packet(&root, &binding).await;
+    let reopened = Store::open(root.path().join("state.sqlite3"))
         .await
-        .unwrap()
-    );
+        .unwrap();
+    let generation = binding.boot_generation + 1;
+    let service = PersistentControlService::start_with_reservation(
+        reopened.clone(),
+        200,
+        FixedClock::new(0),
+        Some((&binding.authority_id, generation.try_into().unwrap())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(service.recover_interrupted_workflows().await.unwrap(), 0);
+    assert!(service.broker_preowner_cursor.lock().await.is_none());
+    assert!(std::sync::Arc::ptr_eq(
+        &service.broker_preowner_cursor,
+        &service.clone().broker_preowner_cursor
+    ));
     assert!(
         !crate::recover_unregistered_broker_from_receipt(
             &store,
             &binding,
-            binding.boot_generation,
+            generation,
             broker_owner_audit("preowner-replay")
         )
         .await
