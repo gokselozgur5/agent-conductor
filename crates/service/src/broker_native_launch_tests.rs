@@ -254,3 +254,76 @@ async fn native_launcher_refuses_consumed_intent_without_ack_or_receipt_claim() 
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn native_ack_audit_failure_retains_intent_and_never_releases_writer() {
+    let NativeLaunchSetup {
+        root,
+        store,
+        binding,
+        launch,
+        endpoint,
+        wrapper,
+    } = native_launch_setup(false).await;
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("state.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    db.execute("CREATE TRIGGER reject_native_ack BEFORE INSERT ON audit_events WHEN NEW.kind='execution.started' BEGIN SELECT RAISE(FAIL,'fixture'); END").await.unwrap();
+    let before = store
+        .execution(&binding.execution_token)
+        .await
+        .unwrap()
+        .unwrap();
+    let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+    assert!(
+        crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .execution(&binding.execution_token)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert!(store.file_broker_owner(&binding).await.is_err());
+    assert!(store.file_broker_status(&binding).await.is_err());
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    let receipt_path = launch
+        .receipt_root
+        .join(format!("broker-{}.json", binding.invocation_id));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !receipt_path.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Fixture inspection only: receipt-provided identity is not recovery authority.
+    let receipt: conductor_runtime::BrokerShutdownReceipt =
+        serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+    assert!(matches!(
+        receipt.observation,
+        conductor_runtime::BrokerShutdownObservation::NeverReleased
+    ));
+    assert_eq!(receipt.launch_sha256, launch.sha256().unwrap());
+    assert_eq!(receipt.scope.invocation_id, binding.invocation_id);
+    assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
+    let audits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE kind='execution.started'")
+            .fetch_one(&mut db)
+            .await
+            .unwrap();
+    assert_eq!(audits, 0);
+    assert!(store.file_broker_launch(&binding).await.is_ok());
+}
