@@ -30,8 +30,9 @@ observed process state accurately.
   preserves the profile from its accepted template. Authenticated loopback RPC
   permits control-plane clients in another account without sharing the private
   daemon directory. Normal account-channel launch and artifact transport are
-  implemented. Actual distinct-UID deployment acceptance and started unrestricted
-  worker recovery remain open.
+  implemented. Controlled distinct-UID fixtures pass on macOS and Linux; personal
+  vendor login deployment under distinct accounts and started unrestricted worker
+  recovery remain open.
 - `native_writer_launch` routes explicit full profiles to Codex `--yolo` or Claude
   `--dangerously-skip-permissions`. Both use the selected account's own HOME and
   configuration. Restricted profiles retain their previous behavior.
@@ -193,8 +194,12 @@ Operator-pinned instruction paths must be readable by both selected accounts.
 
 A successful peer report is not a local process-exit or write-fence receipt.
 The account execution remains Started/unfenced after candidate acceptance.
-Started-worker interruption/restart recovery and proof using a second OS UID
-remain separate delivery gates.
+The privileged CI fixture runs an actual controlled worker under a second OS UID
+on macOS and Linux, checking kernel peer identity, HOME, file ownership, ACK before
+release, and snapshot transfer. It uses a controlled vendor fixture, not personal
+Codex or Claude logins. Started-worker interruption/restart recovery and personal
+vendor deployment under distinct accounts remain separate delivery gates. See
+[the delivery audit](DELIVERY_ACCEPTANCE.md) for pinned acceptance evidence.
 
 After a controller restart, an independently accepted account snapshot can still
 serve as a dependent task's input. Its completed task, accepted source identity,
