@@ -19,6 +19,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    def parse_request(self):
+        valid = super().parse_request()
+        if valid:
+            with (home / 'http-methods.jsonl').open('a') as log:
+                log.write(json.dumps({'method': self.command, 'path': self.path[:256]}) + '\n')
+        return valid
+
     def do_POST(self):
         size = int(self.headers.get('Content-Length', '0'))
         assert 0 < size < 8 * 1024 * 1024
@@ -86,7 +93,7 @@ def toml(value):
 options = [part for key, value in configuration.items() for part in ('-c', key + '=' + toml(value))]
 binary = str(Path(sys.argv[2]).resolve())
 launcher = home / 'launch-codex'
-launcher.write_text('#!/usr/bin/python3\nimport os, sys\nopen(' + repr(str(home / 'vendor-pid')) + ', \"w\").write(str(os.getpid()))\nos.execve(' + repr(binary) + ', ['
+launcher.write_text('#!/usr/bin/python3\nimport os, sys\nos.environ["NO_PROXY"] = "127.0.0.1,localhost"\nopen(' + repr(str(home / 'vendor-pid')) + ', \"w\").write(str(os.getpid()))\nos.execve(' + repr(binary) + ', ['
                     + repr(binary) + '] + ' + repr(options) + ' + sys.argv[1:], os.environ)\n')
 launcher.chmod(0o700)
 def observe_group():
