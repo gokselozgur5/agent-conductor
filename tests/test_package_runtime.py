@@ -90,6 +90,14 @@ class RuntimePackageTests(unittest.TestCase):
             package_runtime.package(self.bin, self.root / 'linked')
         self.assertFalse((self.root / 'linked').exists())
 
+    def test_manifest_symlink_is_rejected_before_reading_its_target(self):
+        package_runtime.package(self.bin, self.root / 'kit')
+        manifest = self.root / 'kit/manifest.json'
+        manifest.rename(self.root / 'saved-manifest.json')
+        manifest.symlink_to(self.repo / 'tools/conductor')
+        with self.assertRaisesRegex(ValueError, 'manifest must be a regular file'):
+            package_runtime.verify(self.root / 'kit')
+
     def test_missing_binary_and_existing_destination_are_preserved(self):
         executable = self.bin / package_runtime.BINARIES[0]
         executable.chmod(0o644)

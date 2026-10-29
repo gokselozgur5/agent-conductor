@@ -24,7 +24,14 @@ def digest(path):
 def verify(directory):
     """Check an extracted kit's complete file set and content hashes."""
     directory = directory.resolve(strict=True)
-    manifest = json.loads((directory / 'manifest.json').read_text())
+    manifest_path = directory / 'manifest.json'
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError('runtime manifest must be a regular file')
+    with manifest_path.open('rb') as stream:
+        data = stream.read(4 * 1024 * 1024 + 1)
+    if len(data) > 4 * 1024 * 1024:
+        raise ValueError('runtime manifest exceeds its bound')
+    manifest = json.loads(data)
     expected = manifest['files']
     actual = set()
     for path in directory.rglob('*'):
