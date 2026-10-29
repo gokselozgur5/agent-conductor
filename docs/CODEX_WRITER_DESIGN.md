@@ -945,3 +945,15 @@ The fixture bypasses the host HTTP proxy only for localhost via `NO_PROXY` so
 its synthetic provider remains local. Production authentication and networking
 are unchanged. This single forced-command test does not cover alternate tools,
 control sockets, credential reads, arbitrary network access or OS confinement.
+
+## Disable nested vendor goals
+
+The pinned 0.163.0 catalog exposed `get_goal`, `create_goal` and `update_goal`
+even with shell, plugins and multi-agent tools disabled. Those tools permit
+vendor-managed lifecycle state outside Conductor's task authority. The broker
+profile now explicitly sets `features.goals=false`; the official
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+documents this feature as controlling persisted goals and automatic continuation.
+The actual pinned fixture asserts all three tools are absent and forces a
+`create_goal` call to verify dispatch refusal. This changes only the launched
+broker worker's configuration, not the operator's Codex session or goals.

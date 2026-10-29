@@ -39,6 +39,7 @@ pub fn codex_broker_tool_options(
         "features.plugins=false",
         "features.remote_plugin=false",
         "features.multi_agent=false",
+        "features.goals=false",
         "web_search=\"disabled\"",
         "project_doc_max_bytes=0",
         &server,

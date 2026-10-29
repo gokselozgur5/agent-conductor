@@ -345,6 +345,11 @@ async fn pinned_codex_broker_traversal_write_is_denied() {
 async fn pinned_codex_forced_command_is_denied() {
     codex_probe("command-denied").await;
 }
+#[tokio::test]
+#[ignore = "requires pinned Codex; forced autonomous goal creation must be refused"]
+async fn pinned_codex_forced_goal_is_denied() {
+    codex_probe("goal-denied").await;
+}
 async fn codex_probe(mode: &str) {
     let root = private_tempdir();
     let directory = private_tempdir();
