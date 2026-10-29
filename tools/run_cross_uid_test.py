@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run only the opt-in account test as root on an ephemeral Linux CI runner."""
+"""Run only the opt-in account test as root on an ephemeral Linux/macOS CI runner."""
 import json
 import os
 from pathlib import Path
@@ -8,8 +8,8 @@ import sys
 
 
 def main():
-    if sys.platform != 'linux' or os.environ.get('GITHUB_ACTIONS') != 'true':
-        raise SystemExit('This privileged fixture is restricted to Linux GitHub Actions')
+    if sys.platform not in ('linux', 'darwin') or os.environ.get('GITHUB_ACTIONS') != 'true':
+        raise SystemExit('This privileged fixture is restricted to supported GitHub Actions hosts')
     built = subprocess.run(
         ['cargo', 'test', '-p', 'conductor-runtime', '--test', 'account_cross_uid',
          '--no-run', '--message-format=json'], check=True, stdout=subprocess.PIPE, text=True)
