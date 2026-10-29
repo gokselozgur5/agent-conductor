@@ -904,3 +904,7 @@ fn prepared_test_vendor(
 mod codex_session {
     include!("broker_codex_session_tests.rs");
 }
+
+mod vendor_supervision {
+    include!("broker_vendor_session_tests.rs");
+}
