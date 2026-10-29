@@ -1,3 +1,4 @@
+mod broker_authority;
 mod broker_vendor_session;
 pub use broker_vendor_session::BrokerVendorOutcome;
 mod broker_session;

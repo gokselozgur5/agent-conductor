@@ -160,6 +160,12 @@ impl PreparedBrokerRunner {
     }
 }
 impl BrokerRunnerSession {
+    /// Immutable ceiling from the exact launch acknowledged by this session.
+    #[must_use]
+    pub fn maximum_deadline_ms(&self) -> u64 {
+        self.0.maximum_deadline_ms
+    }
+
     /// Pass only to the explicitly approved proxy child environment, never logs,
     /// model context, command arguments or durable launch/configuration records.
     #[must_use]

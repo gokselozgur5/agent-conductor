@@ -60,6 +60,10 @@ impl AcknowledgedBroker {
 }
 
 impl NativeBrokerSession {
+    pub(crate) fn authority_binding(&self) -> (FileBrokerBinding, u64) {
+        (self.binding.clone(), self.runner.maximum_deadline_ms())
+    }
+
     /// Give only to the approved isolated proxy child environment, never logs.
     #[must_use]
     pub fn proxy_handoff(&self) -> &str {
