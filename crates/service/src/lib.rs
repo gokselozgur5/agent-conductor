@@ -73,6 +73,8 @@ mod repository_watch;
 #[cfg(unix)]
 mod usage;
 #[cfg(unix)]
+mod workflow_account;
+pub use workflow_account::AccountWorkerTarget;
 mod workflow;
 #[cfg(unix)]
 mod workflow_baseline;

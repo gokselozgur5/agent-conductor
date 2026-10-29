@@ -137,24 +137,37 @@ impl<C: Clock> PersistentControlService<C> {
             return Err(invalid("input execution binding mismatch"));
         }
         let workspace = &packet.contract.workspace;
-        let root = workspace
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| invalid("input artifact path invalid"))?;
         let approved_root = upstream
             .artifacts
             .canonicalize()
             .map_err(|_| invalid("input artifacts unavailable"))?;
-        if root.join("work/tree") != *workspace
-            || !root.starts_with(&approved_root)
-            || root
-                .canonicalize()
-                .map_err(|_| invalid("input artifact root unavailable"))?
-                != root
-        {
-            return Err(invalid("input artifact root mismatch"));
-        }
-        let capture = root.join("source");
+        let capture = if upstream.account_worker.is_some() {
+            if !record.account_channel
+                || record
+                    .account_result
+                    .as_ref()
+                    .and_then(|r| r.snapshot_sha256.as_ref())
+                    .is_none_or(|digest| source != format!("snapshot:{digest}"))
+            {
+                return Err(invalid("input account source binding mismatch"));
+            }
+            approved_root.join("source")
+        } else {
+            let root = workspace
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| invalid("input artifact path invalid"))?;
+            if root.join("work/tree") != *workspace
+                || !root.starts_with(&approved_root)
+                || root
+                    .canonicalize()
+                    .map_err(|_| invalid("input artifact root unavailable"))?
+                    != root
+            {
+                return Err(invalid("input artifact root mismatch"));
+            }
+            root.join("source")
+        };
         let destination = destination.to_owned();
         let starting_head = packet.contract.starting_head;
         tokio::task::spawn_blocking(move || {

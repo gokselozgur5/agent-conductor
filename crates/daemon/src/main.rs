@@ -221,7 +221,11 @@ async fn run_plan_mode(
             std::process::exit(2);
         }
     };
-    let worker_auth = dispatcher::authentication("ANTHROPIC_API_KEY");
+    let worker_auth = if plan.account_worker.is_some() {
+        std::collections::BTreeMap::new()
+    } else {
+        dispatcher::authentication("ANTHROPIC_API_KEY")
+    };
     let verifier_auth = if serde_json::to_value(&plan.verifier)
         .ok()
         .and_then(|v| v.get("kind").cloned())
