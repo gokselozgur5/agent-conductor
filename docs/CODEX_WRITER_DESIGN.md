@@ -892,3 +892,17 @@ receipt recovery closes that record. A separate authority-update control keeps a
 vendor running beyond its original deadline, then verifies normal settlement.
 Its journal I/O budget is distinct from the lease duration. Long idle inference,
 daemon dispatch and full operational acceptance remain open.
+
+## Pre-turn diagnostics and candidate interpretation
+
+The pinned 0.163.0 local-provider run emits a completed `error` item for missing
+model metadata before `turn.started`, then performs both broker calls and ends
+with `turn.completed` and exit zero. The candidate parser now counts nonempty
+pre-turn diagnostic messages separately. It does not copy them into candidate
+text or infer a file-only fence. In-turn error items, top-level errors, failed
+turns, malformed messages and incomplete terminal sequences remain refused.
+This rule is based on the captured pinned-binary transcript and negative tests;
+the [official JSON mode documentation](https://learn.chatgpt.com/docs/non-interactive-mode)
+describes the event stream but does not establish this diagnostic distinction.
+A parsed candidate is still untrusted output; admission, broker settlement,
+execution fencing, source capture and independent review remain separate gates.

@@ -22,6 +22,7 @@ async fn run_owned_codex(delay: u64) {
     let home = evidence.join("home");
     let mut provider = start_owned_provider(&home, &evidence, delay).await;
     let prepared = prepare_owned_codex(&setup, &home).await;
+    let packet = prepared.packet().clone();
     // Establish the launch ceiling after expensive executable validation.
     setup.launch.maximum_deadline_ms = continuous_millis().unwrap() + 60000;
     let acknowledged = crate::prepare_native_broker(
@@ -63,6 +64,13 @@ async fn run_owned_codex(delay: u64) {
     fs::write(evidence.join("stdout.log"), &output.stdout).unwrap();
     fs::write(evidence.join("stderr.log"), &output.stderr).unwrap();
     assert_eq!(output.exit_code, Some(0));
+    let candidate = conductor_runtime::interpret_vendor_output(&packet, &output)
+        .expect("successful broker vendor must yield a bounded candidate");
+    assert_eq!(candidate.text, "Fixture done.");
+    assert!(
+        !candidate.file_only_tools,
+        "broker output is not a Claude fence"
+    );
     assert!(outcome.broker.is_ok());
     assert_owned_process_observations(&home);
     if delay != 0 {
