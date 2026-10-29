@@ -36,6 +36,10 @@ that every required behavior is accepted.
 | FR-12 operator | CLI, authenticated local board, evidence, diagnostics, controls | Final installation/runbook acceptance; remote authenticated encrypted access not established |
 | FR-13 audit | Transactional audit, fixed public errors, bounded evidence and reported usage | Full privacy-surface review and final causal-record walkthrough |
 
+A proposed bounded broker route, with actual local tool-discovery evidence and
+remaining acceptance gates, is recorded in [CODEX_WRITER_DESIGN.md](CODEX_WRITER_DESIGN.md).
+It does not change native admission.
+
 The Codex writer gap is directly enforced in `crates/runtime/src/vendor.rs`:
 `native_writer_launch` only admits Claude without workspace commands. This is an
 intentional safety refusal, not support for both required writer adapters.
