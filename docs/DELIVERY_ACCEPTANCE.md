@@ -89,13 +89,17 @@ does not describe the current full-capability writer admission path.
 | --- | --- | --- |
 | NFR-1 reliability | Transaction rollback/cancellation/process-death controls and short native SIGKILL fixtures; separate running control-plane soak | Seven continuous days, complete transition/effect coverage and integrated native invariant monitoring are not established |
 | NFR-2 performance | Documented board/load and wake measurements on earlier pinned binaries | Recheck final candidate at declared load; do not transfer timing bounds between binaries |
-| NFR-3 portability | Rust core has prior macOS/Linux CI history | Current sandboxed_command rejects every non-macOS host; Linux isolated checks, both Linux architectures and release artifacts remain incomplete |
+| NFR-3 portability | Rust core and actual Linux x86_64 isolated project checks pass hosted CI; Linux x86_64/arm64 runtime code passes cross-target Clippy | Linux arm64 runtime, personal vendor reviewer acceptance and release artifacts remain incomplete |
 | NFR-4 security/privacy | Local auth, explicit capabilities, literal checkpoint redaction and UI controls | Full logs/events/resume/source/metadata canary audit and encrypted remote transport acceptance |
 | NFR-5 evolvability | Versioned migrations and strict protocol/adapters | Final upgrade/rollback/refusal rehearsal across the delivered artifacts |
 
-`crates/runtime/src/sandbox.rs` explicitly returns `Unsupported` for non-macOS
-hosts. Compiling the Rust core on Linux cannot establish usable native workflows
-there. The current CI matrix does not explicitly cover Linux arm64. The earlier hosted billing failure is no longer the current CI state; the exact
+Linux project checks now use a separate helper and bubblewrap with explicit
+filesystem and syscall restrictions. Actual source `ae57be7` passed the check
+boundary and source-binding tests in CI `40948331899`; see
+[Linux check requirements and evidence](LINUX_CHECKS.md). Full-capability workers
+retain their selected account's unrestricted tools and network. These check tests
+do not establish complete native vendor workflows on Linux. The current CI matrix
+does not explicitly cover Linux arm64. The earlier hosted billing failure is no longer the current CI state; the exact
 PR #109 and post-merge runs succeeded on both configured platforms. No local Docker, Colima, Lima, Podman or
 QEMU executable was found during this audit; that is a tooling observation, not
 proof that no Linux execution route exists.
