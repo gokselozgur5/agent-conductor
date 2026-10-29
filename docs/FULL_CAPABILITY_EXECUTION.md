@@ -196,3 +196,10 @@ A successful peer report is not a local process-exit or write-fence receipt.
 The account execution remains Started/unfenced after candidate acceptance.
 Started-worker interruption/restart recovery and proof using a second OS UID
 remain separate delivery gates.
+
+After a controller restart, an independently accepted account snapshot can still
+serve as a dependent task's input. Its completed task, accepted source identity,
+account report and imported manifest must agree; the copy is rehashed before
+publication. This read-only reuse does not reopen capture, renew the old lease,
+or clear the old execution's Blocked/unfenced status. Unaccepted candidates still
+require normal live capture/verification eligibility.
