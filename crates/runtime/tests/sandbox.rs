@@ -11,7 +11,7 @@ fn linux_helper_closes_inherited_host_file_descriptors() {
     std::fs::create_dir(&workspace).unwrap();
     let private = root.join("private");
     std::fs::write(&private, "private-fd-sentinel").unwrap();
-    let script = r#"import os
+    let script = r"import os
 for name in os.listdir('/proc/self/fd'):
     if int(name) <= 2:
         continue
@@ -21,7 +21,7 @@ for name in os.listdir('/proc/self/fd'):
         continue
     assert not value.endswith('/private'), value
 print('fd-boundary-ok')
-"#;
+";
     let spec = sandboxed_command(
         &workspace,
         std::path::Path::new("/usr/bin/python3"),
@@ -78,7 +78,8 @@ async fn linux_filter_denies_io_uring_and_incompatible_syscall_abi() {
     // These attempted syscalls run only inside the actual isolated process.
     // io_uring receives EPERM before its pointers are evaluated. An incompatible
     // syscall ABI kills that child instead of reaching an unfiltered syscall.
-    let script = r#"import ctypes, errno, os, signal
+    let script = r"import ctypes, errno, os, signal, resource
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 libc = ctypes.CDLL(None, use_errno=True)
 for nr in (425, 426, 427):
     assert libc.syscall(nr, 0, 0, 0, 0, 0, 0) == -1
@@ -90,7 +91,7 @@ if pid == 0:
 _, status = os.waitpid(pid, 0)
 assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGSYS
 print('syscall-boundary-ok')
-"#;
+";
     let spec = sandboxed_command(
         &root,
         std::path::Path::new("/usr/bin/python3"),
