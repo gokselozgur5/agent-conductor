@@ -90,3 +90,61 @@ async fn broker_authority_binding(
         root_identity_sha256: "a".repeat(64),
     }
 }
+
+#[tokio::test]
+async fn broker_service_authority_observes_operator_stop_and_lock_stall() {
+    for mode in ["pause", "cancel", "lock"] {
+        let (directory, store) = lifecycle_store().await;
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .unwrap();
+        let (claimed, _) = claim_task(&service).await;
+        let packet = runtime_launch(directory.path()).packet;
+        let binding = broker_authority_binding(directory.path(), &store).await;
+        let service = &service;
+        service
+            .with_broker_authority(&packet, &binding, u64::MAX, |mut lease| async move {
+                assert!(lease.borrow_and_update().is_some());
+                let held = if mode == "lock" {
+                    Some(service.mutations.lock().await)
+                } else {
+                    None
+                };
+                if mode != "lock" {
+                    let row = store.task("task").await.unwrap().unwrap();
+                    service
+                        .apply_row(
+                            row,
+                            lifecycle_command(
+                                &claimed,
+                                Actor {
+                                    id: ActorId("operator".into()),
+                                    role: ActorRole::Operator,
+                                },
+                                if mode == "pause" {
+                                    CommandKind::Pause
+                                } else {
+                                    CommandKind::Cancel
+                                },
+                                "broker-stop",
+                            ),
+                        )
+                        .await
+                        .unwrap();
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while lease.borrow_and_update().is_some() {
+                        lease.changed().await.unwrap();
+                    }
+                })
+                .await
+                .unwrap();
+                drop(held);
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                assert_eq!(*lease.borrow(), None);
+            })
+            .await
+            .unwrap();
+    }
+}
