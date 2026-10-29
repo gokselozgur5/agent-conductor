@@ -326,6 +326,16 @@ async fn native_ack_audit_failure_retains_intent_and_never_releases_writer() {
             .unwrap();
     assert_eq!(audits, 0);
     assert!(store.file_broker_launch(&binding).await.is_ok());
+    assert!(
+        crate::recover_unregistered_broker_from_receipt(
+            &store,
+            &binding,
+            binding.boot_generation,
+            broker_owner_audit("preowner-no-ack")
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -350,6 +360,16 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
         .unwrap()
         .unwrap();
     assert_eq!(before.process.as_ref().unwrap().pid, expected.process.pid);
+    assert!(
+        crate::recover_unregistered_broker_from_receipt(
+            &store,
+            &binding,
+            binding.boot_generation,
+            broker_owner_audit("preowner-missing-receipt")
+        )
+        .await
+        .is_err()
+    );
     drop(acknowledged);
     let directory = conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -384,4 +404,30 @@ async fn dropping_acknowledged_broker_never_releases_or_discards_prelaunch() {
             .unwrap()
     );
     assert_eq!(fs::read_dir(&launch.root).unwrap().count(), 0);
+    assert!(
+        crate::recover_unregistered_broker_from_receipt(
+            &store,
+            &binding,
+            binding.boot_generation,
+            broker_owner_audit("preowner-close")
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !crate::recover_unregistered_broker_from_receipt(
+            &store,
+            &binding,
+            binding.boot_generation,
+            broker_owner_audit("preowner-replay")
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
 }
