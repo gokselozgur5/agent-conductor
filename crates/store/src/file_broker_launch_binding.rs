@@ -40,6 +40,43 @@ pub(super) async fn registered_binding(
     Ok(())
 }
 
+pub(super) async fn authorize_owner(
+    db: &mut sqlx::SqliteConnection,
+    binding: &FileBrokerBinding,
+    owner: &crate::FileBrokerOwner,
+) -> Result<(), StoreError> {
+    let saved: Option<(String, String)> =
+        sqlx::query_as("SELECT launch_json,state FROM file_broker_launches WHERE invocation_id=?")
+            .bind(&binding.invocation_id)
+            .fetch_optional(&mut *db)
+            .await?;
+    if let Some((saved, state)) = saved {
+        let launch: FileBrokerLaunchBinding =
+            serde_json::from_str(&saved).map_err(|_| invalid())?;
+        launch.validate()?;
+        if state != "open"
+            || serde_json::to_string(&launch).map_err(|_| invalid())? != saved
+            || launch.launch_sha256 != owner.launch_sha256
+            || launch.receipt_root_identity_sha256 != owner.receipt_root_identity_sha256
+            || owner.receipt_root.as_deref() != Some(launch.receipt_root.as_str())
+            || launch.platform != owner.process.platform
+            || launch.host_id != owner.process.host_id
+            || launch.boot_id != owner.process.boot_id
+        {
+            return Err(invalid());
+        }
+        let acknowledged: Option<String> =
+            sqlx::query_scalar("SELECT process_json FROM executions WHERE effect_token=?")
+                .bind(&binding.execution_token)
+                .fetch_one(db)
+                .await?;
+        if acknowledged != Some(serde_json::to_string(&owner.process).map_err(|_| invalid())?) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::file_broker_tests::{audit, fixture};

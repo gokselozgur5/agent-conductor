@@ -393,3 +393,83 @@ async fn broker_fence_deferral_checks_open_and_contradictory_pending_ownership()
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn prelaunch_owner_requires_exact_acknowledged_process_and_open_intent() {
+    let (_root, store, binding) = fixture().await;
+    let mut owner = owner();
+    owner.receipt_root = Some("/private/receipts".into());
+    let launch = FileBrokerLaunchBinding {
+        launch_sha256: owner.launch_sha256.clone(),
+        wrapper_path: "/approved/runner".into(),
+        wrapper_sha256: "e".repeat(64),
+        receipt_root: owner.receipt_root.clone().unwrap(),
+        receipt_root_identity_sha256: owner.receipt_root_identity_sha256.clone(),
+        platform: owner.process.platform.clone(),
+        host_id: owner.process.host_id.clone(),
+        boot_id: owner.process.boot_id.clone(),
+    };
+    sqlx::query("INSERT INTO file_broker_launches VALUES(?,?,?,?,'open',100,NULL)")
+        .bind(&binding.invocation_id)
+        .bind(&binding.execution_token)
+        .bind(serde_json::to_string(&binding).unwrap())
+        .bind(serde_json::to_string(&launch).unwrap())
+        .execute(&mut *store.inner.writer.lock().await)
+        .await
+        .unwrap();
+    store
+        .register_file_broker(&binding, audit("launch-register"))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .authorize_file_broker_release(&binding, &owner, audit("launch-no-ack"))
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE executions SET process_json=?")
+        .bind(serde_json::to_string(&owner.process).unwrap())
+        .execute(&mut *store.inner.writer.lock().await)
+        .await
+        .unwrap();
+    for field in ["process", "launch", "root", "host"] {
+        let mut changed = owner.clone();
+        match field {
+            "process" => changed.process.pid += 1,
+            "launch" => changed.launch_sha256 = "f".repeat(64),
+            "root" => changed.receipt_root = Some("/other".into()),
+            _ => changed.process.host_id = "f".repeat(64),
+        }
+        assert!(
+            store
+                .authorize_file_broker_release(&binding, &changed, audit("launch-wrong"))
+                .await
+                .is_err()
+        );
+    }
+    sqlx::query("UPDATE file_broker_launches SET state='closed',shutdown_sha256=?")
+        .bind("f".repeat(64))
+        .execute(&mut *store.inner.writer.lock().await)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .authorize_file_broker_release(&binding, &owner, audit("launch-closed"))
+            .await
+            .is_err()
+    );
+    store
+        .inner
+        .writer
+        .lock()
+        .await
+        .execute("UPDATE file_broker_launches SET state='open',shutdown_sha256=NULL")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .authorize_file_broker_release(&binding, &owner, audit("launch-valid"))
+            .await
+            .unwrap()
+    );
+}
