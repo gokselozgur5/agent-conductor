@@ -6,25 +6,32 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
+import sys
 import subprocess
 
 REPO = Path(__file__).resolve().parents[1]
 BINARIES = ('conductor-daemon', 'conductorctl', 'conductor-runner')
-LAUNCHER = '''#!/usr/bin/env python3
-"""Run this bundle without rebuilding or locating an adapter template."""
+LAUNCHER = '''"""Run this bundle without rebuilding or locating an adapter template."""
 import os
 from pathlib import Path
 import sys
-root = Path(__file__).resolve().parent
-args = sys.argv[1:]
+root = Path(sys.argv[1]).resolve().parent
+args = sys.argv[2:]
 command_index = 2 if args[:1] == ['--state'] else 0
 command = args[command_index] if len(args) > command_index else ''
 if command == 'init' and '--bin-dir' not in args:
     args += ['--bin-dir', str(root / 'bin')]
 if command == 'plan' and '--from-plan' not in args:
     args += ['--from-plan', str(root / 'accepted-adapters.json')]
-os.execv(sys.executable, [sys.executable, str(root / 'tools/conductor'), *args])
+os.execv(sys.executable, [sys.executable, '-E', '-s', str(root / 'tools/conductor'), *args])
 '''
+
+
+def launcher(interpreter):
+    # Shell quoting covers spaces/apostrophes in host-specific interpreter paths.
+    return ('#!/bin/sh\nexec ' + shlex.quote(str(interpreter)) + ' -E -s -c '
+            + shlex.quote(LAUNCHER) + ' "$0" "$@"\n')
 
 
 def digest(path):
@@ -33,6 +40,7 @@ def digest(path):
 
 def package(bin_dir, accepted_plan, destination):
     """Copy exact artifacts; packaging does not certify new adapter capabilities."""
+    interpreter = Path(sys.executable).resolve(strict=True)
     bin_dir = bin_dir.resolve(strict=True)
     template = json.loads(accepted_plan.read_text())
     pins = {k: template[k] for k in ('worker', 'verifier', 'model_timeout_ms')}
@@ -63,7 +71,7 @@ def package(bin_dir, accepted_plan, destination):
         shutil.copy2(REPO / 'docs' / name, destination / 'docs' / name)
     (destination / 'accepted-adapters.json').write_text(json.dumps(pins, indent=2) + '\n')
     (destination / 'accepted-adapters.json').chmod(0o600)
-    (destination / 'conductor').write_text(LAUNCHER)
+    (destination / 'conductor').write_text(launcher(interpreter))
     (destination / 'conductor').chmod(0o700)
     (destination / 'README.txt').write_text('''Conductor local preview (macOS native workflow)
 
@@ -93,12 +101,14 @@ Use --state /short/private/path before the command for a separate runtime.
 
 This is a host-local preview, not complete v1 acceptance. Native Codex writing,
 Linux isolation, full endurance and final delivery gates remain incomplete.
-Adapter executable paths are host-specific and hashes are checked during planning.
+The launcher uses the packaging Python interpreter directly, independent of PATH.
+Python and adapter executable paths are host-specific; adapter hashes are checked during planning.
 Do not replace this bundle's binaries while its runtime is running.
 See docs/LOCAL_OPERATOR.md and docs/DELIVERY_ACCEPTANCE.md for the full boundaries.
 ''')
     files = {str(p.relative_to(destination)): digest(p) for p in sorted(destination.rglob('*')) if p.is_file()}
     manifest = {'source_commit': commit, 'source_dirty': dirty, 'host_local_preview': True,
+                'python_executable': str(interpreter), 'python_sha256': digest(interpreter),
                 'adapter_source_sha256': digest(accepted_plan), 'files': files}
     (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     return manifest
