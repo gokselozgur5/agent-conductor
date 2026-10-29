@@ -15,11 +15,16 @@ import run_cross_uid_test
 class CrossUidLauncherTests(unittest.TestCase):
     def test_non_ci_invocation_never_builds_or_requests_root(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(subprocess, 'run') as run:
-            with self.assertRaisesRegex(SystemExit, 'restricted to Linux'):
+            with self.assertRaisesRegex(SystemExit, 'restricted to supported'):
                 run_cross_uid_test.main()
             run.assert_not_called()
 
     def test_privileged_child_gets_only_explicit_environment(self):
+        for platform in ('linux', 'darwin'):
+            with self.subTest(platform=platform):
+                self.assert_privileged_environment(platform)
+
+    def assert_privileged_environment(self, platform):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / 'test-binary'
             binary.write_text('fixture')
@@ -28,7 +33,7 @@ class CrossUidLauncherTests(unittest.TestCase):
             environment = dict(GITHUB_ACTIONS='true', RUNNER_TEMP=directory,
                                HOME='/private-home', PRIVATE_FIXTURE='must-not-forward')
             with patch.dict(os.environ, environment, clear=True), \
-                    patch.object(sys, 'platform', 'linux'), \
+                    patch.object(sys, 'platform', platform), \
                     patch.object(subprocess, 'run') as run:
                 run.return_value.stdout = output
                 run_cross_uid_test.main()
@@ -48,3 +53,11 @@ class CrossUidLauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, 'one compiled'):
                 run_cross_uid_test.main()
             self.assertEqual(run.call_count, 1)
+
+    def test_unsupported_host_never_requests_root(self):
+        with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true'}, clear=True), \
+                patch.object(sys, 'platform', 'win32'), \
+                patch.object(subprocess, 'run') as run:
+            with self.assertRaisesRegex(SystemExit, 'restricted to supported'):
+                run_cross_uid_test.main()
+            run.assert_not_called()
