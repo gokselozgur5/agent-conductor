@@ -55,6 +55,12 @@ jobs:
           python3 -m unittest discover -s tests -p test_host_recovery_integration.py -v
           python3 -m unittest discover -s tests -p test_soak_control_plane.py -v
           python3 -m unittest discover -s tests -p test_runner_process_inventory.py -v
+          python3 -m unittest discover -s tests -p test_native_observation_guard.py -v
+          python3 -m unittest discover -s tests -p test_run_native_monitor.py -v
+          python3 -m unittest discover -s tests -p test_native_resource_guard.py -v
+          python3 -m unittest discover -s tests -p test_native_stale_control.py -v
+          python3 -m unittest discover -s tests -p test_escaped_runner.py -v
+          python3 -m unittest discover -s tests -p test_verification_surface.py -v
 
       - name: Check board diagnostic rendering
         run: node --test tests/board_diagnostics.cjs
