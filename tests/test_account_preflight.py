@@ -1,10 +1,12 @@
 """Account setup inspection neither launches vendors nor consumes socket clients."""
 import copy
 import hashlib
+import json
 import os
 from pathlib import Path
 import pwd
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -82,3 +84,15 @@ class AccountPreflightTests(unittest.TestCase):
         with socket.socket(socket.AF_UNIX) as listener:
             listener.bind(self.template['account_worker']['socket'])
             self.assertEqual(check(self.template, 'coordinator')['local_checks'], 'passed')
+
+    def test_cli_preflight_needs_no_initialized_state(self):
+        template = self.root / 'accepted.json'
+        template.write_text(json.dumps(self.template))
+        launcher = Path(__file__).resolve().parents[1] / 'tools/conductor'
+        result = subprocess.run([sys.executable, '-E', '-s', str(launcher),
+                                 '--state', str(self.root / 'absent-state'),
+                                 'account-check', '--from-plan', str(template),
+                                 '--role', 'worker'], capture_output=True, text=True,
+                                timeout=10, check=True)
+        self.assertEqual(json.loads(result.stdout)['local_checks'], 'passed')
+        self.assertFalse((self.root / 'absent-state').exists())
