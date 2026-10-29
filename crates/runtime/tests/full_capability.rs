@@ -98,6 +98,57 @@ async fn frozen_launch_checks_vendor_identity_and_retains_packet() {
         }
     ));
     connection.wait().await.unwrap();
+    assert_eq!(
+        conductor_runtime::read_terminal_receipt(&packet)
+            .unwrap()
+            .observation,
+        "full_group_exit"
+    );
+    assert_full_group_stop_receipt(launch).await;
     pin.version = "changed".into();
     assert!(conductor_runtime::full_capability_launch(&pin, &packet).is_err());
+}
+
+async fn assert_full_group_stop_receipt(mut launch: conductor_runtime::RunnerLaunch) {
+    launch.packet.contract.attempt_id = "stopped-attempt".into();
+    launch.packet.contract.max_runtime_ms = 5000;
+    launch.executable = "/bin/sh".into();
+    launch.arguments = vec![
+        "-c".into(),
+        "printf started > started; exec sleep 10".into(),
+    ];
+    let mut connection = conductor_runtime::RunnerConnection::launch(
+        std::path::Path::new(env!("CARGO_BIN_EXE_conductor-runner")),
+        &launch,
+        None,
+        |_, _| async { Ok(conductor_runtime::continuous_millis().unwrap() + 5000) },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !launch.packet.contract.workspace.join("started").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    connection.cancel().await.unwrap();
+    assert!(matches!(
+        connection.event().await.unwrap(),
+        conductor_runtime::RunnerEvent::Stopped { .. }
+    ));
+    connection.wait().await.unwrap();
+    let receipt = conductor_runtime::read_terminal_receipt(&launch.packet).unwrap();
+    assert_eq!(receipt.observation, "full_group_stop");
+    let path = launch
+        .packet
+        .contract
+        .workspace
+        .parent()
+        .unwrap()
+        .join(format!("terminal-{}.json", launch.packet.sha256().unwrap(),));
+    let mut forged: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    forged["observation"] = "restricted_stop".into();
+    fs::write(path, serde_json::to_vec(&forged).unwrap()).unwrap();
+    assert!(conductor_runtime::read_terminal_receipt(&launch.packet).is_err());
 }
