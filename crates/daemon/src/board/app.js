@@ -219,7 +219,8 @@ async function refreshQueue(currentToken) {
   if (currentToken !== token) return;
   if (data.type !== 'workflows' || !Array.isArray(data.entries)) throw new Error('Invalid queue response.');
   el('queue').replaceChildren(...data.entries.map(item => {
-    const row=text('li', `${item.task_id} · ${item.waiting_for_dependencies ? 'waiting for dependency admission' : (item.waiting_for_event ? 'waiting for subscribed event' : item.status)}${item.outcome_json ? ' · ' + item.outcome_json : ''}`);
+    const row=text('li', `${item.task_id} · ${item.waiting_for_dependencies ? 'waiting for dependency admission' : (item.waiting_for_event ? 'waiting for eligible subscribed event' : item.status)}${item.outcome_json ? ' · ' + item.outcome_json : ''}`);
+    if (item.waiting_for_event && item.pending_generation_limited_events > 0) row.append(text('p', `${item.pending_generation_limited_events} pending event(s) reached the causal generation limit and cannot start this workflow.`, 'hint'));
     for (const dependency of item.dependencies || []) {
       row.append(text('p', `${dependency.predecessor_task_id} · ${dependency.accepted_source || 'not yet admitted'}`, 'hint'));
     }
