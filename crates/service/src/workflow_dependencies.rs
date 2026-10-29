@@ -1,7 +1,7 @@
 //! Explicit dependency admission and source-bound input copying.
 use crate::{Clock, NativeWorkflowPlan, PersistentControlService};
 use agent_conductor_domain::{Task, TaskState};
-use agent_conductor_store::StoreError;
+use agent_conductor_store::{ExecutionRecord, ExecutionState, StoreError};
 use conductor_runtime::{
     AdapterKind, GitSnapshot, ResumePacket, SnapshotManifest, snapshot_attempt_tree,
 };
@@ -116,7 +116,11 @@ impl<C: Clock> PersistentControlService<C> {
             .ok_or_else(|| invalid("input execution missing"))?;
         let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
             .map_err(|_| invalid("input packet invalid"))?;
-        self.validate_capture_eligibility(&record, &packet).await?;
+        if upstream.account_worker.is_some() {
+            accepted_account_source(&task, &record, &packet, &source)?;
+        } else {
+            self.validate_capture_eligibility(&record, &packet).await?;
+        }
         if record.preparation.task_id != predecessor
             || record.preparation.attempt_id != attempt.id.0
             || record.preparation.lease_epoch
@@ -142,15 +146,6 @@ impl<C: Clock> PersistentControlService<C> {
             .canonicalize()
             .map_err(|_| invalid("input artifacts unavailable"))?;
         let capture = if upstream.account_worker.is_some() {
-            if !record.account_channel
-                || record
-                    .account_result
-                    .as_ref()
-                    .and_then(|r| r.snapshot_sha256.as_ref())
-                    .is_none_or(|digest| source != format!("snapshot:{digest}"))
-            {
-                return Err(invalid("input account source binding mismatch"));
-            }
             approved_root.join("source")
         } else {
             let root = workspace
@@ -176,6 +171,34 @@ impl<C: Clock> PersistentControlService<C> {
         .await
         .map_err(|_| invalid("input copy task failed"))?
     }
+}
+
+/// Reading an already accepted immutable copy grants no live execution authority.
+pub(super) fn accepted_account_source(
+    task: &Task,
+    record: &ExecutionRecord,
+    packet: &ResumePacket,
+    source: &str,
+) -> Result<(), StoreError> {
+    accepted_source(task, source)?;
+    if !record.account_channel
+        || !matches!(
+            record.state,
+            ExecutionState::Started | ExecutionState::Blocked
+        )
+        || record.process.is_some()
+        || record.account_peer.is_none()
+        || record.wrapper_identity.is_none()
+        || packet.contract.full_capability.is_none()
+        || record
+            .account_result
+            .as_ref()
+            .and_then(|r| r.snapshot_sha256.as_ref())
+            .is_none_or(|digest| source != format!("snapshot:{digest}"))
+    {
+        return Err(invalid("input account source binding mismatch"));
+    }
+    Ok(())
 }
 
 fn accepted_source(task: &Task, source: &str) -> Result<(), StoreError> {
