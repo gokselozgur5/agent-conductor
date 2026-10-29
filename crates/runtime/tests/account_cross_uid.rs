@@ -1,4 +1,4 @@
-//! Privileged Linux fixture: distinct real UIDs, no vendor credentials or host users created.
+//! Privileged hosted POSIX fixture: distinct real UIDs, no vendor credentials or host users created.
 #![cfg(unix)]
 use conductor_runtime::{
     AccountChannelAddress, AccountNativeLaunch, AccountRunnerConnection, AdapterKind,
@@ -20,8 +20,35 @@ struct Fixture {
     pin: VendorPin,
 }
 
+const WORKER_EXEC: &str = r#"printf '%s\n' "$$" > "$1"; shift; exec "$@""#;
+
+#[test]
+fn fixture_marker_names_exec_child_and_preserves_literal_arguments() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("worker pid with spaces");
+    let child = std::process::Command::new("/bin/sh")
+        .args(["-c", WORKER_EXEC, "account-worker-fixture"])
+        .arg(&marker)
+        .args(["/bin/echo", "literal $HOME"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"literal $HOME\n");
+    assert_eq!(
+        fs::read_to_string(marker)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap(),
+        pid
+    );
+}
+
 fn fixture() -> Fixture {
-    assert_eq!(std::env::consts::OS, "linux");
+    assert!(matches!(std::env::consts::OS, "linux" | "macos"));
     assert_eq!(
         nix::unistd::geteuid().as_raw(),
         0,
@@ -44,7 +71,7 @@ fn fixture() -> Fixture {
     fs::copy(env!("CARGO_BIN_EXE_conductor-runner"), &runner).unwrap();
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
     let executable = root.path().join("vendor");
-    fs::write(&executable, "#!/usr/bin/python3\nimport os,pathlib,json,sys\nassert os.getuid()==os.geteuid()!=0\nassert os.getgid()==os.getegid()!=0\nassert os.getgroups()==[]\nassert '--dangerously-skip-permissions' in sys.argv\nassert pathlib.Path('baseline').read_text()=='selected bytes'\npathlib.Path('produced').write_text(json.dumps({'uid':os.getuid(),'gid':os.getgid(),'home':os.environ['HOME'],'user':os.environ['USER']}))\nprint('cross UID candidate')\n").unwrap();
+    fs::write(&executable, "#!/usr/bin/python3\nimport os,pathlib,json,sys\nassert os.getuid()==os.geteuid()!=0\nassert os.getgid()==os.getegid()!=0\nassert 0 not in os.getgroups()\nassert '--dangerously-skip-permissions' in sys.argv\nassert pathlib.Path('baseline').read_text()=='selected bytes'\npathlib.Path('produced').write_text(json.dumps({'uid':os.getuid(),'gid':os.getgid(),'home':os.environ['HOME'],'user':os.environ['USER']}))\nprint('cross UID candidate')\n").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
     let pin = VendorPin {
         kind: AdapterKind::Claude,
@@ -73,16 +100,29 @@ fn address(f: &Fixture, digest: String) -> AccountChannelAddress {
     }
 }
 
-async fn start(f: &Fixture) -> tokio::process::Child {
-    receiving_account_preflight(f).await;
-    let mut child = tokio::process::Command::new("/usr/bin/setpriv")
-        .args([
+fn as_worker(f: &Fixture) -> tokio::process::Command {
+    if cfg!(target_os = "linux") {
+        let mut command = tokio::process::Command::new("/usr/bin/setpriv");
+        command.args([
             "--reuid",
             &f.account.uid.to_string(),
             "--regid",
             &f.account.gid.to_string(),
             "--clear-groups",
-        ])
+        ]);
+        command
+    } else {
+        let mut command = tokio::process::Command::new("/usr/bin/sudo");
+        command.args(["-n", "-u", &f.account.name, "--"]);
+        command
+    }
+}
+
+async fn start(f: &Fixture) -> tokio::process::Child {
+    receiving_account_preflight(f).await;
+    let mut child = as_worker(f)
+        .args(["/bin/sh", "-c", WORKER_EXEC, "account-worker-fixture"])
+        .arg(f.receiver.join("worker.pid"))
         .arg(&f.runner)
         .arg("--account-worker")
         .arg(&f.socket)
@@ -107,10 +147,8 @@ async fn start(f: &Fixture) -> tokio::process::Child {
 }
 
 async fn receiving_account_preflight(f: &Fixture) {
-    let output = tokio::process::Command::new("/usr/bin/setpriv")
+    let output = as_worker(f)
         .args([
-            "--reuid", &f.account.uid.to_string(),
-            "--regid", &f.account.gid.to_string(), "--clear-groups",
             "/usr/bin/python3", "-c",
             "import os,socket,sys,json\np=sys.argv[1]\ns=os.stat(p)\nprint(json.dumps({'uid':os.getuid(),'euid':os.geteuid(),'gid':os.getgid(),'path':p,'canonical':os.path.realpath(p),'owner':s.st_uid,'mode':oct(s.st_mode&0o777),'cwd':os.getcwd()}),flush=True)\nassert os.getuid()==os.geteuid()==s.st_uid\nassert p==os.path.realpath(p)\nassert s.st_mode&0o022==0\nx=socket.socket(socket.AF_UNIX)\nx.bind(p+'/probe.sock')\nx.close()\nos.unlink(p+'/probe.sock')\n",
         ])
@@ -162,10 +200,8 @@ fn packet(f: &Fixture, workspace: &Path) -> ResumePacket {
 
 async fn assert_wrong_coordinator_refused(f: &Fixture) {
     // The receiving account can reach its own socket, but cannot impersonate root.
-    let output = tokio::process::Command::new("/usr/bin/setpriv")
+    let output = as_worker(f)
         .args([
-            "--reuid", &f.account.uid.to_string(),
-            "--regid", &f.account.gid.to_string(), "--clear-groups",
             "/usr/bin/python3", "-c",
             "import socket,sys\ns=socket.socket(socket.AF_UNIX)\ns.settimeout(2)\ns.connect(sys.argv[1])\nassert s.recv(1)==b''\n",
         ])
@@ -177,7 +213,7 @@ async fn assert_wrong_coordinator_refused(f: &Fixture) {
 }
 
 #[tokio::test]
-#[ignore = "requires Linux root; explicitly executed in an isolated hosted CI fixture"]
+#[ignore = "requires Linux/macOS root; explicitly executed in an isolated hosted CI fixture"]
 async fn distinct_uid_worker_stages_executes_and_returns_exact_candidate() {
     let f = fixture();
     let mut worker = start(&f).await;
@@ -253,8 +289,17 @@ async fn distinct_uid_worker_stages_executes_and_returns_exact_candidate() {
         value,
         serde_json::json!({"uid":f.account.uid,"gid":f.account.gid,"home":f.account.home,"user":f.account.name})
     );
+    // Fixture-only cleanup identity: sudo may retain a separate monitor process.
+    let pid_path = f.receiver.join("worker.pid");
+    assert_eq!(fs::metadata(&pid_path).unwrap().uid(), f.account.uid);
+    let receiver_pid = fs::read_to_string(pid_path)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    assert!(receiver_pid > 1);
     nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(i32::try_from(worker.id().unwrap()).unwrap()),
+        nix::unistd::Pid::from_raw(receiver_pid),
         nix::sys::signal::Signal::SIGTERM,
     )
     .unwrap();
