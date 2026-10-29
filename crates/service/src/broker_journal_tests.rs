@@ -455,16 +455,17 @@ async fn runner_send(input: &mut tokio::process::ChildStdin, value: &impl serde:
     bytes.push(b'\n');
     input.write_all(&bytes).await.unwrap();
 }
-async fn runner_fixture(mismatch: bool, heartbeat: u64) -> BrokerRunnerFixture {
+async fn runner_setup(mismatch: bool, heartbeat: u64) -> BrokerSetup {
     use conductor_runtime::{BrokerEndpoint, BrokerRunnerLaunch, broker_root_identity};
-    use std::{os::unix::fs::PermissionsExt, process::Stdio};
+    use std::os::unix::fs::PermissionsExt;
     let (root, store, mut binding, _db) = fixture().await;
     let base = root.path().canonicalize().unwrap();
     let files = base.join("files");
     fs::create_dir(&files).unwrap();
     let journal_dir = base.join("j");
     let proxy_dir = base.join("p");
-    for dir in [&journal_dir, &proxy_dir] {
+    let receipt_root = base.join("r");
+    for dir in [&journal_dir, &proxy_dir, &receipt_root] {
         fs::create_dir(dir).unwrap();
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -480,11 +481,11 @@ async fn runner_fixture(mismatch: bool, heartbeat: u64) -> BrokerRunnerFixture {
             binding.root_identity_sha256.clone()
         },
         endpoint_directory: proxy_dir,
+        receipt_root,
         journal_handoff: endpoint.environment_value().unwrap(),
         maximum_deadline_ms: continuous_millis().unwrap() + 60000,
         heartbeat_timeout_ms: heartbeat,
     };
-    let hash = launch.sha256().unwrap();
     let journal = RegisteredBrokerJournal::register(store.clone(), binding.clone())
         .await
         .unwrap();
@@ -495,6 +496,37 @@ async fn runner_fixture(mismatch: bool, heartbeat: u64) -> BrokerRunnerFixture {
             .serve_remote(stream, rx, Duration::from_secs(5))
             .await
     });
+    BrokerSetup {
+        root,
+        store,
+        binding,
+        files,
+        launch,
+        server,
+        hold,
+    }
+}
+struct BrokerSetup {
+    root: tempfile::TempDir,
+    store: Store,
+    binding: FileBrokerBinding,
+    files: PathBuf,
+    launch: conductor_runtime::BrokerRunnerLaunch,
+    server: tokio::task::JoinHandle<Result<(), conductor_runtime::BrokerError>>,
+    hold: tokio::sync::watch::Sender<bool>,
+}
+async fn runner_fixture(mismatch: bool, heartbeat: u64) -> BrokerRunnerFixture {
+    use std::process::Stdio;
+    let BrokerSetup {
+        root,
+        store,
+        binding,
+        files,
+        launch,
+        server,
+        hold,
+    } = runner_setup(mismatch, heartbeat).await;
+    let hash = launch.sha256().unwrap();
     let bin = PathBuf::from(
         std::env::var_os("CONDUCTOR_TEST_BIN_DIR")
             .expect("build workspace and set CONDUCTOR_TEST_BIN_DIR"),
@@ -540,7 +572,7 @@ struct BrokerRunnerFixture {
 async fn real_broker_runner(renew: bool) {
     use conductor_runtime::{BrokerRunnerControl, BrokerRunnerEvent, connect_broker_endpoint};
     let BrokerRunnerFixture {
-        root: _root,
+        root,
         store,
         binding,
         files,
@@ -556,12 +588,19 @@ async fn real_broker_runner(renew: bool) {
         launch_sha256,
         root_identity_sha256,
         proxy_handoff,
+        process,
     } = runner_frame(&mut output).await
     else {
         panic!("expected ready");
     };
     assert_eq!(launch_sha256, hash);
     assert_eq!(root_identity_sha256, binding.root_identity_sha256);
+    assert_eq!(
+        process,
+        conductor_runtime::ChildIdentity::observe(child.id().unwrap())
+            .await
+            .unwrap()
+    );
     assert_progress(&store, &binding, 0, 0).await;
     let now = continuous_millis().unwrap();
     let first_deadline = now + if renew { 1000 } else { 4000 };
@@ -618,6 +657,7 @@ async fn real_broker_runner(renew: bool) {
             .unwrap()
             .success()
     );
+    assert_runner_receipt(&root, &binding, &hash, process, Some(1));
     assert!(server.await.unwrap().is_ok());
     assert_late_write_refused(peer, &binding, &files).await;
     assert_progress(&store, &binding, 1, 1).await;
@@ -697,7 +737,7 @@ async fn journal_actual_runner_requires_release_and_stops_on_control_or_lease_lo
         "wrong_renew",
     ] {
         let BrokerRunnerFixture {
-            root: _root,
+            root,
             store,
             binding,
             files,
@@ -708,9 +748,20 @@ async fn journal_actual_runner_requires_release_and_stops_on_control_or_lease_lo
             server,
             hold: _hold,
         } = runner_fixture(false, if mode == "heartbeat" { 100 } else { 5000 }).await;
-        let BrokerRunnerEvent::Ready { proxy_handoff, .. } = runner_frame(&mut output).await else {
+        let BrokerRunnerEvent::Ready {
+            proxy_handoff,
+            process,
+            ..
+        } = runner_frame(&mut output).await
+        else {
             panic!("expected ready");
         };
+        assert_eq!(
+            process,
+            conductor_runtime::ChildIdentity::observe(child.id().unwrap())
+                .await
+                .unwrap()
+        );
         let released = !matches!(mode, "wrong_release" | "expired_release" | "eof_before");
         if mode != "eof_before" {
             let now = continuous_millis().unwrap();
@@ -761,6 +812,7 @@ async fn journal_actual_runner_requires_release_and_stops_on_control_or_lease_lo
             .unwrap()
             .unwrap();
         assert_eq!(status.success(), released, "{mode}");
+        assert_runner_receipt(&root, &binding, &hash, process, released.then_some(0));
         drop(retained);
         assert!(server.await.unwrap().is_ok());
         assert!(
@@ -771,4 +823,232 @@ async fn journal_actual_runner_requires_release_and_stops_on_control_or_lease_lo
         assert_progress(&store, &binding, 0, 0).await;
         assert!(!files.join("answer").exists());
     }
+}
+
+fn assert_runner_receipt(
+    root: &tempfile::TempDir,
+    binding: &FileBrokerBinding,
+    hash: &str,
+    process: conductor_runtime::ChildIdentity,
+    completed: Option<u64>,
+) {
+    use conductor_runtime::{
+        BrokerReceiptDirectory, BrokerShutdownObservation, BrokerShutdownReceipt,
+    };
+    let expected = BrokerShutdownReceipt {
+        version: 1,
+        scope: request(binding).scope,
+        launch_sha256: hash.into(),
+        root_identity_sha256: binding.root_identity_sha256.clone(),
+        process,
+        observation: completed.map_or(
+            BrokerShutdownObservation::NeverReleased,
+            |completed_sequence| BrokerShutdownObservation::Revoked { completed_sequence },
+        ),
+    };
+    let directory =
+        BrokerReceiptDirectory::open(&root.path().canonicalize().unwrap().join("r")).unwrap();
+    assert!(directory.read(&expected).unwrap() == expected);
+}
+
+#[tokio::test]
+async fn journal_actual_runner_killed_before_release_leaves_no_shutdown_receipt() {
+    use conductor_runtime::BrokerRunnerEvent;
+    let BrokerRunnerFixture {
+        root,
+        store,
+        binding,
+        mut child,
+        input,
+        mut output,
+        server,
+        hold: _hold,
+        ..
+    } = runner_fixture(false, 5000).await;
+    let BrokerRunnerEvent::Ready { process, .. } = runner_frame(&mut output).await else {
+        panic!("expected ready");
+    };
+    assert_eq!(
+        process,
+        conductor_runtime::ChildIdentity::observe(child.id().unwrap())
+            .await
+            .unwrap()
+    );
+    child.start_kill().unwrap();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    drop(input);
+    assert!(server.await.unwrap().is_ok());
+    let directory = root.path().join("r");
+    assert!(
+        directory
+            .join(format!("broker-{}.claimed", binding.invocation_id))
+            .is_file()
+    );
+    assert!(
+        !directory
+            .join(format!("broker-{}.json", binding.invocation_id))
+            .exists()
+    );
+    assert_progress(&store, &binding, 0, 0).await;
+}
+
+#[tokio::test]
+async fn journal_parent_client_records_identity_before_release_and_verifies_receipt() {
+    use conductor_runtime::{PreparedBrokerRunner, connect_broker_endpoint};
+    let BrokerSetup {
+        root,
+        store,
+        binding,
+        files,
+        launch,
+        server,
+        hold: _hold,
+    } = runner_setup(false, 5000).await;
+    let bin =
+        PathBuf::from(std::env::var_os("CONDUCTOR_TEST_BIN_DIR").unwrap()).join("conductor-runner");
+    let prepared = PreparedBrokerRunner::prepare(&bin, &launch).await.unwrap();
+    let expected = prepared.identity().clone();
+    let owner_path = root.path().join("fixture-owner.json");
+    let owner_copy = owner_path.clone();
+    let mut session = prepared
+        .release(|identity| async move {
+            // Test persistence only; production store ownership remains separate.
+            let mut owner = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(owner_copy)
+                .unwrap();
+            std::io::Write::write_all(&mut owner, &serde_json::to_vec(&identity).unwrap()).unwrap();
+            owner.sync_all().unwrap();
+            Ok(continuous_millis().unwrap() + 4000)
+        })
+        .await
+        .unwrap();
+    let saved: conductor_runtime::BrokerShutdownReceipt =
+        serde_json::from_slice(&fs::read(owner_path).unwrap()).unwrap();
+    assert!(saved == expected);
+    let (mut peer, _) = connect_broker_endpoint(session.proxy_handoff(), Duration::from_secs(2))
+        .await
+        .unwrap();
+    let mut bytes = serde_json::to_vec(&request(&binding)).unwrap();
+    bytes.push(b'\n');
+    peer.write_all(&bytes).await.unwrap();
+    let mut peer = BufReader::new(peer);
+    let mut reply = String::new();
+    tokio::time::timeout(Duration::from_secs(5), peer.read_line(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!reply.is_empty());
+    assert_progress(&store, &binding, 1, 1).await;
+    session.cancel().await.unwrap();
+    let receipt = session.finish().await.unwrap();
+    assert_eq!(receipt.process, expected.process);
+    assert_runner_receipt(
+        &root,
+        &binding,
+        &launch.sha256().unwrap(),
+        receipt.process,
+        Some(1),
+    );
+    assert!(server.await.unwrap().is_ok());
+    assert_late_write_refused(peer, &binding, &files).await;
+}
+
+#[tokio::test]
+async fn journal_parent_client_failed_persistence_never_releases() {
+    use conductor_runtime::{BrokerError, PreparedBrokerRunner};
+    let BrokerSetup {
+        root,
+        store,
+        binding,
+        files,
+        launch,
+        server,
+        hold: _hold,
+    } = runner_setup(false, 5000).await;
+    let bin =
+        PathBuf::from(std::env::var_os("CONDUCTOR_TEST_BIN_DIR").unwrap()).join("conductor-runner");
+    let prepared = PreparedBrokerRunner::prepare(&bin, &launch).await.unwrap();
+    let expected = prepared.identity().clone();
+    assert!(
+        prepared
+            .release(|_| async { Err(BrokerError::Refused) })
+            .await
+            .is_err()
+    );
+    assert!(server.await.unwrap().is_ok());
+    let directory = conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if directory.read(&expected).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_runner_receipt(
+        &root,
+        &binding,
+        &launch.sha256().unwrap(),
+        expected.process,
+        None,
+    );
+    assert_progress(&store, &binding, 0, 0).await;
+    assert!(!files.join("answer").exists());
+}
+
+#[tokio::test]
+async fn journal_parent_client_unknown_completion_never_becomes_shutdown_proof() {
+    use conductor_runtime::{PreparedBrokerRunner, connect_broker_endpoint};
+    let BrokerSetup {
+        root,
+        store,
+        binding,
+        files,
+        launch,
+        server,
+        hold: _hold,
+    } = runner_setup(false, 5000).await;
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("state.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER refuse_completion BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.completed' BEGIN SELECT RAISE(FAIL,'fixture'); END").execute(&mut db).await.unwrap();
+    let bin =
+        PathBuf::from(std::env::var_os("CONDUCTOR_TEST_BIN_DIR").unwrap()).join("conductor-runner");
+    let prepared = PreparedBrokerRunner::prepare(&bin, &launch).await.unwrap();
+    let session = prepared
+        .release(|_| async { Ok(continuous_millis().unwrap() + 4000) })
+        .await
+        .unwrap();
+    let (mut peer, _) = connect_broker_endpoint(session.proxy_handoff(), Duration::from_secs(2))
+        .await
+        .unwrap();
+    let mut bytes = serde_json::to_vec(&request(&binding)).unwrap();
+    bytes.push(b'\n');
+    peer.write_all(&bytes).await.unwrap();
+    assert!(session.finish().await.is_err());
+    assert!(server.await.unwrap().is_err());
+    assert_progress(&store, &binding, 1, 0).await;
+    assert_eq!(
+        fs::read_to_string(files.join("answer")).unwrap(),
+        "durable answer\n"
+    );
+    assert!(
+        !launch
+            .receipt_root
+            .join(format!("broker-{}.json", binding.invocation_id))
+            .exists()
+    );
 }

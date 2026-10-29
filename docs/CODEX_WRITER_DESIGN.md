@@ -537,9 +537,27 @@ lease expiry, wrong renewal and rejected writes after exit. Initial execution
 acknowledgement remains synthetic fixture setup. Separate gate controls cover
 expiry while admission is delayed, late renewal, hard limits and root replacement.
 
-Stopped carries only a local completion watermark; it is not an independent
-durable shutdown receipt, and the store remains open. Production native launch
-admission still requires binding the observed process identity before release,
-persisted shutdown/restart evidence, vendor configuration/OS confinement and
+Stopped carries a local completion watermark. The runner now also exclusively
+claims its invocation in a private receipt directory and publishes an immutable,
+fsynced shutdown receipt only when it never released operations or settled a
+revoked worker with a known watermark. The receipt binds scope, launch/root
+hashes and native process identity; it contains no bearer handoff or file data.
+Unknown settlement and process death do not produce a receipt. Readers reject
+partial, mutated, linked, nonprivate or rebound records. These filesystem checks
+still require host exclusion of hostile same-user writers and directory movers.
+
+Actual-runner tests independently observe the child identity and verify reopened
+receipts after successful writes, renewal and release/control failures. An owned
+SIGKILL before release leaves the exclusive claim and no shutdown receipt. The
+SQLite broker remains open throughout these tests; receipt presence alone does
+not authorize database closure or task acceptance.
+
+The parent client observes Ready, requires a caller persistence callback before
+Release, revalidates process/root identities, and checks the independent receipt
+on successful shutdown. Actual-runner client tests cover persisted identity before release, callback
+failure without release, and failed completion audit retaining the file and
+pending intent without a receipt. The callback uses a fixture owner file; the
+production store callback and vendor acceptance remain incomplete. Native admission still requires durable parent
+ownership and restart reconciliation, vendor configuration/OS confinement and
 long-lived idle handling. The existing Claude workflow and Codex writer refusal
 remain unchanged.

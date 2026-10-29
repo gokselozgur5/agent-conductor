@@ -134,3 +134,13 @@ pub use broker_journal_wire::*;
 mod broker_runner;
 #[cfg(unix)]
 pub use broker_runner::*;
+
+#[cfg(unix)]
+mod broker_receipt;
+#[cfg(unix)]
+pub use broker_receipt::*;
+
+#[cfg(unix)]
+mod broker_client;
+#[cfg(unix)]
+pub use broker_client::*;

@@ -20,6 +20,7 @@ pub struct BrokerRunnerLaunch {
     pub root: PathBuf,
     pub root_identity_sha256: String,
     pub endpoint_directory: PathBuf,
+    pub receipt_root: PathBuf,
     pub journal_handoff: String,
     pub maximum_deadline_ms: u64,
     pub heartbeat_timeout_ms: u64,
@@ -32,6 +33,8 @@ impl BrokerRunnerLaunch {
         let now = continuous_millis().map_err(|_| BrokerError::Clock)?;
         if !self.scope.valid()
             || !self.root.is_absolute()
+            || !self.receipt_root.is_absolute()
+            || self.receipt_root.starts_with(&self.root)
             || !self.endpoint_directory.is_absolute()
             || self.endpoint_directory.starts_with(&self.root)
             || self.maximum_deadline_ms <= now
@@ -69,6 +72,7 @@ pub enum BrokerRunnerEvent {
         launch_sha256: String,
         root_identity_sha256: String,
         proxy_handoff: String,
+        process: crate::ChildIdentity,
     },
     /// Local observation only. None retains uncertainty, including a pending
     /// blocking operation. Neither exit nor Some is a durable shutdown receipt.
@@ -136,6 +140,61 @@ pub async fn serve_broker_runner() -> Result<(), BrokerError> {
     if broker.root_identity_sha256()? != launch.root_identity_sha256 {
         return Err(BrokerError::Refused);
     }
+    let evidence = crate::BrokerReceiptDirectory::open(&launch.receipt_root)?;
+    evidence.claim(&launch.scope, &launch_hash)?;
+    let process = crate::ChildIdentity::observe(std::process::id())
+        .await
+        .map_err(|_| BrokerError::Refused)?;
+    let mut receipt = crate::BrokerShutdownReceipt {
+        version: 1,
+        scope: launch.scope.clone(),
+        launch_sha256: launch_hash.clone(),
+        root_identity_sha256: launch.root_identity_sha256.clone(),
+        process: process.clone(),
+        observation: crate::BrokerShutdownObservation::NeverReleased,
+    };
+    let lease = broker.lease_control();
+    let prepared = prepare_broker(&launch, &launch_hash, &process, &lease, &mut input).await;
+    let (endpoint, journal, started, lease_deadline_ms) = match prepared {
+        Ok(value) => value,
+        Err(error) => {
+            drop(broker);
+            evidence.publish(&receipt)?;
+            return Err(error);
+        }
+    };
+    let (cancel, rx) = watch::channel(false);
+    let end = {
+        let worker = broker_worker(endpoint, broker, journal, rx);
+        tokio::pin!(worker);
+        supervise(
+            &mut input,
+            &launch,
+            &launch_hash,
+            (started, lease_deadline_ms),
+            &cancel,
+            worker.as_mut(),
+            &lease,
+        )
+        .await?
+    };
+    if let Some(completed_sequence) = end.completed_sequence {
+        receipt.observation = crate::BrokerShutdownObservation::Revoked { completed_sequence };
+        evidence.publish(&receipt)?;
+    }
+    emit(BrokerRunnerEvent::Stopped {
+        launch_sha256: launch_hash,
+        completed_sequence: end.completed_sequence,
+    })
+    .await
+}
+async fn prepare_broker(
+    launch: &BrokerRunnerLaunch,
+    launch_hash: &str,
+    process: &crate::ChildIdentity,
+    lease: &crate::BrokerLeaseDeadline,
+    input: &mut (impl AsyncBufRead + Unpin),
+) -> Result<(BrokerEndpoint, RemoteBrokerJournal, u64, u64), BrokerError> {
     let (stream, scope) = connect_broker_endpoint(&launch.journal_handoff, Duration::from_secs(5))
         .await
         .map_err(|_| BrokerError::Refused)?;
@@ -153,13 +212,14 @@ pub async fn serve_broker_runner() -> Result<(), BrokerError> {
         .environment_value()
         .map_err(|_| BrokerError::Refused)?;
     emit(BrokerRunnerEvent::Ready {
-        launch_sha256: launch_hash.clone(),
+        launch_sha256: launch_hash.to_owned(),
         root_identity_sha256: launch.root_identity_sha256.clone(),
         proxy_handoff: handoff,
+        process: process.clone(),
     })
     .await?;
     let control: BrokerRunnerControl = serde_json::from_slice(
-        &tokio::time::timeout(Duration::from_secs(5), frame(&mut input, 1024))
+        &tokio::time::timeout(Duration::from_secs(5), frame(input, 1024))
             .await
             .map_err(|_| BrokerError::Uncertain)??,
     )
@@ -175,26 +235,8 @@ pub async fn serve_broker_runner() -> Result<(), BrokerError> {
         return Err(BrokerError::Refused);
     }
     let started = valid_lease(lease_deadline_ms, launch.maximum_deadline_ms)?;
-    let lease = broker.lease_control();
     lease.renew(lease_deadline_ms.min(started.saturating_add(launch.heartbeat_timeout_ms)))?;
-    let (cancel, rx) = watch::channel(false);
-    let worker = broker_worker(endpoint, broker, journal, rx);
-    tokio::pin!(worker);
-    let end = supervise(
-        &mut input,
-        &launch,
-        &launch_hash,
-        (started, lease_deadline_ms),
-        &cancel,
-        worker.as_mut(),
-        &lease,
-    )
-    .await?;
-    emit(BrokerRunnerEvent::Stopped {
-        launch_sha256: launch_hash,
-        completed_sequence: end.completed_sequence,
-    })
-    .await
+    Ok((endpoint, journal, started, lease_deadline_ms))
 }
 async fn broker_worker(
     endpoint: BrokerEndpoint,
