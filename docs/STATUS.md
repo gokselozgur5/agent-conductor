@@ -2,7 +2,37 @@
 
 ## Current result
 
-Candidate migration 19 persists the expected wrapper UUID before spawn and checks
+Draft [PR #90](https://github.com/gokselozgur5/agent-conductor/pull/90), tracked by
+[issue #89](https://github.com/gokselozgur5/agent-conductor/issues/89), adds the
+auxiliary process ownership candidate through schema 25. It is not merged or
+installed into the existing schema-19 operator runtime.
+
+Checks and independent verifiers now commit invocation ownership before external
+effects, bind native process identity before release, and require private
+settlement evidence before atomically publishing an invocation-linked result.
+Recovery handles no-launch and pre-ACK proofs, bounded paged inventories, legacy
+uncertainty, and evidence-supported native boot transitions when a receipt is
+missing. Native origin evidence commits with each new invocation. A host fence
+never substitutes for a successful check or verdict. See
+[AUXILIARY_PROCESS_OWNERSHIP.md](AUXILIARY_PROCESS_OWNERSHIP.md) for the contracts,
+fixtures and precise refusal paths.
+
+The schema-25 implementation passes 336 local workspace Rust tests and 73 Python
+tests, strict Clippy, formatting and build checks. Positive native boot changes
+remain synthetic tests; real same-boot observation and supervisor controls do
+not establish physical reboot acceptance. Hosted CI is currently refused before
+steps by the account payment/spending-limit check. Local tests do not resolve
+that external blocker or provide unrun Linux acceptance.
+
+Next acceptance work: complete the role-specific abrupt-death matrix, especially
+verifier pre-ACK and terminal-proof/result-publication boundaries; expose the
+remaining operator recovery state; finish physical host recovery, native
+endurance, privacy and supported-host/release checks. Keep the existing
+control-plane-only soak separate from full native/v1 acceptance. No automatic
+reboot, marker deletion, fabricated receipt or CI-policy bypass is authorized by
+this candidate.
+
+The existing schema-19 runtime persists the expected wrapper UUID before spawn and checks
 ACK against that intent. A private trusted wrapper receipt can now prove that no
 worker started and fence the exact prepared attempt without inventing an ACK.
 Legacy/unknown evidence stays blocked; normal finite continuation gates apply.
