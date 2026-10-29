@@ -23,14 +23,15 @@ credentials or a restricted file-only profile. Account separation does not itsel
 prove that a stopped process left no descendants; recovery must still report the
 observed process state accurately.
 
-## Required integration
+## Implemented workflow and remaining gates
 
 - Native plans now accept `full_capability` with a frozen OS account and PATH.
   The worker process must already run as that account. The operator plan command
   preserves the profile from its accepted template. Authenticated loopback RPC
   permits control-plane clients in another account without sharing the private
-  daemon directory. Native cross-account launch/artifact transport and started
-  unrestricted worker recovery still require implementation and acceptance.
+  daemon directory. Normal account-channel launch and artifact transport are
+  implemented. Actual distinct-UID deployment acceptance and started unrestricted
+  worker recovery remain open.
 - `native_writer_launch` routes explicit full profiles to Codex `--yolo` or Claude
   `--dangerously-skip-permissions`. Both use the selected account's own HOME and
   configuration. Restricted profiles retain their previous behavior.
@@ -38,8 +39,8 @@ observed process state accurately.
   the runner's `--account-native` entry. The receiver verifies its OS identity and
   executable bytes, then builds CLI arguments and HOME locally before Ready.
   It still waits for a durably recorded acknowledgement and a current lease
-  before launching. This is receiving-account command preparation; the current
-  dispatcher still launches locally and does not yet select a cross-account channel.
+  before launching. Local dispatch uses this stdio entry; plans with
+  `account_worker` select the persistent account-channel receiver instead.
 - The runtime's same-host account channel authenticates both kernel peer UIDs
   and binds one connection to an exact packet hash. It requires an existing
   receiver-owned directory that the coordinator can traverse; it never changes
@@ -65,9 +66,8 @@ observed process state accurately.
   The existing authoritative-runtime refusal of a local ACK without process
   evidence remains. Account peers cannot be promoted to a local `exited` state,
   even through a direct SQL update. A terminal channel event therefore does not
-  grant source-capture eligibility. Daemon workflow selection, account terminal
-  evidence and workspace transfer/capture still need integration; this service
-  port is not yet a complete operator workflow endpoint.
+  grant source-capture eligibility by itself. Normal daemon dispatch composes
+  account report binding, exact candidate import, checks and independent review.
 - A successful unrestricted exit can publish a source snapshot for independent
   checks and review. Its execution remains `exited`, not `fenced`. The transactional
   capture-eligibility view admits auxiliary work only for this exact normally
@@ -118,9 +118,8 @@ SIGINT/SIGTERM stop admission after the current bounded task finishes and remove
 the owned socket entry. Forced termination can leave a stale socket; startup never
 overwrites an existing entry.
 
-This is the receiving entry for daemon integration. Normal workflow selection,
-baseline transfer, account terminal/source import and independent acceptance are
-not yet wired to this entry. A peer terminal event still does not establish local
+Normal account workflows use this receiving entry for baseline transfer, native
+execution and candidate return. A peer terminal event does not establish local
 child exit or machine-wide write fencing.
 
 The persistent worker also accepts exact baseline staging before native launch.
@@ -135,8 +134,8 @@ and socket I/O uses an absolute deadline, including slow or silent peers.
 
 Staging authorizes byte delivery to the explicitly selected destination under the
 receiver's OS permissions. It does not acknowledge execution, grant a lease,
-certify a result, or establish fencing. Normal daemon plan selection and the return
-path for candidate source verification remain separate integration work.
+certify a result, or establish fencing. Normal daemon dispatch separately binds
+the prepared execution and the returned candidate to independent verification.
 
 Candidate return uses two explicit operations. `capture_account_candidate` asks the
 worker to create a new snapshot from a selected source and baseline inventory,
@@ -161,8 +160,8 @@ Account executions remain `started` and unfenced with no fabricated process or
 exit code. An imported candidate is eligible for independent verification only
 while its recorded digest agrees with the task's selected source; blocked records
 lose that eligibility. Reporting alone does not permit capture-based checks.
-Schema 32 persists these separate report/import bindings. This service composition
-does not yet select account transport in the normal daemon workflow.
+Schema 32 persists these separate report/import bindings; normal account workflow
+dispatch uses this service composition.
 
 ### Normal workflow selection of an account worker
 

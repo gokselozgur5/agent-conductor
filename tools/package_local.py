@@ -100,13 +100,23 @@ Ctrl-C stops the foreground runtime. The same run command reopens its saved stat
 Ambiguous interrupted executions require reconciliation before another attempt.
 Use --state /short/private/path before the command for a separate runtime.
 
-This is a host-local preview, not complete v1 acceptance. Cross-account dispatch,
-unrestricted interruption recovery, Linux isolation and endurance remain incomplete.
-When full_capability is present in accepted-adapters.json, workers run with normal
-shell/network tools under that OS account. Launch this runtime as that same account.
-Its HOME and login are used; coordinator API-key overrides apply only to bounded profiles.
+This is a host-local preview, not complete v1 acceptance. Distinct-UID deployment
+acceptance, started unrestricted recovery and endurance remain open.
+When full_capability is present, workers use normal shell/network tools and their
+selected account's own HOME/login. For local dispatch, launch the runtime as that
+account. When account_worker is present, start the receiving process as the worker
+account before submitting tasks:
+  ./bin/conductor-runner --account-worker SOCKET COORDINATOR_UID
+Use the template's socket path and the coordinator account's numeric UID. The
+receiver-owned socket parent must already be traversable by the coordinator; the
+artifact directory must already exist. Conductor changes neither permissions nor
+credentials. Run the daemon as the coordinator account; worker credentials stay
+with the receiving process. See docs/FULL_CAPABILITY_EXECUTION.md for setup.
+Accepted input snapshots remain usable after daemon restart; this does not make
+an interrupted unrestricted execution eligible for automatic continuation.
 The launcher uses the packaging Python interpreter directly, independent of PATH.
-Python and adapter executable paths are host-specific; adapter hashes are checked during planning.
+Python and adapter executable paths are host-specific. Planning checks local
+adapter hashes; receiving-account executable bytes are checked there before ACK.
 Do not replace this bundle's binaries while its runtime is running.
 See docs/LOCAL_OPERATOR.md and docs/DELIVERY_ACCEPTANCE.md for the full boundaries.
 ''')
