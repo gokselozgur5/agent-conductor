@@ -3,6 +3,45 @@ use conductor_runtime::{SnapshotManifest, export_snapshot, import_snapshot, snap
 use std::{fs, os::unix::fs::PermissionsExt};
 
 #[test]
+fn deleted_file_cannot_also_be_a_parent_directory_in_received_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let manifest = SnapshotManifest {
+        version: 1,
+        entries: vec![
+            conductor_runtime::SnapshotEntry {
+                path: "parent".into(),
+                sha256: None,
+                bytes: 0,
+                executable: false,
+            },
+            conductor_runtime::SnapshotEntry {
+                path: "parent/empty".into(),
+                sha256: Some(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+                ),
+                bytes: 0,
+                executable: false,
+            },
+        ],
+    };
+    let header = serde_json::to_vec(&manifest).unwrap();
+    let mut bytes = b"ACSNAP01".to_vec();
+    bytes.extend_from_slice(&(header.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(&header);
+    let destination = root.join("received");
+    assert!(
+        import_snapshot(
+            &mut bytes.as_slice(),
+            &destination,
+            &manifest.sha256().unwrap()
+        )
+        .is_err()
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
 fn transfer_preserves_executables_deletions_and_source_identity() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();

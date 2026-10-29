@@ -19,8 +19,20 @@ fn validate(manifest: &SnapshotManifest, expected: &str) -> Result<(), SnapshotE
     if manifest.version != 1 || !ordered.iter().eq(paths.iter()) {
         return Err(SnapshotError::Invalid);
     }
+    let present = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.sha256.is_some())
+        .map(|entry| entry.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
     let mut total = 0_u64;
     for entry in &manifest.entries {
+        for (index, _) in entry.path.match_indices('/') {
+            let parent = &entry.path[..index];
+            if present.contains(parent) || (entry.sha256.is_some() && ordered.contains(parent)) {
+                return Err(SnapshotError::Invalid);
+            }
+        }
         if entry.bytes > snapshot::FILE_LIMIT {
             return Err(SnapshotError::Bounds);
         }
