@@ -46,8 +46,16 @@ observed process state accurately.
   account credentials or directory permissions. Socket admission alone grants
   neither execution nor a process identity or fence. Snapshot bytes can cross
   this channel with the existing independently pinned manifest verification.
-  Native dispatch/process binding and remote-workspace capture are not yet wired
-  to it; same-UID tests do not establish a distinct-account deployment.
+  Same-UID tests do not establish a distinct-account deployment.
+- The runtime entry `conductor-runner --account-listen SOCKET COORDINATOR_UID
+  OWNER_TAG` receives one authenticated channel and uses the same native packet,
+  Ready/Release, lease watchdog and terminal-receipt path as the stdio runner.
+  `AccountRunnerConnection` verifies the frozen account/digest and calls the
+  controller's acknowledgement-persistence hook before Release; a refused or
+  expired hook closes the channel without starting a worker. It deliberately
+  supplies no child-process identity and cannot attest receiver exit or fencing.
+  Daemon dispatch, cross-account process ownership and workspace capture are
+  still not wired to this entry. It is not yet an operator workflow endpoint.
 - A successful unrestricted exit can publish a source snapshot for independent
   checks and review. Its execution remains `exited`, not `fenced`. The transactional
   capture-eligibility view admits auxiliary work only for this exact normally
