@@ -49,3 +49,37 @@ async fn unrestricted_launch_retains_account_home_and_literal_prompt() {
         assert!(!directory.path().join("injected").exists());
     }
 }
+
+#[test]
+fn frozen_launch_checks_vendor_identity_and_retains_packet() {
+    let user = User::from_uid(getuid()).unwrap().unwrap();
+    let account = ExecutionAccount::resolve(&user.name).unwrap();
+    let executable = std::path::PathBuf::from("/bin/echo");
+    let mut pin = VendorPin {
+        kind: AdapterKind::Codex,
+        version: "fixture".into(),
+        executable_sha256: binary_sha256(&executable).unwrap(),
+        executable,
+        conformance_sha256: "b".repeat(64),
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let packet: conductor_runtime::ResumePacket = serde_json::from_value(serde_json::json!({
+        "contract": {
+            "version":1, "task_id":"task", "attempt_id":"attempt", "lease_epoch":1,
+            "worker_id":"worker", "adapter": {
+                "kind":"codex", "version":pin.version,
+                "executable_sha256":pin.executable_sha256, "conformance_sha256":pin.conformance_sha256
+            },
+            "workspace":directory.path(), "starting_head":"c".repeat(40),
+            "authority":{"read_roots":["/"],"write_roots":["/"],"network":"unrestricted","allow_workspace_commands":true},
+            "full_capability":{"account":account,"path":"/usr/bin:/bin"},
+            "instructions":[],"checks":[],"max_runtime_ms":1000
+        },
+        "objective":"Run a build", "checkpoint":null,"untrusted_context":[]
+    })).unwrap();
+    let launch = conductor_runtime::full_capability_launch(&pin, &packet).unwrap();
+    assert_eq!(launch.packet, packet);
+    assert_eq!(launch.arguments[0], "--yolo");
+    pin.version = "changed".into();
+    assert!(conductor_runtime::full_capability_launch(&pin, &packet).is_err());
+}
