@@ -505,15 +505,23 @@ async fn owned_idle_accepts_later_work_and_bounds_partial_frames() {
         let journal = Arc::new(Journal::default());
         let (server, mut client) = UnixStream::pair().unwrap();
         let (_cancel, rx) = watch::channel(false);
+        // This budget also covers durable filesystem operations, not only reads.
+        // Keep a short partial-frame bound, but give the successful write the
+        // normal I/O budget. Both cases idle longer than their own budget.
+        let frame_budget = if partial {
+            Duration::from_millis(100)
+        } else {
+            WAIT
+        };
         let task = tokio::spawn(serve_owned_broker_stream(
             server,
             broker,
             journal.clone(),
             rx,
-            Duration::from_millis(100),
+            frame_budget,
             WAIT,
         ));
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(frame_budget + Duration::from_millis(150)).await;
         assert!(!task.is_finished());
         if partial {
             client.write_all(b"{").await.unwrap();
