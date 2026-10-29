@@ -339,11 +339,19 @@ async fn unread_large_reply_times_out_after_result_recording() {
         broker,
         journal.clone(),
         rx,
-        Duration::from_millis(250),
+        Duration::from_secs(2),
         WAIT,
     ));
     client.write_all(&encoded(&request)).await.unwrap();
-    let end = tokio::time::timeout(WAIT, task)
+    // Observe actual reply publication before withholding reads. A completed
+    // operation can otherwise time out before the reply even starts, which does
+    // not exercise output backpressure. Allow setup separately from settlement.
+    let first = tokio::time::timeout(Duration::from_secs(10), client.read_u8())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, b'{');
+    let end = tokio::time::timeout(Duration::from_secs(10), task)
         .await
         .unwrap()
         .unwrap()
@@ -351,12 +359,11 @@ async fn unread_large_reply_times_out_after_result_recording() {
     assert_eq!(end.reason, BrokerStreamReason::TimedOut);
     assert_eq!(end.completed_sequence, Some(1));
     assert_eq!(*journal.events.lock().unwrap(), vec!["admit", "complete"]);
-    let mut partial = Vec::new();
+    let mut partial = vec![first];
     tokio::time::timeout(WAIT, client.take(2 * 1024 * 1024).read_to_end(&mut partial))
         .await
         .unwrap()
         .unwrap();
-    assert!(!partial.is_empty());
     assert!(partial.last() != Some(&b'\n'));
 }
 
