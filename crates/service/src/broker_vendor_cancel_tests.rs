@@ -135,3 +135,116 @@ async fn prepare_cancellation_vendor(
     )
     .unwrap()
 }
+
+#[tokio::test]
+async fn service_pause_stops_real_vendor_and_closes_owned_broker() {
+    let (setup, service) = native_launch_setup_with_service(false).await;
+    extend_service_fixture_lease(&setup, &service).await;
+    let prepared = prepare_cancellation_vendor(&setup).await;
+    let acknowledged = crate::prepare_native_broker(
+        &setup.store,
+        &setup.binding,
+        &setup.launch,
+        &setup.wrapper,
+        &conductor_runtime::binary_sha256(&setup.wrapper).unwrap(),
+        setup.endpoint,
+        101,
+    )
+    .await
+    .unwrap();
+    let deadline = service
+        .validate_runtime_owner(prepared.packet())
+        .await
+        .unwrap();
+    let session = acknowledged
+        .release(
+            setup.store.clone(),
+            setup.binding.clone(),
+            deadline,
+            Duration::from_secs(5),
+            broker_owner_audit("service-pause-owner"),
+        )
+        .await
+        .unwrap();
+    let (peer, _) =
+        conductor_runtime::connect_broker_endpoint(session.proxy_handoff(), Duration::from_secs(2))
+            .await
+            .unwrap();
+    let supervisor = service.clone();
+    let operation = tokio::spawn(async move {
+        supervisor
+            .run_broker_vendor(session, prepared, broker_owner_audit("service-pause-close"))
+            .await
+    });
+    let pid = read_started_vendor(&setup.launch.root).await;
+    let identity = conductor_runtime::ChildIdentity::observe(pid)
+        .await
+        .unwrap();
+    let row = setup.store.task("task").await.unwrap().unwrap();
+    let running: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+    service
+        .apply_row(
+            row,
+            lifecycle_command(
+                &running,
+                Actor {
+                    id: ActorId("operator".into()),
+                    role: ActorRole::Operator,
+                },
+                CommandKind::Pause,
+                "broker-service-pause",
+            ),
+        )
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), operation)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        outcome.process,
+        Err(conductor_runtime::ProcessError::Cancelled)
+    ));
+    assert!(outcome.broker.is_ok());
+    assert!(identity.revalidate().await.is_err());
+    assert_first_write_refused(peer, &setup.binding).await;
+    let reopened = Store::open(setup.root.path().join("state.sqlite3"))
+        .await
+        .unwrap();
+    let status = reopened.file_broker_status(&setup.binding).await.unwrap();
+    assert!(status.closed);
+    assert_eq!((status.admitted, status.completed), (0, 0));
+    assert_eq!(
+        service.workflow_task("task").await.unwrap().state,
+        TaskState::Paused
+    );
+}
+
+async fn extend_service_fixture_lease(
+    setup: &NativeLaunchSetup,
+    service: &PersistentControlService<FixedClock>,
+) {
+    let row = setup.store.task("task").await.unwrap().unwrap();
+    let claimed: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+    service
+        .apply_row(
+            row,
+            lifecycle_command(
+                &claimed,
+                Actor {
+                    id: ActorId("worker".into()),
+                    role: ActorRole::Worker,
+                },
+                CommandKind::Heartbeat {
+                    attempt_id: AttemptId("attempt".into()),
+                    lease_epoch: 1,
+                    lease_duration_ms: 10000,
+                    worker_margin_ms: 0,
+                },
+                "broker-service-heartbeat",
+            ),
+        )
+        .await
+        .unwrap();
+}
