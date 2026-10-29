@@ -14,6 +14,16 @@ async fn fixture() -> (
     FileBrokerBinding,
     sqlx::SqliteConnection,
 ) {
+    let (root, store, binding, db, _) = fixture_with_service().await;
+    (root, store, binding, db)
+}
+async fn fixture_with_service() -> (
+    tempfile::TempDir,
+    Store,
+    FileBrokerBinding,
+    sqlx::SqliteConnection,
+    PersistentControlService<FixedClock>,
+) {
     let (root, store) = lifecycle_store().await;
     let service =
         PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
@@ -44,7 +54,7 @@ async fn fixture() -> (
     // Synthetic acknowledged execution; this tests store routing, not native launch.
     sqlx::query("INSERT INTO executions(effect_token,task_id,attempt_id,lease_epoch,runner_id,packet_json,packet_sha256,state,wrapper_identity,expected_wrapper_identity,created_at_ms,updated_at_ms) VALUES(?,'task','attempt',1,'runner','{}',?,'started',?,?,100,100)")
         .bind(token).bind("c".repeat(64)).bind(&binding.invocation_id).bind(&binding.invocation_id).execute(&mut db).await.unwrap();
-    (root, store, binding, db)
+    (root, store, binding, db, service)
 }
 fn request(binding: &FileBrokerBinding) -> BrokerRequest {
     BrokerRequest {

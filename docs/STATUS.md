@@ -6,8 +6,8 @@ historical evidence and must not be read as current feature inventories.
 
 ## Current baseline and broker vendor candidate
 
-Main at `2f1ed4f1e0578b12112ae3f2c03c2f48454008f2` includes merged PRs #103,
-#105 and #107: prepared commands, joint vendor supervision and selected
+Main at `a58ae7f41fa89f191ab3c969ac3a81185cabd778` includes merged PRs #103,
+#105, #107 and #109: prepared commands, joint vendor supervision and selected
 actual Codex file-access controls. Their exact pre-merge and post-merge CI passed
 on macOS and Linux. Delivered bundles and existing runtimes remain unchanged.
 
@@ -24,7 +24,7 @@ exit, private receipt closure and closed state after reopen. Plugin/catalog
 features are disabled to remove observed background Git descendants; process-fence
 conditions remain unchanged. This is not enabled native daemon writer admission.
 
-The idle-session candidate separates waiting for a request from bounded framing
+The merged idle-session implementation separates waiting for a request from bounded framing
 in the owned journal, supervised file transport and initialized MCP proxy. Legacy
 API idle deadlines and handshake, partial-frame, operation and reply bounds remain.
 Cancellation and broker loss still terminate idle sessions. A pinned Codex test

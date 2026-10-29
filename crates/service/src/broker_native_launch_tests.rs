@@ -14,7 +14,12 @@ struct NativeLaunchSetup {
     wrapper: PathBuf,
 }
 async fn native_launch_setup(persist: bool) -> NativeLaunchSetup {
-    let (root, store, mut binding, mut db) = fixture().await;
+    native_launch_setup_with_service(persist).await.0
+}
+async fn native_launch_setup_with_service(
+    persist: bool,
+) -> (NativeLaunchSetup, PersistentControlService<FixedClock>) {
+    let (root, store, mut binding, mut db, service) = fixture_with_service().await;
     db.execute("UPDATE executions SET state='prepared',wrapper_identity=NULL,process_json=NULL")
         .await
         .unwrap();
@@ -79,14 +84,17 @@ async fn native_launch_setup(persist: bool) -> NativeLaunchSetup {
                 .is_err()
         );
     }
-    NativeLaunchSetup {
-        root,
-        store,
-        binding,
-        launch,
-        endpoint,
-        wrapper,
-    }
+    (
+        NativeLaunchSetup {
+            root,
+            store,
+            binding,
+            launch,
+            endpoint,
+            wrapper,
+        },
+        service,
+    )
 }
 
 #[tokio::test]
@@ -797,9 +805,17 @@ async fn persist_packet_for_vendor(
     pin: &conductor_runtime::VendorPin,
 ) -> conductor_runtime::ResumePacket {
     use conductor_runtime::ResumePacket;
+    let row = setup
+        .store
+        .task(&setup.binding.task_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+    let worker = task.attempt.unwrap().worker.0;
     let packet: ResumePacket = serde_json::from_value(serde_json::json!({
         "contract":{"version":1,"task_id":setup.binding.task_id,"attempt_id":setup.binding.attempt_id,
-            "lease_epoch":setup.binding.lease_epoch,"worker_id":"runner",
+            "lease_epoch":setup.binding.lease_epoch,"worker_id":worker,
             "adapter":{"kind":pin.kind,"version":pin.version,"executable_sha256":pin.executable_sha256,"conformance_sha256":pin.conformance_sha256},
             "workspace":setup.launch.root,"starting_head":"c".repeat(40),
             "authority":{"read_roots":[setup.launch.root],"write_roots":[setup.launch.root],"network":"inference_only","allow_workspace_commands":false},
