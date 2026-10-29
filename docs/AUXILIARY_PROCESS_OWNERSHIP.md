@@ -121,6 +121,17 @@ its persisted digest and terminal proof are sufficient. The initial definition
 record remains distinct from that final launch binding. Check result and verifier
 publication retain their task/version/source revalidation after settlement.
 
+Schema 23 links each new native result to one settled invocation and one audit
+record. The task update, result audit, idempotency record and publication link
+commit together. Publication requires an acknowledged `owned_group_settled`
+receipt, unchanged process/launch scope, current task/attempt/source/boot/authority,
+a fenced writer and no pending or legacy ownership. A never-released receipt is
+recovery evidence only and cannot publish a check or verdict. A link failure rolls
+back the result; identical replay adds nothing and a second result identity for
+the same invocation refuses. Result audit correlations and reviewer usage use the
+auxiliary invocation ID. Older/manual results are not backfilled with invented
+provenance.
+
 ## Local validation
 
 Build matching workspace binaries before the service's actual-supervisor tests:

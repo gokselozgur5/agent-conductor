@@ -677,3 +677,213 @@ async fn unreleased_shortcut_refuses_an_acknowledged_invocation() {
         .await
         .unwrap();
 }
+
+fn publication(input: &AuxiliaryPreparation, key: &str) -> agent_conductor_store::CommitBatch {
+    use agent_conductor_store::{AuditAppend, CommitBatch, TaskMutation, TaskTransitionAppend};
+    let kind = if input.kind == AuxiliaryKind::Check {
+        "record_check"
+    } else {
+        "record_verdict"
+    };
+    let payload=serde_json::json!([input.task_id,{"actor":{"id":"publisher","role":"system"},"expected_version":input.task_version,"correlation_id":input.invocation_id,"idempotency_key":key,"reason":"bound result","kind":{"type":kind,"source":input.source,"check_id":"test","passed":true,"accepted":true}}]).to_string();
+    CommitBatch {
+        actor_id:"publisher".into(),idempotency_key:key.into(),request_hash:format!("{:x}",Sha256::digest(payload.as_bytes())),
+        task:Some(TaskMutation{task_id:input.task_id.clone(),expected_version:input.task_version,new_version:input.task_version+1,state:"verifying".into(),aggregate_json:serde_json::json!({"id":input.task_id,"version":input.task_version+1,"state":"verifying","attempt":{"id":input.attempt_id},"verification":{"source":input.source}}).to_string(),updated_at_ms:100}),
+        project:None,agent:None,new_task:None,attempt:None,
+        transitions:vec![TaskTransitionAppend{id:format!("transition:{key}"),task_id:input.task_id.clone(),actor_id:"publisher".into(),prior_state:"verifying".into(),new_state:"verifying".into(),reason:"bound result".into(),correlation_id:input.invocation_id.clone(),occurred_at_ms:100}],
+        audit:vec![AuditAppend{id:format!("audit:{key}"),task_id:Some(input.task_id.clone()),actor_id:"publisher".into(),kind:kind.into(),correlation_id:input.invocation_id.clone(),payload_json:payload,occurred_at_ms:100}],
+        effects:vec![],outcome_json:"{}".into(),committed_at_ms:100,expires_at_ms:10000,
+    }
+}
+async fn settled_publication_fixture(
+    kind: AuxiliaryKind,
+    observation: &str,
+) -> (
+    tempfile::TempDir,
+    Store,
+    AuxiliaryPreparation,
+    SqliteConnection,
+) {
+    let (dir, store, mut input, mut connection) = fixture().await;
+    input.kind = kind;
+    sqlx::query("UPDATE recovery_authority SET authority_id=?")
+        .bind(binding().authority_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    store
+        .prepare_auxiliary_once(&input, audit("prepare"))
+        .await
+        .unwrap();
+    store
+        .bind_auxiliary_launch(&input, &binding(), audit("bind"))
+        .await
+        .unwrap();
+    store
+        .authorize_auxiliary_release(&input, &binding(), &process(), audit("release"))
+        .await
+        .unwrap();
+    let proof = proof(&input).replace("owned_group_settled", observation);
+    store
+        .settle_auxiliary_proof(&input, &binding(), &process(), 1, &proof, audit("settle"))
+        .await
+        .unwrap();
+    (dir, store, input, connection)
+}
+#[tokio::test]
+async fn publication_links_one_result_atomically_and_replays_without_duplicate_audit() {
+    use agent_conductor_store::CommitResult;
+    for kind in [AuxiliaryKind::Check, AuxiliaryKind::Verifier] {
+        let (_dir, store, input, mut connection) =
+            settled_publication_fixture(kind, "owned_group_settled").await;
+        let batch = publication(&input, "result");
+        connection.execute("CREATE TRIGGER fail_publication BEFORE INSERT ON auxiliary_publications BEGIN SELECT RAISE(ABORT,'injected'); END;").await.unwrap();
+        assert!(
+            store
+                .persist_auxiliary_publication(&input, &batch)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT version FROM tasks WHERE id='task'")
+                .fetch_one(store.readers())
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM audit_events WHERE id='audit:result'"
+            )
+            .fetch_one(store.readers())
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(
+            store
+                .command_outcome("publisher", "result", &batch.request_hash)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        connection
+            .execute("DROP TRIGGER fail_publication")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .persist_auxiliary_publication(&input, &batch)
+                .await
+                .unwrap(),
+            CommitResult::Applied { .. }
+        ));
+        assert!(matches!(
+            store
+                .persist_auxiliary_publication(&input, &batch)
+                .await
+                .unwrap(),
+            CommitResult::Replayed { .. }
+        ));
+        assert!(matches!(
+            store
+                .persist_auxiliary_publication(&input, &publication(&input, "another-result"))
+                .await,
+            Err(StoreError::IdempotencyCollision)
+        ));
+        let row:(String,String)=sqlx::query_as("SELECT p.invocation_id,a.correlation_id FROM auxiliary_publications p JOIN audit_events a ON a.id=p.audit_id").fetch_one(store.readers()).await.unwrap();
+        assert_eq!(row, (input.invocation_id.clone(), input.invocation_id));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT version FROM tasks WHERE id='task'")
+                .fetch_one(store.readers())
+                .await
+                .unwrap(),
+            3
+        );
+    }
+}
+#[tokio::test]
+async fn publication_refuses_unsettled_unreleased_stale_and_changed_scope() {
+    let (_dir, store, input, _connection) = fixture().await;
+    store
+        .prepare_auxiliary_once(&input, audit("prepare"))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .persist_auxiliary_publication(&input, &publication(&input, "pending"))
+            .await
+            .is_err()
+    );
+    let (_dir, store, input, _connection) =
+        settled_publication_fixture(AuxiliaryKind::Check, "never_released").await;
+    assert!(
+        store
+            .persist_auxiliary_publication(&input, &publication(&input, "unreleased"))
+            .await
+            .is_err()
+    );
+    let (_dir, store, input, mut c) =
+        settled_publication_fixture(AuxiliaryKind::Check, "owned_group_settled").await;
+    let batch = publication(&input, "result");
+    for sql in [
+        "UPDATE runtime_metadata SET boot_generation=2",
+        "UPDATE tasks SET version=3",
+        "UPDATE tasks SET aggregate_json=json_set(aggregate_json,'$.verification.source','changed')",
+        "UPDATE auxiliary_invocations SET process_json=json_set(process_json,'$.pid',124)",
+    ] {
+        c.execute("SAVEPOINT changed_scope").await.unwrap();
+        c.execute(sql).await.unwrap();
+        // The store uses another connection: publish the altered fixture state.
+        c.execute("RELEASE changed_scope").await.unwrap();
+        assert!(
+            store
+                .persist_auxiliary_publication(&input, &batch)
+                .await
+                .is_err()
+        );
+        c.execute("UPDATE runtime_metadata SET boot_generation=1; UPDATE tasks SET version=2;")
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE tasks SET aggregate_json=json_set(aggregate_json,'$.verification.source',?)",
+        )
+        .bind(&input.source)
+        .execute(&mut c)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE auxiliary_invocations SET process_json=?")
+            .bind(serde_json::to_string(&process()).unwrap())
+            .execute(&mut c)
+            .await
+            .unwrap();
+    }
+    for change in 0..3 {
+        let mut bad = batch.clone();
+        match change {
+            0 => bad.audit[0].correlation_id = "another-invocation".into(),
+            1 => bad.audit[0].kind = "record_verdict".into(),
+            _ => bad.request_hash = "0".repeat(64),
+        }
+        assert!(
+            store
+                .persist_auxiliary_publication(&input, &bad)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT version FROM tasks WHERE id='task'")
+            .fetch_one(store.readers())
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM auxiliary_publications")
+            .fetch_one(store.readers())
+            .await
+            .unwrap(),
+        0
+    );
+}

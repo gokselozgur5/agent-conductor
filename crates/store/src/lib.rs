@@ -18,6 +18,7 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 mod auxiliary;
 mod auxiliary_launch;
+mod auxiliary_publication;
 pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
 pub use auxiliary_launch::{AuxiliaryInvocation, AuxiliaryLaunchBinding};
 mod inventory;

@@ -7,6 +7,34 @@ use std::path::Path;
 use uuid::Uuid;
 
 impl<C: Clock> PersistentControlService<C> {
+    pub(super) async fn publish_auxiliary_result(
+        &self,
+        input: &AuxiliaryPreparation,
+        actor: agent_conductor_domain::Actor,
+        kind: agent_conductor_domain::CommandKind,
+        reason: String,
+    ) -> Result<(), StoreError> {
+        use agent_conductor_domain::{Command, CorrelationId, IdempotencyKey};
+        let row = self.store.task(&input.task_id).await?.ok_or_else(invalid)?;
+        let command = Command {
+            actor,
+            expected_version: u64::try_from(input.task_version).map_err(|_| invalid())?,
+            correlation_id: CorrelationId(input.invocation_id.clone()),
+            idempotency_key: IdempotencyKey(format!("auxiliary-result:{}", input.invocation_id)),
+            reason,
+            kind,
+        };
+        let request = serde_json::to_string(&(row.id.as_str(), &command)).map_err(|_| invalid())?;
+        let (batch, _) = self
+            .prepare_command_batch(row, command, crate::hash(&request), request)
+            .await
+            .map_err(|_| invalid())?;
+        self.store
+            .persist_auxiliary_publication(input, &batch)
+            .await?;
+        Ok(())
+    }
+
     /// Only for synchronous preparation that cannot spawn a supervisor/payload.
     /// Never wrap the launch/session call or infer this result during recovery.
     pub(super) async fn auxiliary_prelaunch_result<T>(

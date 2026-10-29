@@ -3492,6 +3492,14 @@ mod effect_tests {
             let (result, ()) = tokio::join!(execute, interrupt);
             let row = store.task("task").await.unwrap().unwrap();
             let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+            let publications:Vec<(String,String,String)>=sqlx::query_as("SELECT p.invocation_id,a.correlation_id,a.kind FROM auxiliary_publications p JOIN audit_events a ON a.id=p.audit_id").fetch_all(store.readers()).await.unwrap();
+            if cancel {
+                assert!(publications.is_empty());
+            } else {
+                assert_eq!(publications.len(), 1);
+                assert_eq!(publications[0].0, publications[0].1);
+                assert_eq!(publications[0].2, "record_check");
+            }
             if cancel {
                 assert!(result.is_err());
                 assert_eq!(task.state, TaskState::Cancelled);

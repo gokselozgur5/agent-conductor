@@ -567,7 +567,6 @@ impl<C: Clock> PersistentControlService<C> {
             .auxiliary_prelaunch_result(&invocation, prepared)
             .await?;
         let (_sender, cancellation) = watch::channel(false);
-        let usage_invocation = Uuid::now_v7().to_string();
         let output = self
             .supervise_auxiliary(&invocation, &spec, &plan.wrapper, cancellation)
             .await?
@@ -580,8 +579,13 @@ impl<C: Clock> PersistentControlService<C> {
                     _ => "verifier execution failed",
                 })
             })?;
-        self.record_vendor_usage(&packet, "reviewer", &usage_invocation, &output.stdout)
-            .await?;
+        self.record_vendor_usage(
+            &packet,
+            "reviewer",
+            &invocation.invocation_id,
+            &output.stdout,
+        )
+        .await?;
         let candidate = interpret_vendor_output(&packet, &output)
             .map_err(|_| invalid("verifier protocol failed"))?;
         let decision: ReviewDecision = serde_json::from_str(&candidate.text)
@@ -622,7 +626,7 @@ impl<C: Clock> PersistentControlService<C> {
         })
         .await
         .map_err(|_| invalid("verifier identity refused"))?;
-        self.workflow_command_locked(&plan.task_id, verifier, ActorRole::Verifier, CommandKind::RecordVerdict { accepted: decision.accepted, source: SourceIdentity(source.into()) }, &serde_json::json!({"output_sha256":candidate.output_sha256,"explanation":decision.explanation}).to_string()).await?;
+        self.publish_auxiliary_result(&invocation, Actor { id:ActorId(verifier.into()), role:ActorRole::Verifier }, CommandKind::RecordVerdict { accepted: decision.accepted, source:SourceIdentity(source.into()) }, serde_json::json!({"output_sha256":candidate.output_sha256,"explanation":decision.explanation}).to_string()).await?;
         if decision.accepted {
             self.workflow_command_locked(
                 &plan.task_id,
