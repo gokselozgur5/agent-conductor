@@ -906,3 +906,28 @@ the [official JSON mode documentation](https://learn.chatgpt.com/docs/non-intera
 describes the event stream but does not establish this diagnostic distinction.
 A parsed candidate is still untrusted output; admission, broker settlement,
 execution fencing, source capture and independent review remain separate gates.
+
+## Service-owned candidate observation
+
+`run_broker_candidate` consumes an owned native session and immutable prepared
+vendor. It parses successful output and rechecks current task ownership, host
+authority/generation, execution identity, frozen packet hash and durable closed
+journal watermark before returning a `BrokerCandidate`. Only this owned flow
+constructs the candidate; callers cannot reconstruct one from mutable outcome
+fields. Its immutable accessors expose the binding, parsed response, raw output
+and broker receipt for later private evidence handling.
+
+Rejection retains any returned process/broker outcome in `BrokerCandidateFailure`.
+An early refusal has no invented outcome. Its explicit accessors are private-data
+interfaces; Debug and Display omit raw output and the underlying error text.
+Failure constructors do not authenticate caller-provided observations. Cancellation
+of the future still relies on owned process/broker cleanup and durable recovery;
+it cannot return a failure object to a caller that dropped the future.
+
+Controlled tests cover operator pause, malformed JSON despite exit zero, changed
+binding, wrong receipt state/watermark and lease expiry after a successful run.
+The pinned local-provider Codex fixture exercises this public API with two durable
+file operations. These observations establish neither OS confinement nor native
+writer admission, execution fencing, source capture, review or task completion.
+A later publication step must revalidate ownership and bind source and independent
+verification; retaining a candidate must never extend its lease.
