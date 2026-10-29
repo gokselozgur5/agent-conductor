@@ -1,3 +1,5 @@
+mod broker_ownership;
+pub use broker_ownership::{close_broker_from_receipt, record_broker_owner};
 #[cfg(unix)]
 mod broker_journal;
 #[cfg(unix)]

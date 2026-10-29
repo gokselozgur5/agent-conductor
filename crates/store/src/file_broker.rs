@@ -2,6 +2,9 @@
 use crate::{EffectAudit, Store, StoreError};
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, SqliteConnection};
+#[path = "file_broker_owner.rs"]
+mod ownership;
+pub use ownership::FileBrokerOwner;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,11 +236,46 @@ impl Store {
         completed: i64,
         a: EffectAudit<'_>,
     ) -> Result<bool, StoreError> {
+        self.close_file_broker_inner(b, completed, None, a).await
+    }
+    async fn close_file_broker_inner(
+        &self,
+        b: &FileBrokerBinding,
+        completed: i64,
+        evidence: Option<(&FileBrokerOwner, &str)>,
+        a: EffectAudit<'_>,
+    ) -> Result<bool, StoreError> {
         let encoded = b.encoded()?;
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
         owner(&mut tx, b).await?;
         let state = bound(&mut tx, b, &encoded).await?;
+        let saved: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT owner_json,shutdown_sha256 FROM file_broker_owners WHERE invocation_id=?",
+        )
+        .bind(&b.invocation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match (saved, evidence) {
+            (None, None) => {}
+            (Some((saved, prior)), Some((expected, receipt))) if saved == expected.encoded()? => {
+                if prior.as_deref().is_some_and(|old| old != receipt) {
+                    return Err(StoreError::IdempotencyCollision);
+                }
+                if state == "closed" && prior.is_none() {
+                    return Err(invalid());
+                }
+                sqlx::query(
+                    "UPDATE file_broker_owners SET shutdown_sha256=? WHERE invocation_id=?",
+                )
+                .bind(receipt)
+                .bind(&b.invocation_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            _ => return Err(invalid()),
+        }
+
         let (last,pending):(i64,i64)=sqlx::query_as("SELECT COALESCE(MAX(sequence),0),COUNT(*) FILTER(WHERE completed_at_ms IS NULL) FROM file_operations WHERE invocation_id=?").bind(&b.invocation_id).fetch_one(&mut *tx).await?;
         if completed != last || pending != 0 {
             return Err(invalid());

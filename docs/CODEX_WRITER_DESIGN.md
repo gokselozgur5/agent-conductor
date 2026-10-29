@@ -556,8 +556,34 @@ The parent client observes Ready, requires a caller persistence callback before
 Release, revalidates process/root identities, and checks the independent receipt
 on successful shutdown. Actual-runner client tests cover persisted identity before release, callback
 failure without release, and failed completion audit retaining the file and
-pending intent without a receipt. The callback uses a fixture owner file; the
-production store callback and vendor acceptance remain incomplete. Native admission still requires durable parent
+pending intent without a receipt. The callback now uses the production store ownership transaction. Vendor
+admission and daemon restart reconciliation remain incomplete. Native admission still requires durable parent
 ownership and restart reconciliation, vendor configuration/OS confinement and
 long-lived idle handling. The existing Claude workflow and Codex writer refusal
 remain unchanged.
+
+
+## Durable parent ownership
+
+Schema 28 records the observed process identity, launch digest and receipt-root
+identity before Release. Only a fresh authorization grants release; exact replay
+returns no permission, substituted identities fail, and registration with prior
+operations cannot acquire an owner retroactively. Owner creation and its audit
+record share one owned SQL transaction.
+
+The service verifies a receipt against this stored owner and the pinned receipt
+directory before passing its digest and watermark to the store. Owned brokers
+cannot use the older caller-asserted closure path. The store checks exact owner,
+receipt replay, completion watermark and absence of pending operations, then
+commits the receipt digest, broker closure and audit together. Audit failure rolls
+back all of them. This closes only the broker; execution fencing and task
+acceptance remain separate.
+
+Actual parent/runner/files/SQLite tests exercise this path and reopen the closed
+record. Changed process, launch/root hash and observation are refused. Store tests
+cover replay, changed ownership/receipt, bypass closure, pending operations and
+full-database rollback on authorization/closure audit failures. Initial execution
+acknowledgement is still fixture setup. This API is not yet wired into native
+Codex vendor admission; older-generation restart recovery remains refused until
+an explicit recovery protocol is implemented. Existing delivered user databases
+are not upgraded by these tests.

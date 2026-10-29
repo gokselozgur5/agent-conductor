@@ -914,25 +914,32 @@ async fn journal_parent_client_records_identity_before_release_and_verifies_rece
         PathBuf::from(std::env::var_os("CONDUCTOR_TEST_BIN_DIR").unwrap()).join("conductor-runner");
     let prepared = PreparedBrokerRunner::prepare(&bin, &launch).await.unwrap();
     let expected = prepared.identity().clone();
-    let owner_path = root.path().join("fixture-owner.json");
-    let owner_copy = owner_path.clone();
+    let receipt_root = launch.receipt_root.clone();
+    let store_copy = store.clone();
+    let binding_copy = binding.clone();
     let mut session = prepared
         .release(|identity| async move {
-            // Test persistence only; production store ownership remains separate.
-            let mut owner = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(owner_copy)
-                .unwrap();
-            std::io::Write::write_all(&mut owner, &serde_json::to_vec(&identity).unwrap()).unwrap();
-            owner.sync_all().unwrap();
+            crate::record_broker_owner(
+                &store_copy,
+                &binding_copy,
+                &identity,
+                &receipt_root,
+                broker_owner_audit("parent-release"),
+            )
+            .await?;
             Ok(continuous_millis().unwrap() + 4000)
         })
         .await
         .unwrap();
-    let saved: conductor_runtime::BrokerShutdownReceipt =
-        serde_json::from_slice(&fs::read(owner_path).unwrap()).unwrap();
-    assert!(saved == expected);
+    let saved = store.file_broker_owner(&binding).await.unwrap();
+    assert_eq!(saved.process.pid, expected.process.pid);
+    assert_eq!(saved.process.start_marker, expected.process.start_marker);
+    assert!(
+        store
+            .close_file_broker(&binding, 0, broker_owner_audit("bypass"))
+            .await
+            .is_err()
+    );
     let (mut peer, _) = connect_broker_endpoint(session.proxy_handoff(), Duration::from_secs(2))
         .await
         .unwrap();
@@ -954,11 +961,34 @@ async fn journal_parent_client_records_identity_before_release_and_verifies_rece
         &root,
         &binding,
         &launch.sha256().unwrap(),
-        receipt.process,
+        receipt.process.clone(),
         Some(1),
     );
     assert!(server.await.unwrap().is_ok());
     assert_late_write_refused(peer, &binding, &files).await;
+    assert_changed_receipts_refused(&store, &binding, &receipt, &launch.receipt_root).await;
+    assert!(
+        crate::close_broker_from_receipt(
+            &store,
+            &binding,
+            &receipt,
+            &launch.receipt_root,
+            broker_owner_audit("receipt-close")
+        )
+        .await
+        .unwrap()
+    );
+    let reopened = Store::open(root.path().join("state.sqlite3"))
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.file_broker_status(&binding).await.unwrap(),
+        FileBrokerStatus {
+            closed: true,
+            admitted: 1,
+            completed: 1
+        }
+    );
 }
 
 #[tokio::test]
@@ -1051,4 +1081,41 @@ async fn journal_parent_client_unknown_completion_never_becomes_shutdown_proof()
             .join(format!("broker-{}.json", binding.invocation_id))
             .exists()
     );
+}
+
+fn broker_owner_audit(id: &str) -> agent_conductor_store::EffectAudit<'_> {
+    agent_conductor_store::EffectAudit {
+        id,
+        actor_id: "test",
+        correlation_id: "parent",
+        now_ms: 101,
+    }
+}
+async fn assert_changed_receipts_refused(
+    store: &Store,
+    binding: &FileBrokerBinding,
+    receipt: &conductor_runtime::BrokerShutdownReceipt,
+    root: &Path,
+) {
+    for mode in ["pid", "launch", "root", "watermark"] {
+        let mut changed = receipt.clone();
+        match mode {
+            "pid" => changed.process.pid += 1,
+            "launch" => changed.launch_sha256 = "e".repeat(64),
+            "root" => changed.root_identity_sha256 = "e".repeat(64),
+            _ => changed.observation = conductor_runtime::BrokerShutdownObservation::NeverReleased,
+        }
+        assert!(
+            crate::close_broker_from_receipt(
+                store,
+                binding,
+                &changed,
+                root,
+                broker_owner_audit("changed")
+            )
+            .await
+            .is_err()
+        );
+        assert_progress(store, binding, 1, 1).await;
+    }
 }

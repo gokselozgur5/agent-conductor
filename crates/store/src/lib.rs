@@ -1197,10 +1197,13 @@ async fn persist_in_transaction(
 }
 
 mod file_broker;
-pub use file_broker::{FileBrokerBinding, FileBrokerStatus};
+pub use file_broker::{FileBrokerBinding, FileBrokerOwner, FileBrokerStatus};
 #[cfg(test)]
 mod file_broker_barrier_tests;
 #[cfg(test)]
 mod file_broker_crash_tests;
 #[cfg(test)]
 mod file_broker_tests;
+
+#[cfg(test)]
+mod file_broker_owner_tests;
