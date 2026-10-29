@@ -330,3 +330,124 @@ async fn malformed_candidate_preserves_successful_process_and_broker_receipt() {
         TaskState::Completed
     );
 }
+
+#[tokio::test]
+async fn candidate_revalidation_rejects_changed_binding_receipt_and_expired_owner() {
+    let (_setup, service, packet, candidate) = Box::pin(completed_candidate_fixture()).await;
+    assert!(
+        service
+            .check_broker_candidate_fixture(
+                &packet,
+                candidate.binding(),
+                candidate.output(),
+                candidate.receipt(),
+            )
+            .await
+            .is_ok()
+    );
+    for mode in 0..5 {
+        let mut binding = candidate.binding().clone();
+        match mode {
+            0 => binding.authority_id = "f".repeat(64),
+            1 => binding.boot_generation += 1,
+            2 => binding.invocation_id = Uuid::now_v7().to_string(),
+            3 => binding.execution_token = "missing".into(),
+            4 => binding.lease_epoch += 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            service
+                .check_broker_candidate_fixture(
+                    &packet,
+                    &binding,
+                    candidate.output(),
+                    candidate.receipt(),
+                )
+                .await
+                .is_err(),
+            "changed binding {mode}"
+        );
+    }
+    for observation in [
+        conductor_runtime::BrokerShutdownObservation::NeverReleased,
+        conductor_runtime::BrokerShutdownObservation::Revoked {
+            completed_sequence: 1,
+        },
+    ] {
+        let mut receipt = candidate.receipt().clone();
+        receipt.observation = observation;
+        assert!(
+            service
+                .check_broker_candidate_fixture(
+                    &packet,
+                    candidate.binding(),
+                    candidate.output(),
+                    &receipt,
+                )
+                .await
+                .is_err()
+        );
+    }
+    service.clock.set(10001);
+    assert!(
+        service
+            .check_broker_candidate_fixture(
+                &packet,
+                candidate.binding(),
+                candidate.output(),
+                candidate.receipt(),
+            )
+            .await
+            .is_err()
+    );
+    assert_ne!(
+        service.workflow_task("task").await.unwrap().state,
+        TaskState::Completed
+    );
+}
+
+async fn completed_candidate_fixture() -> (
+    tempfile::TempDir,
+    PersistentControlService<FixedClock>,
+    conductor_runtime::ResumePacket,
+    crate::BrokerCandidate,
+) {
+    let (setup, service) = native_launch_setup_with_service(false).await;
+    extend_service_fixture_lease(&setup, &service).await;
+    let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"thread.started","thread_id":"fixture"}' '{"type":"turn.started"}' '{"type":"item.completed","item":{"type":"agent_message","text":"candidate"}}' '{"type":"turn.completed","usage":{}}'
+"#;
+    let prepared = prepare_controlled_candidate_vendor(&setup, script).await;
+    let packet = prepared.packet().clone();
+    let acknowledged = crate::prepare_native_broker(
+        &setup.store,
+        &setup.binding,
+        &setup.launch,
+        &setup.wrapper,
+        &conductor_runtime::binary_sha256(&setup.wrapper).unwrap(),
+        setup.endpoint,
+        101,
+    )
+    .await
+    .unwrap();
+    let deadline = service.validate_runtime_owner(&packet).await.unwrap();
+    let session = acknowledged
+        .release(
+            setup.store.clone(),
+            setup.binding.clone(),
+            deadline,
+            Duration::from_secs(5),
+            broker_owner_audit("revalidate-candidate-owner"),
+        )
+        .await
+        .unwrap();
+    let candidate = service
+        .run_broker_candidate(
+            session,
+            prepared,
+            broker_owner_audit("revalidate-candidate-close"),
+        )
+        .await
+        .unwrap();
+    (setup.root, service, packet, candidate)
+}

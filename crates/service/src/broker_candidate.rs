@@ -85,6 +85,18 @@ impl<C: Clock> PersistentControlService<C> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn check_broker_candidate_fixture(
+        &self,
+        packet: &ResumePacket,
+        binding: &FileBrokerBinding,
+        output: &ProcessOutput,
+        receipt: &BrokerShutdownReceipt,
+    ) -> Result<VendorCandidate, StoreError> {
+        self.validate_broker_candidate(packet, binding, output, receipt)
+            .await
+    }
+
     async fn validate_broker_candidate(
         &self,
         packet: &ResumePacket,
