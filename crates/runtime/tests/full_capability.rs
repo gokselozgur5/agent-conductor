@@ -449,6 +449,7 @@ async fn assert_persistent_account_worker(
         assert!(worker.try_wait().unwrap().is_none());
         assert!(path.exists());
     }
+    assert_worker_candidate_return(&path, packet, root.path()).await;
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(i32::try_from(worker.id().unwrap()).unwrap()),
         nix::sys::signal::Signal::SIGTERM,
@@ -591,7 +592,11 @@ async fn prepare_staged_worker(
     staged_packet.contract.workspace = stage_worker_baseline(socket, root).await;
     let mut staged_pin = pin.clone();
     staged_pin.executable = root.join("staged-vendor");
-    fs::write(&staged_pin.executable, "#!/bin/sh\ncat baseline\n").unwrap();
+    fs::write(
+        &staged_pin.executable,
+        "#!/bin/sh\ncat baseline\nprintf 'candidate result\\n' > produced\n",
+    )
+    .unwrap();
     fs::set_permissions(&staged_pin.executable, fs::Permissions::from_mode(0o700)).unwrap();
     staged_pin.executable_sha256 = binary_sha256(&staged_pin.executable).unwrap();
     staged_packet
@@ -600,4 +605,62 @@ async fn prepare_staged_worker(
         .executable_sha256
         .clone_from(&staged_pin.executable_sha256);
     (staged_pin, staged_packet)
+}
+
+async fn assert_worker_candidate_return(
+    socket: &std::path::Path,
+    packet: &conductor_runtime::ResumePacket,
+    root: &std::path::Path,
+) {
+    let uid = nix::unistd::geteuid().as_raw();
+    let mut address = conductor_runtime::AccountChannelAddress {
+        path: socket.into(),
+        worker_uid: uid,
+        coordinator_uid: uid,
+        packet_sha256: packet.sha256().unwrap(),
+    };
+    let remote = root.join("worker-candidate");
+    let request = conductor_runtime::AccountCaptureRequest {
+        packet_sha256: address.packet_sha256.clone(),
+        source: packet.contract.workspace.clone(),
+        destination: remote.clone(),
+        baseline_paths: vec!["baseline".into()],
+    };
+    let receipt = conductor_runtime::capture_account_candidate(&address, &request)
+        .await
+        .unwrap();
+    assert_eq!(receipt.packet_sha256, request.packet_sha256);
+    // Existing capture destinations cannot be replaced by another request.
+    assert!(
+        conductor_runtime::capture_account_candidate(&address, &request)
+            .await
+            .is_err()
+    );
+    address.packet_sha256 = receipt.snapshot_sha256;
+    let local = root.join("coordinator-candidate");
+    let manifest = conductor_runtime::fetch_account_snapshot(&address, &remote, &local)
+        .await
+        .unwrap();
+    assert_eq!(manifest.sha256().unwrap(), address.packet_sha256);
+    assert_eq!(
+        fs::read(local.join("tree/baseline")).unwrap(),
+        b"selected source bytes\n"
+    );
+    assert_eq!(
+        fs::read(local.join("tree/produced")).unwrap(),
+        b"candidate result\n"
+    );
+    // A selected digest cannot bless a subsequently modified account-side copy.
+    fs::write(remote.join("tree/produced"), b"changed after selection").unwrap();
+    let refused = root.join("changed-candidate");
+    assert!(
+        conductor_runtime::fetch_account_snapshot(&address, &remote, &refused)
+            .await
+            .is_err()
+    );
+    assert!(!refused.join("manifest.json").exists());
+    assert_eq!(
+        fs::read(local.join("tree/produced")).unwrap(),
+        b"candidate result\n"
+    );
 }
