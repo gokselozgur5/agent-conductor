@@ -52,6 +52,10 @@ class PackageLauncherTests(unittest.TestCase):
                  ['--state', '/state with spaces', 'plan', '--task', 'one',
                   '--from-plan', str(root / 'accepted-adapters.json')]),
                 (['plan', '--from-plan', '/explicit'], ['plan', '--from-plan', '/explicit']),
+                (['account-check', '--role', 'worker'],
+                 ['account-check', '--role', 'worker', '--from-plan', str(root / 'accepted-adapters.json')]),
+                (['account-check', '--role', 'coordinator', '--from-plan', '/explicit'],
+                 ['account-check', '--role', 'coordinator', '--from-plan', '/explicit']),
                 (['run', '--dispatch'], ['run', '--dispatch']),
             ]
             for arguments, expected in cases:

@@ -184,6 +184,27 @@ The worker uses its own HOME and existing vendor login. Its pinned executable
 path is resolved and hashed by the receiver before ACK; the coordinator still
 validates the independent verifier's local executable.
 
+Before starting the receiver, run the read-only setup check as its selected OS
+account (use an accepted plan or the package's `accepted-adapters.json`):
+
+```sh
+tools/conductor account-check --from-plan /absolute/accepted-plan.json --role worker
+```
+
+After starting the receiver, run the same command as the coordinator with
+`--role coordinator`. In an installed package use `./conductor account-check
+--role worker` or `--role coordinator`; the package supplies its accepted template.
+Neither role needs initialized operator state. The worker check validates account
+database metadata, real/effective UID and GID, its executable hash, and directory
+ownership/access. The coordinator check validates its verifier binary and socket
+access without opening the worker's private binary or artifact directory.
+
+These are local observations, not an execution authorization or login test. No
+vendor is launched, credentials are not read, and no connection is made. An
+existing socket is reported as `present_unverified`, including a stale socket;
+do not remove or replace it based on preflight output. Runtime peer authentication,
+packet admission and current executable validation remain authoritative.
+
 Normal `conductor plan`, package generation, submission and daemon dispatch
 preserve this selection. Dispatch stages the exact baseline, records ACK before
 Release, waits with lease renewal, imports the candidate, runs required checks,

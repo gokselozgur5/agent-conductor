@@ -95,6 +95,9 @@ def main():
     rpc.add_argument('--address', required=True, help='numeric loopback host:port')
     rpc.add_argument('--token-file', type=Path, required=True)
     rpc.add_argument('--request-file', type=Path, help='payload JSON file; defaults to stdin')
+    account_check = sub.add_parser('account-check', help='inspect account setup without connecting or launching models')
+    account_check.add_argument('--from-plan', type=Path, required=True)
+    account_check.add_argument('--role', choices=('worker', 'coordinator'), required=True)
     plan = sub.add_parser('plan', help='prepare a plan from previously accepted adapter pins')
     plan.add_argument('--from-plan', type=Path, required=True)
     plan.add_argument('--task', required=True)
@@ -112,6 +115,14 @@ def main():
     submit.add_argument('--path-prefix')
     args = parser.parse_args()
     os.umask(0o077)
+    if args.command == 'account-check':
+        from account_preflight import check
+        with args.from_plan.open('rb') as stream:
+            data = stream.read(131073)
+        if len(data) > 131072:
+            raise ValueError('account check template exceeds its bound')
+        print(json.dumps(check(json.loads(data), args.role), indent=2))
+        return
     if args.command == 'rpc':
         from conductor_rpc import send, exit_code
         if args.request_file:

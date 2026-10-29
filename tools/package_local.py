@@ -26,7 +26,7 @@ if command == 'transfer-snapshot':
     os.execv(executable, [executable, *args[command_index:]])
 if command == 'init' and '--bin-dir' not in args:
     args += ['--bin-dir', str(root / 'bin')]
-if command == 'plan' and '--from-plan' not in args:
+if command in ('plan', 'account-check') and '--from-plan' not in args:
     args += ['--from-plan', str(root / 'accepted-adapters.json')]
 os.execv(sys.executable, [sys.executable, '-E', '-s', str(root / 'tools/conductor'), *args])
 '''
@@ -106,12 +106,17 @@ When full_capability is present, workers use normal shell/network tools and thei
 selected account's own HOME/login. For local dispatch, launch the runtime as that
 account. When account_worker is present, start the receiving process as the worker
 account before submitting tasks:
+  ./conductor account-check --role worker
   ./bin/conductor-runner --account-worker SOCKET COORDINATOR_UID
 Use the template's socket path and the coordinator account's numeric UID. The
 receiver-owned socket parent must already be traversable by the coordinator; the
 artifact directory must already exist. Conductor changes neither permissions nor
 credentials. Run the daemon as the coordinator account; worker credentials stay
 with the receiving process. See docs/FULL_CAPABILITY_EXECUTION.md for setup.
+Before submission, inspect the selected endpoint from the coordinator account:
+  ./conductor account-check --role coordinator
+These checks do not connect, read credentials or launch models. A present socket
+is not proof of a live or authenticated peer; runtime admission checks still apply.
 Accepted input snapshots remain usable after daemon restart; this does not make
 an interrupted unrestricted execution eligible for automatic continuation.
 The launcher uses the packaging Python interpreter directly, independent of PATH.

@@ -60,6 +60,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -p test_operator_backup.py -v
           python3 -m unittest discover -s tests -p test_operator_profiles.py -v
+          python3 -m unittest discover -s tests -p test_account_preflight.py -v
           python3 -m unittest discover -s tests -p test_adapter_pins.py -v
           python3 -m unittest discover -s tests -p 'test_conductor_rpc*.py' -v
           python3 -m unittest discover -s tests -p test_package_launcher.py -v
