@@ -3,7 +3,7 @@ use crate::{Clock, PersistentControlService};
 use agent_conductor_domain::{
     Actor, ActorId, ActorRole, CheckId, CommandKind, SourceIdentity, Task, TaskState,
 };
-use agent_conductor_store::{ExecutionState, StoreError};
+use agent_conductor_store::StoreError;
 use conductor_runtime::{CheckDefinition, CheckOutcome, CheckReceipt, ResumePacket, prepare_check};
 use std::path::PathBuf;
 use tokio::sync::watch;
@@ -25,10 +25,10 @@ struct CheckContext {
 }
 impl<C: Clock> PersistentControlService<C> {
     /// Runs a frozen required check and records its receipt in the transactional
-    /// lifecycle audit. Revalidates source, attempt, fence and task version after
+    /// lifecycle audit. Revalidates source, attempt, capture eligibility and task version after
     /// the process exits. It does not record a verifier verdict or complete work.
     /// # Errors
-    /// Refuses unfenced execution, missing/source-mismatched contracts, invalid
+    /// Refuses ineligible execution, missing/source-mismatched contracts, invalid
     /// isolation or any lifecycle mutation during the check. No passing record is
     /// published on capture failure or a concurrent cancellation/source change.
     pub async fn execute_required_check(
@@ -110,16 +110,9 @@ impl<C: Clock> PersistentControlService<C> {
             .execution(token)
             .await?
             .ok_or_else(|| invalid("execution missing"))?;
-        if record.state != ExecutionState::Fenced
-            || self
-                .store
-                .has_unfenced_execution(&record.preparation.task_id)
-                .await?
-        {
-            return Err(invalid("check requires confirmed writer fencing"));
-        }
         let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
             .map_err(|_| invalid("invalid persisted packet"))?;
+        self.validate_capture_eligibility(&record, &packet).await?;
         let packet_digest = packet
             .sha256()
             .map_err(|_| invalid("invalid packet digest"))?;

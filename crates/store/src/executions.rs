@@ -188,6 +188,21 @@ impl Store {
         Ok(count != 0)
     }
 
+    /// Checks other attempts while inspecting a captured normal-exit candidate.
+    /// This does not fence the excluded execution or authorize reassignment.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn has_other_unfenced_execution(
+        &self,
+        task_id: &str,
+        token: &str,
+    ) -> Result<bool, StoreError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM executions WHERE task_id=? AND effect_token!=? AND state!='fenced'",
+        ).bind(task_id).bind(token).fetch_one(&self.inner.readers).await?;
+        Ok(count != 0)
+    }
+
     /// Reads a recorded wrapper intent/observation without consulting live processes.
     /// # Errors
     /// Returns a database or invalid-record error.

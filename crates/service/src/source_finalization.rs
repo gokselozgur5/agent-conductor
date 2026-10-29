@@ -1,4 +1,4 @@
-//! Binds a normally exited, capability-limited writer's captured tree to review.
+//! Binds a normally exited writer's captured tree to independent review.
 use crate::{Clock, PersistentControlService};
 use agent_conductor_domain::{
     Actor, ActorId, ActorRole, Command, CommandKind, CorrelationId, IdempotencyKey, SourceIdentity,
@@ -13,10 +13,10 @@ use std::path::Path;
 use uuid::Uuid;
 
 impl<C: Clock> PersistentControlService<C> {
-    /// Finalizes a restricted writer after accepted normal wrapper exit. Captures
-    /// new/deleted files outside its writable root and binds that copy for checks.
-    /// Does not accept command-capable writers, interrupted runs or model prose
-    /// as fence evidence. The trusted pinned CLI enforces file-tool confinement.
+    /// Captures a normally exited writer's candidate for independent checks.
+    /// Restricted writers retain their existing file-tool fence evidence.
+    /// Unrestricted writers remain Exited: inspecting their copied output does
+    /// not establish descendant fencing or authorize workspace reassignment.
     /// # Errors
     /// Refuses absent/failed exit, mismatched evidence, expired ownership, capture
     /// failure or lifecycle conflicts. Partial artifacts remain for recovery.
@@ -38,15 +38,20 @@ impl<C: Clock> PersistentControlService<C> {
         if record.state != ExecutionState::Exited
             || record.exit_code != Some(0)
             || record.preparation.packet_sha256 != candidate.packet_sha256
-            || !accepts_file_writer_exit(&packet, candidate)
+            || candidate.attempt_id != packet.contract.attempt_id
+            || (packet.contract.full_capability.is_none()
+                && !accepts_file_writer_exit(&packet, candidate))
         {
             return Err(invalid(
-                "adapter does not establish a restricted writer exit",
+                "adapter does not establish an eligible writer exit",
             ));
         }
         self.validate_runtime_owner(&packet).await?;
         let id = Uuid::now_v7().to_string();
-        self.store.update_execution(token, record.revision, &format!("file-writer-exit:{id}"),
+        if packet.contract.full_capability.is_some() {
+            self.validate_capture_eligibility(&record, &packet).await?;
+        } else {
+            self.store.update_execution(token, record.revision, &format!("file-writer-exit:{id}"),
             &ExecutionUpdate::Fenced { reason: serde_json::json!({
                 "basis": "accepted pinned file-only CLI exited normally; attempt-scoped write tools only",
                 "packet_sha256": candidate.packet_sha256,
@@ -56,6 +61,7 @@ impl<C: Clock> PersistentControlService<C> {
             }).to_string() },
             EffectAudit { id: &id, actor_id: "conductor-runtime", correlation_id: token, now_ms: self.clock.read(self.boot_generation).wall_unix_ms },
         ).await?;
+        }
         let source = packet.contract.workspace.clone();
         let target = destination.to_path_buf();
         let paths = baseline_paths.to_vec();
@@ -118,8 +124,7 @@ impl<C: Clock> PersistentControlService<C> {
                 expected_version: task.version,
                 correlation_id: CorrelationId(token.into()),
                 idempotency_key: IdempotencyKey(format!("finalize:{id}:{label}")),
-                reason: "bind restricted writer captured source for independent verification"
-                    .into(),
+                reason: "bind captured source for independent verification".into(),
                 kind,
             };
             let request_json = serde_json::to_string(&(row.id.as_str(), &command))
