@@ -887,3 +887,74 @@ async fn publication_refuses_unsettled_unreleased_stale_and_changed_scope() {
         0
     );
 }
+
+#[tokio::test]
+async fn pending_recovery_remains_bounded_without_refusing_large_inventory() {
+    let (_dir, store, template, mut c) = fixture().await;
+    for i in 0..130 {
+        let id = format!("job-{i:03}");
+        sqlx::query("INSERT INTO tasks(id,project_id,objective,state,priority,version,authority_json,created_at_ms,updated_at_ms,aggregate_json) VALUES(?,'p','fixture','verifying',0,2,'{}',0,0,'{}')").bind(&id).execute(&mut c).await.unwrap();
+        sqlx::query("INSERT INTO attempts(id,task_id,worker_id,lease_epoch,instruction_hashes_json,required_checks_json,capability_hash,started_at_ms) VALUES(?,?,'worker',7,'[]','[]','hash',0)").bind(&id).bind(&id).execute(&mut c).await.unwrap();
+        sqlx::query("INSERT INTO effect_intents(token,task_id,attempt_id,lease_epoch,correlation_id,effect_kind,request_json,status,created_at_ms,updated_at_ms) VALUES(?,?,?,7,'fixture','worker.spawn','{}','done',0,0)").bind(&id).bind(&id).bind(&id).execute(&mut c).await.unwrap();
+        sqlx::query("INSERT INTO executions(effect_token,task_id,attempt_id,lease_epoch,runner_id,packet_json,packet_sha256,state,created_at_ms,updated_at_ms) VALUES(?,?,?,7,'runner','{}','hash','fenced',0,0)").bind(&id).bind(&id).bind(&id).execute(&mut c).await.unwrap();
+        let mut input = template.clone();
+        input.task_id = id.clone();
+        input.attempt_id = id.clone();
+        input.execution_token = id.clone();
+        input.invocation_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO auxiliary_invocations(invocation_id,task_id,execution_token,preparation_json,boot_generation,state,created_at_ms) VALUES(?,?,?,?,1,'pending',0)").bind(&input.invocation_id).bind(&id).bind(&id).bind(serde_json::to_string(&input).unwrap()).execute(&mut c).await.unwrap();
+    }
+    let first = store
+        .pending_auxiliary_invocations()
+        .await
+        .expect("a large inventory must permit bounded recovery");
+    assert_eq!(first.len(), 128);
+    let cursor = first.last().unwrap().preparation.invocation_id.clone();
+    let second = store.pending_auxiliary_page(Some(&cursor)).await.unwrap();
+    assert_eq!(second.len(), 2);
+    assert!(
+        second
+            .iter()
+            .all(|row| row.invocation.is_ok() && row.invocation_id > cursor)
+    );
+    assert!(
+        store
+            .pending_auxiliary_page(Some(&second.last().unwrap().invocation_id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let first_id = &first[0].preparation.invocation_id;
+    for sql in [
+        "UPDATE auxiliary_invocations SET preparation_json='{}' WHERE invocation_id=?",
+        "UPDATE auxiliary_invocations SET preparation_json=json_set(preparation_json,'$.task_id','foreign') WHERE invocation_id=?",
+        "UPDATE auxiliary_invocations SET launch_binding_json=json_quote(printf('%20000s','x')) WHERE invocation_id=?",
+    ] {
+        sqlx::query("UPDATE auxiliary_invocations SET preparation_json=?,launch_binding_json=NULL WHERE invocation_id=?").bind(serde_json::to_string(&first[0].preparation).unwrap()).bind(first_id).execute(&mut c).await.unwrap();
+        sqlx::query(sql)
+            .bind(first_id)
+            .execute(&mut c)
+            .await
+            .unwrap();
+        let page = store.pending_auxiliary_page(None).await.unwrap();
+        assert_eq!(page.len(), 128);
+        assert!(page[0].invocation.is_err());
+        assert_eq!(
+            page.iter().filter(|row| row.invocation.is_ok()).count(),
+            127
+        );
+        assert!(store.pending_auxiliary_invocations().await.is_err());
+        assert!(
+            store
+                .has_pending_auxiliary(&first[0].preparation.task_id)
+                .await
+                .unwrap()
+        );
+    }
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM auxiliary_invocations WHERE state='pending'")
+            .fetch_one(&mut c)
+            .await
+            .unwrap();
+    assert_eq!(count, 130);
+}

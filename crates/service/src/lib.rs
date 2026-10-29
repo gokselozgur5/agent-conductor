@@ -87,6 +87,7 @@ pub struct PersistentControlService<C = SystemClock> {
     started_at: Instant,
     clock: Arc<C>,
     mutations: Arc<Mutex<()>>,
+    auxiliary_recovery_cursor: Arc<Mutex<Option<String>>>,
     watcher_status: Arc<RwLock<WatcherStatus>>,
     observed_projects: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
 }
@@ -99,6 +100,7 @@ impl<C: Clock> Clone for PersistentControlService<C> {
             started_at: self.started_at,
             clock: Arc::clone(&self.clock),
             mutations: Arc::clone(&self.mutations),
+            auxiliary_recovery_cursor: Arc::clone(&self.auxiliary_recovery_cursor),
             watcher_status: Arc::clone(&self.watcher_status),
             observed_projects: Arc::clone(&self.observed_projects),
         }
@@ -178,6 +180,7 @@ impl<C: Clock> PersistentControlService<C> {
             started_at: Instant::now(),
             clock: Arc::new(clock),
             mutations: Arc::new(Mutex::new(())),
+            auxiliary_recovery_cursor: Arc::new(Mutex::new(None)),
             watcher_status: Arc::new(RwLock::new(WatcherStatus::Disabled)),
             observed_projects: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         };
@@ -3652,6 +3655,19 @@ mod effect_tests {
         })
         .await
         .unwrap();
+        assert_paged_auxiliary_recovery(service, store, root, &input, &receipt, &work).await;
+    }
+
+    async fn assert_paged_auxiliary_recovery(
+        service: &PersistentControlService<FixedClock>,
+        store: &Store,
+        root: &std::path::Path,
+        input: &agent_conductor_store::AuxiliaryPreparation,
+        receipt: &std::path::Path,
+        work: &std::path::Path,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        seed_invalid_auxiliary_page(store, root, &input.execution_token).await;
         let restarted = PersistentControlService::start_with_reservation(
             store.clone(),
             200,
@@ -3660,12 +3676,25 @@ mod effect_tests {
         )
         .await
         .unwrap();
-        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(receipt, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 0);
+        assert!(restarted.auxiliary_recovery_cursor.lock().await.is_some());
+        // A clone continues the same sweep and refuses the non-private proof.
+        assert_eq!(
+            restarted
+                .clone()
+                .recover_auxiliary_receipts()
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(restarted.auxiliary_recovery_cursor.lock().await.is_none());
         assert!(store.has_pending_auxiliary("task").await.unwrap());
-        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(service.recover_auxiliary_receipts().await.unwrap(), 0);
         assert_eq!(service.recover_auxiliary_receipts().await.unwrap(), 0);
         assert!(store.has_pending_auxiliary("task").await.unwrap());
+        assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 0);
         assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 1);
         assert_eq!(restarted.recover_auxiliary_receipts().await.unwrap(), 0);
         assert!(!store.has_pending_auxiliary("task").await.unwrap());
@@ -3675,6 +3704,45 @@ mod effect_tests {
         let proof: serde_json::Value = serde_json::from_str(&observed.2).unwrap();
         assert_eq!(proof["observation"], "never_released");
         assert!(!work.join("payload-started").exists());
+        let unknown: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM auxiliary_invocations WHERE state='pending'")
+                .fetch_one(store.readers())
+                .await
+                .unwrap();
+        assert_eq!(
+            unknown, 128,
+            "invalid rows must remain owned, never silently settled"
+        );
+    }
+
+    async fn seed_invalid_auxiliary_page(store: &Store, root: &std::path::Path, token: &str) {
+        use sqlx::Connection;
+        let mut c = sqlx::SqliteConnection::connect(&format!(
+            "sqlite://{}",
+            root.join("state.sqlite3").display()
+        ))
+        .await
+        .unwrap();
+        for i in 1..=128 {
+            let id = format!("invalid-aux-{i:03}");
+            let mut task = Task::new(TaskId(id.clone()), vec![]);
+            task.state = TaskState::Paused;
+            store
+                .create_task(NewTask {
+                    id: &id,
+                    project_id: "project",
+                    objective: "invalid ownership fixture",
+                    state: "paused",
+                    priority: 0,
+                    authority_json: "{}",
+                    aggregate_json: &serde_json::to_string(&task).unwrap(),
+                    created_at_ms: 0,
+                })
+                .await
+                .unwrap();
+            let invocation = format!("00000000-0000-4000-8000-{i:012x}");
+            sqlx::query("INSERT INTO auxiliary_invocations(invocation_id,task_id,execution_token,preparation_json,boot_generation,state,created_at_ms) VALUES(?,?,?,'{}',1,'pending',0)").bind(invocation).bind(&id).bind(token).execute(&mut c).await.unwrap();
+        }
     }
 
     fn assert_unstarted_binding(

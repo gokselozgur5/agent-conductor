@@ -22,7 +22,9 @@ pub use legacy_auxiliary_host::AuxiliaryHostObservation;
 mod auxiliary_launch;
 mod auxiliary_publication;
 pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
-pub use auxiliary_launch::{AuxiliaryInvocation, AuxiliaryLaunchBinding};
+pub use auxiliary_launch::{
+    AuxiliaryInvocation, AuxiliaryLaunchBinding, AuxiliaryRecoveryCandidate,
+};
 mod inventory;
 mod usage;
 pub use inventory::{InventoryKind, InventoryRow};

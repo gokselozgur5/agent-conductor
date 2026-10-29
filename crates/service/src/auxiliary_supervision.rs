@@ -271,13 +271,26 @@ impl<C: Clock> PersistentControlService<C> {
 
     pub(super) async fn recover_auxiliary_receipts(&self) -> Result<usize, StoreError> {
         let mut count = self.recover_legacy_auxiliary_host().await?;
-        for AuxiliaryInvocation {
-            preparation,
-            binding,
-            process,
-            release_recorded,
-        } in self.store.pending_auxiliary_invocations().await?
-        {
+        // Shared by service clones so concurrent recovery passes cannot reset
+        // each other's sweep. Cursor movement is observation, never settlement.
+        let mut cursor = self.auxiliary_recovery_cursor.lock().await;
+        let page = self.store.pending_auxiliary_page(cursor.as_deref()).await?;
+        *cursor = if page.len() == 128 {
+            page.last().map(|row| row.invocation_id.clone())
+        } else {
+            None
+        };
+        for candidate in page {
+            let AuxiliaryInvocation {
+                preparation,
+                binding,
+                process,
+                release_recorded,
+            } = match candidate.invocation {
+                Ok(invocation) => invocation,
+                Err(StoreError::Integrity(_)) => continue,
+                Err(error) => return Err(error),
+            };
             let result = match (binding, process, release_recorded) {
                 (Some(binding), Some(process), true) => {
                     self.accept_auxiliary_receipt(&preparation, &binding, &process)

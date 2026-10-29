@@ -192,3 +192,24 @@ later-boot settlement, foreign/mutated evidence, rollback, Tokio cancellation,
 replay and multiple batches. Synthetic boot transitions are not physical reboot
 acceptance. No command here reboots the host; the physical recovery experiment remains
 outstanding and requires separate explicit approval.
+
+### Bounded receipt recovery across large inventories
+
+Receipt recovery scans at most 128 pending invocations per pass in invocation-ID
+order. A cursor shared by service clones advances across full pages and wraps
+on a short/empty page; restarting the daemon starts a fresh sweep without
+changing ownership. This prevents more than 128 pending rows or early missing
+receipts from blocking later valid receipt recovery.
+
+Each row is decoded independently with the existing JSON size limits. Its
+preparation identity must match the stored invocation, task, execution token and
+boot generation. Invalid rows remain pending and keep their task/backup barriers;
+they cannot authorize launch, settlement or result publication. Valid rows in the
+same page still undergo the unchanged private receipt, authority and process
+checks. Cursor advancement itself is only an observation aid. Cancellation or a
+read/settlement failure may defer work until a later sweep, never settle it.
+
+Tests retain a 130-row inventory, malformed/rebound/oversized first rows and
+page boundaries. A real supervisor pre-ACK receipt is recovered after 128 invalid
+rows; non-private proof and stale authority still refuse, service clones share
+the sweep, and the invalid rows remain pending after the healthy receipt settles.

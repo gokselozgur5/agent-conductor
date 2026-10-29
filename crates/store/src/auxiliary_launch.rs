@@ -47,6 +47,47 @@ pub struct AuxiliaryInvocation {
     pub process: Option<ExecutionProcess>,
     pub release_recorded: bool,
 }
+/// One independently decoded row; invalid ownership remains pending.
+#[derive(Debug)]
+pub struct AuxiliaryRecoveryCandidate {
+    pub invocation_id: String,
+    pub invocation: Result<AuxiliaryInvocation, StoreError>,
+}
+
+fn decode_pending(r: &sqlx::sqlite::SqliteRow) -> Result<AuxiliaryInvocation, StoreError> {
+    let preparation: AuxiliaryPreparation =
+        serde_json::from_str(&r.try_get::<String, _>("preparation_json")?)
+            .map_err(|_| invalid())?;
+    preparation.validate()?;
+    if preparation.invocation_id != r.try_get::<String, _>("invocation_id")?
+        || preparation.task_id != r.try_get::<String, _>("task_id")?
+        || preparation.execution_token != r.try_get::<String, _>("execution_token")?
+        || preparation.boot_generation != r.try_get::<i64, _>("boot_generation")?
+    {
+        return Err(invalid());
+    }
+    let binding: Option<AuxiliaryLaunchBinding> = r
+        .try_get::<Option<String>, _>("launch_binding_json")?
+        .map(|s| serde_json::from_str(&s).map_err(|_| invalid()))
+        .transpose()?;
+    if let Some(v) = &binding {
+        v.validate()?;
+    }
+    let process: Option<ExecutionProcess> = r
+        .try_get::<Option<String>, _>("process_json")?
+        .map(|s| serde_json::from_str(&s).map_err(|_| invalid()))
+        .transpose()?;
+    if let Some(v) = &process {
+        v.validate()?;
+    }
+    Ok(AuxiliaryInvocation {
+        preparation,
+        binding,
+        process,
+        release_recorded: r.try_get::<i64, _>("release_recorded")? == 1,
+    })
+}
+
 impl Store {
     /// Binds a launch digest and wrapper pin before creating any process.
     /// Only a fresh `true` permits spawning; replay is reconciliation work.
@@ -120,41 +161,36 @@ impl Store {
         Ok(true)
     }
 
-    /// Reads bounded outstanding invocations without granting launch authority.
+    /// Reads the first bounded page of outstanding invocations, strictly decoded.
+    /// Recovery loops should use `pending_auxiliary_page` and retain their cursor.
     /// # Errors
-    /// Refuses malformed or excessive persisted input.
+    /// Refuses malformed persisted input in this page or database failures.
     pub async fn pending_auxiliary_invocations(
         &self,
     ) -> Result<Vec<AuxiliaryInvocation>, StoreError> {
-        let rows=sqlx::query("SELECT CASE WHEN length(preparation_json)<=16384 THEN preparation_json ELSE 'oversized' END AS preparation_json,CASE WHEN launch_binding_json IS NULL OR length(launch_binding_json)<=16384 THEN launch_binding_json ELSE 'oversized' END AS launch_binding_json,CASE WHEN process_json IS NULL OR length(process_json)<=4096 THEN process_json ELSE 'oversized' END AS process_json,release_recorded FROM auxiliary_invocations WHERE state='pending' AND NOT EXISTS (SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=auxiliary_invocations.task_id) LIMIT 129").fetch_all(&self.inner.readers).await?;
-        if rows.len() > 128 {
-            return Err(invalid());
-        }
-        rows.into_iter()
+        self.pending_auxiliary_page(None)
+            .await?
+            .into_iter()
+            .map(|row| row.invocation)
+            .collect()
+    }
+
+    /// Reads up to 128 rows after an exclusive invocation-ID cursor, in stable
+    /// order. Each decode is independent; an invalid row grants no authority and
+    /// must remain pending. A short page ends this sweep; restart at None later.
+    /// # Errors
+    /// Returns database read errors. All JSON fields are bounded before decoding.
+    pub async fn pending_auxiliary_page(
+        &self,
+        after: Option<&str>,
+    ) -> Result<Vec<AuxiliaryRecoveryCandidate>, StoreError> {
+        let rows=sqlx::query("SELECT invocation_id,task_id,execution_token,boot_generation,CASE WHEN length(preparation_json)<=16384 THEN preparation_json ELSE 'oversized' END AS preparation_json,CASE WHEN launch_binding_json IS NULL OR length(launch_binding_json)<=16384 THEN launch_binding_json ELSE 'oversized' END AS launch_binding_json,CASE WHEN process_json IS NULL OR length(process_json)<=4096 THEN process_json ELSE 'oversized' END AS process_json,release_recorded FROM auxiliary_invocations WHERE state='pending' AND (?1 IS NULL OR invocation_id>?1) AND NOT EXISTS (SELECT 1 FROM legacy_auxiliary_ownership l WHERE l.task_id=auxiliary_invocations.task_id) ORDER BY invocation_id LIMIT 128")
+            .bind(after).fetch_all(&self.inner.readers).await?;
+        rows.iter()
             .map(|r| {
-                let preparation: AuxiliaryPreparation =
-                    serde_json::from_str(&r.try_get::<String, _>("preparation_json")?)
-                        .map_err(|_| invalid())?;
-                preparation.validate()?;
-                let binding: Option<AuxiliaryLaunchBinding> = r
-                    .try_get::<Option<String>, _>("launch_binding_json")?
-                    .map(|s| serde_json::from_str(&s).map_err(|_| invalid()))
-                    .transpose()?;
-                if let Some(v) = &binding {
-                    v.validate()?;
-                }
-                let process: Option<ExecutionProcess> = r
-                    .try_get::<Option<String>, _>("process_json")?
-                    .map(|s| serde_json::from_str(&s).map_err(|_| invalid()))
-                    .transpose()?;
-                if let Some(v) = &process {
-                    v.validate()?;
-                }
-                Ok(AuxiliaryInvocation {
-                    preparation,
-                    binding,
-                    process,
-                    release_recorded: r.try_get::<i64, _>("release_recorded")? == 1,
+                Ok(AuxiliaryRecoveryCandidate {
+                    invocation_id: r.try_get("invocation_id")?,
+                    invocation: decode_pending(r),
                 })
             })
             .collect()
