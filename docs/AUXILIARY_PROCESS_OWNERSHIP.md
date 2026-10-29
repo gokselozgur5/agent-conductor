@@ -145,3 +145,18 @@ When using `CARGO_TARGET_DIR`, set the binary directory to that target's `debug`
 directory instead. CI builds the binaries first and supplies this explicit path;
 tests do not silently use a runner from another checkout or skip the production
 supervision path when it is unavailable.
+
+### Terminal delivery after control-pipe closure
+
+After Release, a renewal or cancellation write can fail while the supervisor is
+finishing its output. The parent retains the same in-flight framed reader and
+stops sending controls after that failure. It allows at most five additional
+seconds, still bounded by the original execution deadline, to receive the
+terminal frame. Invalid frames, EOF, another Ready, failed supervisor exit and
+missing private settlement proof remain refusals. A broken control pipe alone
+never establishes settlement or authorizes publication.
+
+Real-pipe regression peers consume Release and the initial renewal, close stdin,
+and gate terminal output until the parent has attempted renewal or cancellation.
+These are deterministic transport controls, not a claim that every real-worker
+shutdown schedule has been observed.

@@ -116,11 +116,26 @@ impl AuxiliarySession {
         let deadline = tokio::time::sleep(Duration::from_millis(self.timeout_ms + 10_000));
         tokio::pin!(deadline);
         let mut cancelled = false;
+        let mut transport_failed = false;
+        let drain_deadline = tokio::time::sleep(Duration::from_secs(5));
+        tokio::pin!(drain_deadline);
         let terminal = loop {
             tokio::select! {
                 value=&mut result=>break value?,
-                _=renew.tick(),if !cancelled=>send(&mut self.writer,&AuxiliaryControl::Renew{launch_sha256:self.hash.clone()}).await?,
-                _=cancellation.changed(),if !cancelled=>{cancelled=true;send(&mut self.writer,&AuxiliaryControl::Cancel{launch_sha256:self.hash.clone()}).await?;},
+                _=renew.tick(),if !cancelled && !transport_failed=>{
+                    transport_failed = send(&mut self.writer,&AuxiliaryControl::Renew{launch_sha256:self.hash.clone()}).await.is_err();
+                    if transport_failed {
+                        drain_deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(5));
+                    }
+                },
+                _=cancellation.changed(),if !cancelled && !transport_failed=>{
+                    cancelled=true;
+                    transport_failed = send(&mut self.writer,&AuxiliaryControl::Cancel{launch_sha256:self.hash.clone()}).await.is_err();
+                    if transport_failed {
+                        drain_deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(5));
+                    }
+                },
+                ()=&mut drain_deadline,if transport_failed=>return Err(invalid()),
                 ()=&mut deadline=>return Err(invalid()),
             }
         };
@@ -134,5 +149,117 @@ impl AuxiliarySession {
             return Err(invalid());
         }
         Ok(terminal)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    // A real pipe peer closes its control input after Release, keeps its output
+    // open, and withholds the terminal frame until the parent opens the gate.
+    async fn closed_control_peer(
+        cancel: bool,
+        suffix: &str,
+        exit_code: &str,
+    ) -> io::Result<AuxiliaryEvent> {
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"read -r release
+read -r first_renewal
+exec 0<&-
+: > closed
+while test ! -f gate; do sleep 0.01; done
+if test "$1" = no-frame; then sleep 7; fi
+printf '%s\n' "$1"
+exit "$2"
+"#;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", script, "peer", suffix, exit_code])
+            .current_dir(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let identity = ChildIdentity::observe(child.id().unwrap()).await.unwrap();
+        let session = AuxiliarySession {
+            writer: child.stdin.take().unwrap(),
+            reader: BufReader::new(child.stdout.take().unwrap()),
+            child,
+            identity,
+            hash: "a".repeat(64),
+            timeout_ms: 1000,
+            heartbeat_ms: if cancel { 60_000 } else { 15 },
+        };
+        let (sender, receiver) = watch::channel(false);
+        let mut run = tokio::spawn(session.run(receiver));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !dir.path().join("closed").exists() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if cancel {
+            sender.send(true).unwrap();
+        }
+        // No terminal frame exists yet. A control-write failure must leave the
+        // existing bounded reader alive rather than discard its eventual result.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut run)
+                .await
+                .is_err(),
+            "control failure discarded the pending terminal reader"
+        );
+        std::fs::write(dir.path().join("gate"), b"").unwrap();
+        tokio::time::timeout(Duration::from_secs(8), run)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn renewal_failure_drains_terminal_frame() {
+        let result = closed_control_peer(
+            false,
+            r#"{"type":"finished","exit_code":0,"stdout":[],"stderr":[]}"#,
+            "0",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            AuxiliaryEvent::Finished {
+                exit_code: Some(0),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_failure_drains_terminal_frame() {
+        let result = closed_control_peer(true, r#"{"type":"stopped","reason":"cancelled"}"#, "0")
+            .await
+            .unwrap();
+        assert!(matches!(result, AuxiliaryEvent::Stopped { .. }));
+    }
+    #[tokio::test]
+    async fn closed_control_does_not_accept_invalid_output_or_failed_exit() {
+        assert!(closed_control_peer(false, "not-json", "0").await.is_err());
+        assert!(
+            closed_control_peer(
+                false,
+                r#"{"type":"finished","exit_code":0,"stdout":[],"stderr":[]}"#,
+                "1"
+            )
+            .await
+            .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn broken_control_without_terminal_frame_has_bounded_drain() {
+        let start = tokio::time::Instant::now();
+        assert!(closed_control_peer(false, "no-frame", "0").await.is_err());
+        assert!(start.elapsed() < Duration::from_secs(7));
     }
 }
