@@ -153,7 +153,12 @@ operations do not themselves advance task state or wire normal daemon dispatch.
 The persistent service records account outcomes separately from local process
 observations. `await_account_execution` renews current ownership, retains bounded
 checkpoints, parses the native output and records its digest. Malformed or unknown
-terminal outcomes cannot become successful reports. `finalize_account_source`
+terminal outcomes cannot become successful reports. They block the execution and
+its matching active task with `account_terminal_failed`; operator pause/cancel and
+newer attempts remain unchanged. Retained dirty bytes and unresolved ownership do
+not establish a write fence or authorize another attempt. Execution uncertainty
+is persisted before the task transition; restart reconciliation covers a crash
+between those writes. `finalize_account_source`
 consumes that report, captures and fetches the exact candidate, rechecks ownership,
 and records the imported digest before binding the task's verification source.
 
