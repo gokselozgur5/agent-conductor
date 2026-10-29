@@ -2,6 +2,9 @@
 use crate::{EffectAudit, Store, StoreError};
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, SqliteConnection};
+#[path = "file_broker_launch.rs"]
+mod launch;
+pub use launch::FileBrokerLaunchBinding;
 #[path = "file_broker_owner.rs"]
 mod ownership;
 pub use ownership::{FileBrokerOwner, FileBrokerRecoveryCandidate};
