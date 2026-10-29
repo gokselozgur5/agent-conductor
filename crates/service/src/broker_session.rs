@@ -74,13 +74,10 @@ impl NativeBrokerSession {
     /// repeated issuance, requested cancellation or invalid vendor/proxy policy.
     pub async fn vendor_command(
         &mut self,
-        pin: &conductor_runtime::VendorPin,
-        packet: &conductor_runtime::ResumePacket,
-        authentication: std::collections::BTreeMap<String, String>,
-        proxy: &std::path::Path,
-        proxy_sha256: &str,
+        prepared: conductor_runtime::PreparedBrokerVendor,
     ) -> Result<conductor_runtime::ProcessSpec, conductor_runtime::VendorError> {
         use conductor_runtime::VendorError;
+        let packet = prepared.packet();
         let contract = &packet.contract;
         if !self.vendor_available
             || contract.task_id != self.binding.task_id
@@ -111,13 +108,7 @@ impl NativeBrokerSession {
         if status.closed || status.admitted != 0 || status.completed != 0 {
             return Err(VendorError::Identity);
         }
-        let mut spec = conductor_runtime::broker_codex_command(
-            pin,
-            packet,
-            authentication,
-            proxy,
-            proxy_sha256,
-        )?;
+        let mut spec = prepared.into_spec();
         spec.environment.insert(
             conductor_runtime::BROKER_HANDOFF_ENV.into(),
             self.runner.proxy_handoff().into(),

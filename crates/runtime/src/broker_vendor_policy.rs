@@ -73,3 +73,37 @@ pub fn broker_codex_command(
     spec.arguments.splice(0..0, options);
     Ok(spec)
 }
+
+/// Verified command without a broker capability. Prepare before starting the
+/// released broker's lease clock; executable hashing may be expensive.
+/// Callers must exclude executable replacement through eventual spawn.
+pub struct PreparedBrokerVendor {
+    packet: crate::ResumePacket,
+    spec: crate::ProcessSpec,
+}
+impl PreparedBrokerVendor {
+    /// Validate vendor/proxy identities and construct the restricted command.
+    /// # Errors
+    /// Returns the same identity/capability/environment refusals as the builder.
+    pub fn new(
+        pin: &crate::VendorPin,
+        packet: &crate::ResumePacket,
+        authentication: std::collections::BTreeMap<String, String>,
+        proxy: &Path,
+        approved_proxy_sha256: &str,
+    ) -> Result<Self, VendorError> {
+        Ok(Self {
+            spec: broker_codex_command(pin, packet, authentication, proxy, approved_proxy_sha256)?,
+            packet: packet.clone(),
+        })
+    }
+    #[must_use]
+    pub fn packet(&self) -> &crate::ResumePacket {
+        &self.packet
+    }
+    /// Consume the command. It still has no broker capability or launch authority.
+    #[must_use]
+    pub fn into_spec(self) -> crate::ProcessSpec {
+        self.spec
+    }
+}

@@ -148,4 +148,6 @@ pub use broker_client::*;
 #[cfg(unix)]
 mod broker_vendor_policy;
 #[cfg(unix)]
-pub use broker_vendor_policy::{broker_codex_command, codex_broker_tool_options};
+pub use broker_vendor_policy::{
+    PreparedBrokerVendor, broker_codex_command, codex_broker_tool_options,
+};

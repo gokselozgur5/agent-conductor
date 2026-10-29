@@ -779,7 +779,7 @@ async fn persist_vendor_packet(
     conductor_runtime::VendorPin,
     conductor_runtime::ResumePacket,
 ) {
-    use conductor_runtime::{AdapterKind, ResumePacket, VendorPin};
+    use conductor_runtime::{AdapterKind, VendorPin};
     let digest = conductor_runtime::binary_sha256(&setup.wrapper).unwrap();
     let pin = VendorPin {
         kind: AdapterKind::Codex,
@@ -788,11 +788,19 @@ async fn persist_vendor_packet(
         executable_sha256: digest.clone(),
         conformance_sha256: "b".repeat(64),
     };
-    // The executable stands in for an approved vendor identity; never run as Codex.
+    let packet = persist_packet_for_vendor(setup, &pin).await;
+    (pin, packet)
+}
+
+async fn persist_packet_for_vendor(
+    setup: &NativeLaunchSetup,
+    pin: &conductor_runtime::VendorPin,
+) -> conductor_runtime::ResumePacket {
+    use conductor_runtime::ResumePacket;
     let packet: ResumePacket = serde_json::from_value(serde_json::json!({
         "contract":{"version":1,"task_id":setup.binding.task_id,"attempt_id":setup.binding.attempt_id,
             "lease_epoch":setup.binding.lease_epoch,"worker_id":"runner",
-            "adapter":{"kind":"codex","version":"fixture","executable_sha256":digest,"conformance_sha256":"b".repeat(64)},
+            "adapter":{"kind":pin.kind,"version":pin.version,"executable_sha256":pin.executable_sha256,"conformance_sha256":pin.conformance_sha256},
             "workspace":setup.launch.root,"starting_head":"c".repeat(40),
             "authority":{"read_roots":[setup.launch.root],"write_roots":[setup.launch.root],"network":"inference_only","allow_workspace_commands":false},
             "instructions":[],"checks":[],"max_runtime_ms":10000},
@@ -811,7 +819,7 @@ async fn persist_vendor_packet(
         .execute(&mut db)
         .await
         .unwrap();
-    (pin, packet)
+    packet
 }
 
 #[tokio::test]
@@ -844,13 +852,7 @@ async fn owned_session_vendor_handoff_requires_exact_packet_and_single_issuance(
         changed.objective.push_str(" substituted");
         assert!(
             session
-                .vendor_command(
-                    &pin,
-                    &changed,
-                    std::collections::BTreeMap::new(),
-                    &setup.wrapper,
-                    &pin.executable_sha256
-                )
+                .vendor_command(prepared_test_vendor(&pin, &changed, &setup.wrapper))
                 .await
                 .is_err()
         );
@@ -858,13 +860,7 @@ async fn owned_session_vendor_handoff_requires_exact_packet_and_single_issuance(
         changed.contract.task_id = "another-task".into();
         assert!(
             session
-                .vendor_command(
-                    &pin,
-                    &changed,
-                    std::collections::BTreeMap::new(),
-                    &setup.wrapper,
-                    &pin.executable_sha256
-                )
+                .vendor_command(prepared_test_vendor(&pin, &changed, &setup.wrapper))
                 .await
                 .is_err()
         );
@@ -872,13 +868,7 @@ async fn owned_session_vendor_handoff_requires_exact_packet_and_single_issuance(
             session.cancel().await.unwrap();
         }
         let result = session
-            .vendor_command(
-                &pin,
-                &packet,
-                std::collections::BTreeMap::new(),
-                &setup.wrapper,
-                &pin.executable_sha256,
-            )
+            .vendor_command(prepared_test_vendor(&pin, &packet, &setup.wrapper))
             .await;
         if cancel_before {
             assert!(result.is_err());
@@ -894,13 +884,7 @@ async fn owned_session_vendor_handoff_requires_exact_packet_and_single_issuance(
             assert!(!format!("{spec:?}").contains(secret));
             assert!(
                 session
-                    .vendor_command(
-                        &pin,
-                        &packet,
-                        std::collections::BTreeMap::new(),
-                        &setup.wrapper,
-                        &pin.executable_sha256
-                    )
+                    .vendor_command(prepared_test_vendor(&pin, &packet, &setup.wrapper))
                     .await
                     .is_err()
             );
@@ -912,4 +896,19 @@ async fn owned_session_vendor_handoff_requires_exact_packet_and_single_issuance(
             .unwrap();
         assert_eq!(fs::read_dir(&setup.launch.root).unwrap().count(), 0);
     }
+}
+
+fn prepared_test_vendor(
+    pin: &conductor_runtime::VendorPin,
+    packet: &conductor_runtime::ResumePacket,
+    proxy: &Path,
+) -> conductor_runtime::PreparedBrokerVendor {
+    conductor_runtime::PreparedBrokerVendor::new(
+        pin,
+        packet,
+        std::collections::BTreeMap::new(),
+        proxy,
+        &pin.executable_sha256,
+    )
+    .unwrap()
 }
