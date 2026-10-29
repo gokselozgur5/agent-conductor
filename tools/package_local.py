@@ -44,8 +44,9 @@ def package(bin_dir, accepted_plan, destination):
     bin_dir = bin_dir.resolve(strict=True)
     template = json.loads(accepted_plan.read_text())
     pins = {k: template[k] for k in ('worker', 'verifier', 'model_timeout_ms')}
-    if 'toolchain_roots' in template:
-        pins['toolchain_roots'] = template['toolchain_roots']
+    for optional in ('toolchain_roots', 'full_capability'):
+        if optional in template:
+            pins[optional] = template[optional]
     for role in ('worker', 'verifier'):
         pin = pins[role]
         executable = Path(pin['executable']).resolve(strict=True)
@@ -67,7 +68,7 @@ def package(bin_dir, accepted_plan, destination):
     for path in REPO.joinpath('tools').iterdir():
         if path.is_file() and (path.suffix == '.py' or path.name == 'conductor'):
             shutil.copy2(path, destination / 'tools' / path.name)
-    for name in ('LOCAL_OPERATOR.md', 'DELIVERY_ACCEPTANCE.md', 'OPERATOR_RECOVERY.md'):
+    for name in ('LOCAL_OPERATOR.md', 'DELIVERY_ACCEPTANCE.md', 'OPERATOR_RECOVERY.md', 'FULL_CAPABILITY_EXECUTION.md'):
         shutil.copy2(REPO / 'docs' / name, destination / 'docs' / name)
     (destination / 'accepted-adapters.json').write_text(json.dumps(pins, indent=2) + '\n')
     (destination / 'accepted-adapters.json').chmod(0o600)
@@ -84,7 +85,7 @@ Copy the board credential in another terminal:
 Read health/tasks/workflows:
   ./conductor status
 
-Prepare a task using this bundle's accepted Claude writer / Codex reviewer:
+Prepare a task using this bundle's accepted worker / independent reviewer:
   ./conductor plan --task first --objective-file /absolute/objective.txt --checks-file /absolute/checks.json
   ./conductor submit state/operator/plans/first.json
 
@@ -96,11 +97,15 @@ key into the daemon environment only. Model credentials are not included here.
 
 For a successor, add --depends-on first --input-task first to plan. Accepted output
 is retained under state/operator/artifacts; original project files stay unchanged.
-Ctrl-C stops the foreground runtime. The same run command resumes its saved state.
+Ctrl-C stops the foreground runtime. The same run command reopens its saved state.
+Ambiguous interrupted executions require reconciliation before another attempt.
 Use --state /short/private/path before the command for a separate runtime.
 
-This is a host-local preview, not complete v1 acceptance. Native Codex writing,
-Linux isolation, full endurance and final delivery gates remain incomplete.
+This is a host-local preview, not complete v1 acceptance. Cross-account dispatch,
+unrestricted interruption recovery, Linux isolation and endurance remain incomplete.
+When full_capability is present in accepted-adapters.json, workers run with normal
+shell/network tools under that OS account. Launch this runtime as that same account.
+Its HOME and login are used; coordinator API-key overrides apply only to bounded profiles.
 The launcher uses the packaging Python interpreter directly, independent of PATH.
 Python and adapter executable paths are host-specific; adapter hashes are checked during planning.
 Do not replace this bundle's binaries while its runtime is running.

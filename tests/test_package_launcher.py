@@ -43,3 +43,30 @@ class PackageLauncherTests(unittest.TestCase):
                                             timeout=10, check=True)
                     self.assertEqual(json.loads(result.stdout), expected)
                     self.assertEqual(result.stderr, '')
+
+    def test_package_retains_full_profile_without_copying_credentials(self):
+        import hashlib
+        from package_local import BINARIES, package
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binaries = root / 'bin'
+            binaries.mkdir()
+            for name in BINARIES:
+                executable = binaries / name
+                executable.write_text('#!/bin/sh\nexit 0\n')
+                executable.chmod(0o700)
+            executable = Path(sys.executable).resolve()
+            pin = dict(kind='codex', version='fixture', executable=str(executable),
+                       executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+                       conformance_sha256='a' * 64)
+            profile = dict(account=dict(name='worker', uid=501, gid=20,
+                                        home='/Users/worker'), path='/usr/bin:/bin')
+            template = root / 'plan.json'
+            template.write_text(json.dumps(dict(worker=pin, verifier=pin,
+                model_timeout_ms=1000, full_capability=profile)))
+            destination = root / 'bundle'
+            manifest = package(binaries, template, destination)
+            saved = json.loads((destination / 'accepted-adapters.json').read_text())
+            self.assertEqual(saved['full_capability'], profile)
+            self.assertIn('docs/FULL_CAPABILITY_EXECUTION.md', manifest['files'])
+            self.assertNotIn('ANTHROPIC_API_KEY', json.dumps(saved))
