@@ -4,23 +4,26 @@ For the current requirement-by-requirement delivery gaps, see
 [Delivery acceptance audit](DELIVERY_ACCEPTANCE.md). Later sections retain
 historical evidence and must not be read as current feature inventories.
 
-## Integrated candidate
+## Current baseline and prelaunch foundation
 
-Draft [PR #91](https://github.com/gokselozgur5/agent-conductor/pull/91) on
-`codex/delivery-integration` combines the auxiliary ownership
-and native-observation candidates. It adds scoped auxiliary process observation,
-with 348 Rust and 112 Python tests and a real monitored Claude/check/Codex workflow.
-Both auxiliary roles are observed while live; an actual scoped orphan is detected.
-The first 10-second-grace probe failed and is retained; the separate accepted probe
-uses the existing configurable 60-second observation grace. This candidate is not
-installed into the operator runtime or accepted as the full product.
+PRs #88, #90 and #91 are merged into main at
+`285aa0c4aaa636e789eaf8726270dc1319d138c2`. The exact integration head and
+post-merge main CI passed on macOS and Linux. The delivered operator bundle and
+existing runtimes were not upgraded by this merge; full product acceptance
+remains open.
 
-## Published auxiliary candidate
+Issue #92 tracks the schema-29 broker prelaunch persistence foundation on
+`codex/broker-launch-small`. Seven small implementation commits add immutable
+launch intent, exact registration/ACK identity binding, atomic receipt closure,
+and unresolved-preparation barriers and diagnostics. Store regressions pass;
+production native launch composition and pre-owner receipt recovery remain
+unfinished. This branch does not admit native Codex writers.
 
-Draft [PR #90](https://github.com/gokselozgur5/agent-conductor/pull/90), tracked by
-[issue #89](https://github.com/gokselozgur5/agent-conductor/issues/89), adds the
-auxiliary process ownership candidate through schema 25. It is not merged or
-installed into the existing schema-19 operator runtime.
+## Historical auxiliary candidate evidence
+
+The following evidence describes the schema-25 candidate delivered through PR #90,
+now merged. Issue #89 remains open for its remaining acceptance scope. These
+historical test counts and runtime snapshots are not the current branch inventory.
 
 Checks and independent verifiers now commit invocation ownership before external
 effects, bind native process identity before release, and require private
@@ -35,9 +38,9 @@ fixtures and precise refusal paths.
 The schema-25 candidate passes 345 local workspace Rust tests, 73 Python tests,
 strict Clippy, formatting and build checks. Positive native boot changes
 remain synthetic tests; real same-boot observation and supervisor controls do
-not establish physical reboot acceptance. Hosted CI is currently refused before
-steps by the account payment/spending-limit check. Local tests do not resolve
-that external blocker or provide unrun Linux acceptance.
+not establish physical reboot acceptance. Hosted CI was refused before steps by the account payment/spending-limit check
+at that historical snapshot. Later integration CI passed on both platforms;
+CI does not establish native Linux isolation or physical reboot acceptance.
 
 Controlled native verifier pre-ACK and both terminal-proof/before-result
 publication crash boundaries now pass, with one continuation and no old-result

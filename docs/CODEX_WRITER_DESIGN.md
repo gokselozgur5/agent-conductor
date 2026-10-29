@@ -660,5 +660,27 @@ private stream without serving it, observe Ready, durably acknowledge the exact
 process, then register/serve the journal and persist broker ownership before
 Release. This avoids weakening operation admission or fabricating an initial ACK.
 The current test fixture registers against a synthetic started execution and is
-not evidence that this native ordering has been implemented. Durable prelaunch
-metadata and recovery before parent-observed ownership remain prerequisites.
+not evidence that this native ordering has been implemented. Recovery before
+parent-observed ownership remains a prerequisite.
+
+
+## Prelaunch persistence foundation (schema 29, issue #92)
+
+`prepare_file_broker_launch` commits bounded non-secret launch, approved wrapper,
+receipt directory and native host metadata against a current prepared execution.
+Only a fresh committed intent grants creation; replay never grants another spawn.
+Audit failure rolls back the intent. The caller still owns wrapper approval and
+native identity observation; metadata validation alone proves neither.
+
+Registration requires the exact open preparation. Release additionally requires
+its launch/root/host metadata and the execution's acknowledged process to match.
+Owned receipt closure updates preparation, broker and audit atomically, including
+recovery through the existing shared closure path. An asserted closure or changed
+receipt cannot discharge preparation ownership.
+
+Open preparation participates in task/fencing/backup barriers even before broker
+registration. Startup reconciliation defers unresolved preparations; bounded
+stale-owner diagnostics expose identity and stage without launch metadata.
+Store tests use controlled process identities and generation changes. Actual
+native launcher ordering and ownerless-preparation receipt recovery remain open;
+these primitives do not establish native Codex writer acceptance.
