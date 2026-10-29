@@ -103,6 +103,31 @@ class NativeGuardTests(unittest.TestCase):
             self.monitor()
         self.assertNotIn('PRIVATE', json.dumps(self.report))
 
+class ProtectedTreeEncodingTests(unittest.TestCase):
+    def test_file_content_cannot_impersonate_another_tree_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            left, right = root/'left', root/'right'
+            left.mkdir(); right.mkdir()
+            # The old unframed stream encodes these different trees identically.
+            (left/'a').write_bytes(b'x' + b'\0b\0' + b'420\0y')
+            (right/'a').write_bytes(b'x')
+            (right/'b').write_bytes(b'y')
+            for path in [left/'a', right/'a', right/'b']:
+                path.chmod(0o644)
+            self.assertNotEqual(guard.protected_digest(left,time.monotonic()+5), guard.protected_digest(right,time.monotonic()+5))
+
+    def test_empty_file_and_empty_directory_are_distinct_at_equal_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            left, right = root/'left', root/'right'
+            left.mkdir(); right.mkdir()
+            (left/'entry').write_bytes(b'')
+            (right/'entry').mkdir()
+            (left/'entry').chmod(0o755); (right/'entry').chmod(0o755)
+            self.assertNotEqual(guard.protected_digest(left,time.monotonic()+5), guard.protected_digest(right,time.monotonic()+5))
+
+
 class BoardProjectionTests(unittest.TestCase):
     def test_pages_match_but_missing_duplicate_and_changed_rows_refuse(self):
         with tempfile.TemporaryDirectory() as directory:

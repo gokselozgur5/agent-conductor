@@ -71,7 +71,8 @@ def protected_digest(root, deadline):
     """Bounded regular-file tree observation, including metadata names but not contents."""
     root = Path(root)
     require(root.is_absolute() and root.resolve(strict=True) == root and root.is_dir(), 'protected_root_invalid')
-    digest = hashlib.sha256()
+    digest = hashlib.sha256(b'conductor-protected-tree-v2\0')
+    digest.update(stat.S_IMODE(root.stat().st_mode).to_bytes(4, 'big'))
     entries = 0
     total = 0
     for directory, dirs, files in os.walk(root, followlinks=False):
@@ -84,13 +85,17 @@ def protected_digest(root, deadline):
             path = Path(directory) / name
             before = path.lstat()
             require(stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode), 'surface_special_file')
-            digest.update(os.fsencode(str(path.relative_to(root))) + b'\0')
-            digest.update(str(stat.S_IMODE(before.st_mode)).encode() + b'\0')
+            relative = os.fsencode(str(path.relative_to(root)))
+            digest.update(len(relative).to_bytes(8, 'big'))
+            digest.update(relative)
+            digest.update(b'F' if stat.S_ISREG(before.st_mode) else b'D')
+            digest.update(stat.S_IMODE(before.st_mode).to_bytes(4, 'big'))
             if stat.S_ISREG(before.st_mode):
                 descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 with os.fdopen(descriptor, 'rb') as stream:
                     opened = os.fstat(stream.fileno())
                     require((opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino) and stat.S_ISREG(opened.st_mode), 'surface_changed_during_read')
+                    content = hashlib.sha256()
                     while True:
                         chunk = stream.read(65536)
                         if not chunk:
@@ -98,12 +103,12 @@ def protected_digest(root, deadline):
                         total += len(chunk)
                         require(total <= 64 * 1024**2, 'surface_byte_limit')
                         require(time.monotonic() <= deadline, 'surface_observation_deadline')
-                        digest.update(chunk)
+                        content.update(chunk)
                     after = os.fstat(stream.fileno())
                     require((after.st_size, after.st_mtime_ns, after.st_ctime_ns) == (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns), 'surface_changed_during_read')
+                digest.update(content.digest())
                 current = path.lstat()
                 require((current.st_dev, current.st_ino) == (before.st_dev, before.st_ino), 'surface_changed_during_read')
-            digest.update(b'\0')
     return digest.hexdigest()
 
 

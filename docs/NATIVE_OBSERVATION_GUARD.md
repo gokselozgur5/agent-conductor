@@ -65,3 +65,19 @@ acceptance uses authenticated local HTTP pages during an actual workflow;
 page transport uses a three-second timeout and 4 MiB response bound. This proves
 sampled API/database correspondence, not browser rendering or atomic snapshots
 across arbitrary continuous writers.
+
+## Protected-tree digest framing
+
+Tree digest version 2 domain-separates the format, includes root permission bits,
+and encodes each relative path with its byte length, an explicit file/directory
+type, fixed-width permission bits and a separate fixed-width SHA-256 digest for
+regular-file contents. File bytes cannot impersonate another entry's metadata.
+An empty file and an empty directory remain distinct even with identical modes.
+
+Regression controls reproduce two collisions in the earlier unframed byte
+stream: crafted file content versus an additional file, and empty file versus
+empty directory. Both must differ under version 2. This is a correction to the
+acceptance guard, not the daemon or filesystem fencing. Earlier sampled native
+runs retain their original evidence and digest implementation; do not relabel
+them as version 2 runs. Future runs establish fresh baselines with pinned guard
+source bytes.
