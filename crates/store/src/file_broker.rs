@@ -298,6 +298,8 @@ impl Store {
             _ => return Err(invalid()),
         }
 
+        launch_binding::close_preparation(&mut tx, b, &state, evidence.map(|(_, receipt)| receipt))
+            .await?;
         let (last,pending):(i64,i64)=sqlx::query_as("SELECT COALESCE(MAX(sequence),0),COUNT(*) FILTER(WHERE completed_at_ms IS NULL) FROM file_operations WHERE invocation_id=?").bind(&b.invocation_id).fetch_one(&mut *tx).await?;
         if completed != last || pending != 0 {
             return Err(invalid());

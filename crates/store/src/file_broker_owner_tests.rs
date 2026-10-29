@@ -423,6 +423,12 @@ async fn prelaunch_owner_requires_exact_acknowledged_process_and_open_intent() {
         .unwrap();
     assert!(
         store
+            .close_file_broker(&binding, 0, audit("launch-unowned-close"))
+            .await
+            .is_err()
+    );
+    assert!(
+        store
             .authorize_file_broker_release(&binding, &owner, audit("launch-no-ack"))
             .await
             .is_err()
@@ -471,5 +477,56 @@ async fn prelaunch_owner_requires_exact_acknowledged_process_and_open_intent() {
             .authorize_file_broker_release(&binding, &owner, audit("launch-valid"))
             .await
             .unwrap()
+    );
+    store.inner.writer.lock().await.execute("CREATE TRIGGER reject_launch_close BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.closed' BEGIN SELECT RAISE(FAIL,'fixture'); END").await.unwrap();
+    let before = snapshot(&mut *store.inner.writer.lock().await).await;
+    let receipt = "e".repeat(64);
+    assert!(
+        store
+            .close_owned_file_broker(&binding, &owner, 0, &receipt, audit("launch-close-failed"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        snapshot(&mut *store.inner.writer.lock().await).await,
+        before
+    );
+    store
+        .inner
+        .writer
+        .lock()
+        .await
+        .execute("DROP TRIGGER reject_launch_close")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .close_owned_file_broker(&binding, &owner, 0, &receipt, audit("launch-close"))
+            .await
+            .unwrap()
+    );
+    let saved: (String, String) =
+        sqlx::query_as("SELECT state,shutdown_sha256 FROM file_broker_launches")
+            .fetch_one(&store.inner.readers)
+            .await
+            .unwrap();
+    assert_eq!(saved, ("closed".into(), receipt.clone()));
+    assert!(
+        !store
+            .close_owned_file_broker(&binding, &owner, 0, &receipt, audit("launch-close-replay"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .close_owned_file_broker(
+                &binding,
+                &owner,
+                0,
+                &"f".repeat(64),
+                audit("launch-close-changed")
+            )
+            .await
+            .is_err()
     );
 }

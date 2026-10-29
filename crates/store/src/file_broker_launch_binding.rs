@@ -77,6 +77,33 @@ pub(super) async fn authorize_owner(
     Ok(())
 }
 
+pub(super) async fn close_preparation(
+    db: &mut sqlx::SqliteConnection,
+    binding: &FileBrokerBinding,
+    broker_state: &str,
+    receipt: Option<&str>,
+) -> Result<(), StoreError> {
+    let saved: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT binding_json,state,shutdown_sha256 FROM file_broker_launches WHERE invocation_id=?",
+    )
+    .bind(&binding.invocation_id)
+    .fetch_optional(&mut *db)
+    .await?;
+    if let Some((encoded, state, prior)) = saved {
+        let receipt = receipt.ok_or_else(invalid)?;
+        if encoded != binding.encoded()?
+            || state != broker_state
+            || prior.as_deref().is_some_and(|old| old != receipt)
+            || (state == "closed" && prior.is_none())
+        {
+            return Err(invalid());
+        }
+        sqlx::query("UPDATE file_broker_launches SET state='closed',shutdown_sha256=? WHERE invocation_id=?")
+            .bind(receipt).bind(&binding.invocation_id).execute(db).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::file_broker_tests::{audit, fixture};
