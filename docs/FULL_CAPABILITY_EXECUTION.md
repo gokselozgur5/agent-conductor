@@ -98,3 +98,27 @@ the board reaches completed exactly once with the full causal record.
 Keep the installed preview and existing user processes unchanged until an explicit
 upgrade. Report this scenario's actual outcome and the next concrete blocker;
 commit/test counts and unsupported percentage estimates are not completion proof.
+
+### Persistent receiving-account worker
+
+A receiving account can keep `conductor-runner --account-worker SOCKET COORDINATOR_UID`
+open for sequential account-channel requests. The socket parent must already be
+canonical, owned by that receiving account, non-writable by others, and traversable
+by the selected coordinator account. The command does not create accounts, change
+parent permissions, copy credentials, or switch identities.
+
+Unlike `--account-listen`, this entry does not require a packet digest or receiver
+tag at startup. Kernel peer credentials identify the selected coordinator; its
+bounded handshake supplies the packet digest. The subsequent request must match
+that digest and carry a valid prepared receiver tag. Native account/pin checks,
+durable coordinator ACK and current-lease Release still precede child launch.
+Malformed requests and failed acknowledgements close that connection; the endpoint
+remains available for another task. There is no automatic replay or reconnect.
+SIGINT/SIGTERM stop admission after the current bounded task finishes and remove
+the owned socket entry. Forced termination can leave a stale socket; startup never
+overwrites an existing entry.
+
+This is the receiving entry for daemon integration. Normal workflow selection,
+baseline transfer, account terminal/source import and independent acceptance are
+not yet wired to this entry. A peer terminal event still does not establish local
+child exit or machine-wide write fencing.
