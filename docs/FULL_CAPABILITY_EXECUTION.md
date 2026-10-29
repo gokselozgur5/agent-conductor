@@ -54,8 +54,20 @@ observed process state accurately.
   controller's acknowledgement-persistence hook before Release; a refused or
   expired hook closes the channel without starting a worker. It deliberately
   supplies no child-process identity and cannot attest receiver exit or fencing.
-  Daemon dispatch, cross-account process ownership and workspace capture are
-  still not wired to this entry. It is not yet an operator workflow endpoint.
+  The socket request also names the exact authority/packet/wrapper identity; a
+  receiver with a different pre-recorded tag refuses before Ready.
+- `PersistentControlService` can prepare fresh account execution intent, release
+  it once after a committed account ACK, and renew only the current binding/lease.
+  Schema 31 records an explicit account peer independently of local process data.
+  Transport selection is immutable and recorded before connection; recovery never
+  treats an account workspace's receipt files as a local write fence, including
+  when no peer ACK was recorded.
+  The existing authoritative-runtime refusal of a local ACK without process
+  evidence remains. Account peers cannot be promoted to a local `exited` state,
+  even through a direct SQL update. A terminal channel event therefore does not
+  grant source-capture eligibility. Daemon workflow selection, account terminal
+  evidence and workspace transfer/capture still need integration; this service
+  port is not yet a complete operator workflow endpoint.
 - A successful unrestricted exit can publish a source snapshot for independent
   checks and review. Its execution remains `exited`, not `fenced`. The transactional
   capture-eligibility view admits auxiliary work only for this exact normally
