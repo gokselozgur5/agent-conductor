@@ -16,15 +16,16 @@ jobs:
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    env:
-      # macOS system temp paths can exceed the Unix-domain socket path limit.
-      TMPDIR: ${{ runner.temp }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14]
 
     steps:
+      - name: Select short temporary paths for Unix sockets
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
       - name: Check out source
         uses: actions/checkout@v4
 
