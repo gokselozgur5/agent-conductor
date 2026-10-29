@@ -112,6 +112,7 @@ async fn frozen_launch_checks_vendor_identity_and_retains_packet() {
     assert_account_socket_entry(&pin, &packet, "expired").await;
     assert_account_socket_entry(&pin, &packet, "wrong-pin").await;
     assert_account_socket_entry(&pin, &packet, "wrong-receiver").await;
+    assert_persistent_account_worker(&pin, &packet).await;
     pin.version = "changed".into();
     assert!(conductor_runtime::full_capability_launch(&pin, &packet).is_err());
 }
@@ -360,4 +361,141 @@ async fn assert_full_group_stop_receipt(mut launch: conductor_runtime::RunnerLau
     forged["observation"] = "restricted_stop".into();
     fs::write(path, serde_json::to_vec(&forged).unwrap()).unwrap();
     assert!(conductor_runtime::read_terminal_receipt(&launch.packet).is_err());
+}
+
+async fn assert_persistent_account_worker(
+    pin: &VendorPin,
+    packet: &conductor_runtime::ResumePacket,
+) {
+    use conductor_runtime::{
+        AccountChannelAddress, AccountNativeLaunch, AccountRunnerConnection, RunnerConnectionError,
+        RunnerEvent, RunnerProcessIdentity,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("worker.sock");
+    let uid = nix::unistd::geteuid().as_raw();
+    let mut worker = tokio::process::Command::new(env!("CARGO_BIN_EXE_conductor-runner"))
+        .args(["--account-worker", path.to_str().unwrap(), &uid.to_string()])
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !path.exists() {
+        assert!(worker.try_wait().unwrap().is_none());
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_worker_digest_binding(&path, pin, packet).await;
+    for decision in ["wrong-pin", "refused", "first", "second"] {
+        let mut request = AccountNativeLaunch {
+            pin: pin.clone(),
+            packet: packet.clone(),
+        };
+        request.packet.contract.attempt_id = format!("persistent-{decision}");
+        if decision == "wrong-pin" {
+            request.pin.executable_sha256 = "a".repeat(64);
+        }
+        let identity = RunnerProcessIdentity {
+            authority_id: "a".repeat(64),
+            packet_sha256: request.packet.sha256().unwrap(),
+            wrapper_identity: uuid::Uuid::now_v7().to_string(),
+        };
+        let address = AccountChannelAddress {
+            path: path.clone(),
+            worker_uid: uid,
+            coordinator_uid: uid,
+            packet_sha256: identity.packet_sha256.clone(),
+        };
+        let ack = std::sync::atomic::AtomicBool::new(false);
+        let result = AccountRunnerConnection::connect(&address, &request, &identity, |_| {
+            ack.store(true, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if decision == "refused" {
+                    Err(RunnerConnectionError::Persistence)
+                } else {
+                    Ok(conductor_runtime::continuous_millis().unwrap() + 1000)
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            ack.load(std::sync::atomic::Ordering::SeqCst),
+            decision != "wrong-pin"
+        );
+        if matches!(decision, "wrong-pin" | "refused") {
+            assert!(result.is_err());
+        } else {
+            let mut connection = result.unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(3), connection.event())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                event,
+                RunnerEvent::Finished {
+                    exit_code: Some(0),
+                    ..
+                }
+            ));
+        }
+        assert!(worker.try_wait().unwrap().is_none());
+        assert!(path.exists());
+    }
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(worker.id().unwrap()).unwrap()),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), worker.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(!path.exists());
+}
+
+async fn assert_worker_digest_binding(
+    path: &std::path::Path,
+    pin: &VendorPin,
+    packet: &conductor_runtime::ResumePacket,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let uid = nix::unistd::geteuid().as_raw();
+    let address = conductor_runtime::AccountChannelAddress {
+        path: path.into(),
+        worker_uid: uid,
+        coordinator_uid: uid,
+        packet_sha256: "0".repeat(64),
+    };
+    let mut stream = conductor_runtime::connect_account_channel(&address, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let request = conductor_runtime::AccountRunnerRequest {
+        launch: conductor_runtime::AccountNativeLaunch {
+            pin: pin.clone(),
+            packet: packet.clone(),
+        },
+        identity: conductor_runtime::RunnerProcessIdentity {
+            authority_id: "a".repeat(64),
+            packet_sha256: packet.sha256().unwrap(),
+            wrapper_identity: uuid::Uuid::now_v7().to_string(),
+        },
+    };
+    let mut frame = serde_json::to_vec(&request).unwrap();
+    frame.push(b'\n');
+    stream.write_all(&frame).await.unwrap();
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
 }
