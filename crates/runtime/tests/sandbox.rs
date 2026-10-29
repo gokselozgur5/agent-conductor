@@ -140,7 +140,7 @@ async fn sandbox_allows_workspace_and_denies_external_read_write_and_symlink_esc
     fs::create_dir(&workspace).expect("workspace");
     fs::write(root.join("private"), b"fixture sentinel").expect("outside");
     symlink(root.join("private"), workspace.join("escape")).expect("symlink");
-    let script = "printf inside > allowed; test -f allowed || exit 10; if /bin/cat ../private >/dev/null 2>&1; then exit 11; fi; if (printf outside > ../forbidden) 2>/dev/null; then exit 12; fi; if /bin/cat escape >/dev/null 2>&1; then exit 13; fi; /bin/sh -c 'if (printf child > ../child-forbidden) 2>/dev/null; then exit 14; fi'; printf boundary-ok";
+    let script = "printf inside > allowed; test -f allowed || exit 10; if /bin/cat ../private >/dev/null 2>&1; then exit 11; fi; if (printf outside > ../forbidden) 2>/dev/null; then exit 12; fi; if /bin/cat escape >/dev/null 2>&1; then exit 13; fi; /bin/sh -c 'if (printf child > ../child-forbidden) 2>/dev/null; then exit 14; fi' || exit 14; printf boundary-ok";
     let spec = sandboxed_command(
         &workspace,
         std::path::Path::new("/bin/sh"),
