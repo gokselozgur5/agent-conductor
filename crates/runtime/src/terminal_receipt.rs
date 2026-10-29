@@ -1,4 +1,5 @@
-//! Private trusted-wrapper observations, outside the native writer's allowed root.
+//! Private wrapper observations. Full-profile group settlement is not an OS
+//! fence against arbitrary detached descendants or other account processes.
 use crate::{
     ProcessOutput, ResumePacket, RunnerEvent, accepts_file_writer_exit, accepts_file_writer_stop,
     interpret_vendor_output,
@@ -25,12 +26,13 @@ pub(crate) fn path(packet: &ResumePacket) -> Result<PathBuf, std::io::Error> {
     packet.validate().map_err(|_| invalid())?;
     let root = packet.contract.workspace.canonicalize()?;
     if root != packet.contract.workspace
-        || packet
-            .contract
-            .authority
-            .write_roots
-            .iter()
-            .any(|p| p != &root)
+        || (packet.contract.full_capability.is_none()
+            && packet
+                .contract
+                .authority
+                .write_roots
+                .iter()
+                .any(|p| p != &root))
     {
         return Err(invalid());
     }
@@ -43,12 +45,19 @@ pub(crate) fn path(packet: &ResumePacket) -> Result<PathBuf, std::io::Error> {
 fn invalid() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid terminal receipt")
 }
-/// Publishes only accepted restricted-writer observations, without raw output.
+/// Publishes wrapper observations without raw output. Full-profile observations
+/// describe only the supervised process group; they never grant a write fence.
 /// Files are created privately and never replace prior receipt bytes.
 /// # Errors
 /// Returns path, permission, publication or durability errors.
 pub fn write_terminal_receipt(packet: &ResumePacket, event: &RunnerEvent) -> std::io::Result<()> {
     let (observation, stdout) = match event {
+        RunnerEvent::Stopped { stdout, .. } if packet.contract.full_capability.is_some() => {
+            ("full_group_stop", stdout)
+        }
+        RunnerEvent::Finished { stdout, .. } if packet.contract.full_capability.is_some() => {
+            ("full_group_exit", stdout)
+        }
         RunnerEvent::Stopped { stdout, .. } if accepts_file_writer_stop(packet, stdout) => {
             ("restricted_stop", stdout)
         }
@@ -120,14 +129,19 @@ pub fn read_terminal_receipt(packet: &ResumePacket) -> std::io::Result<TerminalR
     if receipt.version != 1
         || receipt.packet_sha256 != packet.sha256().map_err(|_| invalid())?
         || receipt.attempt_id != packet.contract.attempt_id
-        || !matches!(
-            receipt.observation.as_str(),
-            "restricted_stop" | "restricted_exit"
-        )
+        || !valid_observation(packet, &receipt.observation)
         || receipt.output_sha256.len() != 64
         || !receipt.output_sha256.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err(invalid());
     }
     Ok(receipt)
+}
+
+fn valid_observation(packet: &ResumePacket, observation: &str) -> bool {
+    if packet.contract.full_capability.is_some() {
+        matches!(observation, "full_group_stop" | "full_group_exit")
+    } else {
+        matches!(observation, "restricted_stop" | "restricted_exit")
+    }
 }
