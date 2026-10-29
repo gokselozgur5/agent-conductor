@@ -67,7 +67,7 @@ def package(bin_dir, accepted_plan, destination):
     for path in REPO.joinpath('tools').iterdir():
         if path.is_file() and (path.suffix == '.py' or path.name == 'conductor'):
             shutil.copy2(path, destination / 'tools' / path.name)
-    for name in ('LOCAL_OPERATOR.md', 'DELIVERY_ACCEPTANCE.md', 'OPERATOR_RECOVERY.md', 'FULL_CAPABILITY_EXECUTION.md', 'LINUX_CHECKS.md'):
+    for name in ('LOCAL_OPERATOR.md', 'DELIVERY_ACCEPTANCE.md', 'OPERATOR_RECOVERY.md', 'FULL_CAPABILITY_EXECUTION.md', 'LINUX_CHECKS.md', 'GIT_SOURCE_IDENTITY.md'):
         shutil.copy2(REPO / 'docs' / name, destination / 'docs' / name)
     (destination / 'accepted-adapters.json').write_text(json.dumps(pins, indent=2) + '\n')
     (destination / 'accepted-adapters.json').chmod(0o600)
