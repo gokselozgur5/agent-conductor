@@ -25,6 +25,7 @@ fn input() -> ExecutionPreparation {
         serde_json::json!({"contract":{"task_id":"task","attempt_id":"attempt","lease_epoch":7}})
             .to_string();
     ExecutionPreparation {
+        expected_wrapper_identity: None,
         effect_token: "token".into(),
         task_id: "task".into(),
         attempt_id: "attempt".into(),
@@ -637,4 +638,131 @@ async fn bound_execution_refuses_missing_or_malformed_native_birth() {
     assert_eq!(audit_count(&store).await, 1);
     let legacy = serde_json::to_string(&acknowledgement()).unwrap();
     assert!(!legacy.contains("process"));
+}
+
+#[tokio::test]
+async fn expected_wrapper_is_durable_intent_and_rejects_a_different_ack() {
+    let (directory, store) = seed().await;
+    let mut preparation = input();
+    let identity = uuid::Uuid::now_v7().to_string();
+    preparation.expected_wrapper_identity = Some(identity.clone());
+    let (record, fresh) = store
+        .prepare_execution_once(&preparation, audit("prepare"))
+        .await
+        .unwrap();
+    assert!(fresh);
+    assert_eq!(record.state, ExecutionState::Prepared);
+    assert!(record.wrapper_identity.is_none());
+    assert!(record.process.is_none());
+    assert!(store.has_unfenced_execution("task").await.unwrap());
+    let (_, fresh) = store
+        .prepare_execution_once(&preparation, audit("retry"))
+        .await
+        .unwrap();
+    assert!(
+        !fresh,
+        "durable intent replay must not authorize another spawn"
+    );
+    let mut changed = preparation.clone();
+    changed.expected_wrapper_identity = Some(uuid::Uuid::now_v7().to_string());
+    assert!(matches!(
+        store.prepare_execution(&changed, audit("collision")).await,
+        Err(StoreError::IdempotencyCollision)
+    ));
+    assert!(
+        store
+            .update_execution("token", 0, "wrong", &acknowledgement(), audit("wrong"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.execution("token").await.unwrap(),
+        Some(record.clone())
+    );
+    assert_eq!(audit_count(&store).await, 1);
+    drop(store);
+    let store = Store::open(directory.path().join("control.sqlite3"))
+        .await
+        .unwrap();
+    assert_eq!(store.execution("token").await.unwrap(), Some(record));
+    let update = ExecutionUpdate::Acknowledge {
+        wrapper_identity: identity.clone(),
+        packet_sha256: preparation.packet_sha256,
+        process: None,
+    };
+    let acknowledged = store
+        .update_execution("token", 0, "ack", &update, audit("ack"))
+        .await
+        .unwrap();
+    assert_eq!(acknowledged.wrapper_identity, Some(identity));
+    assert_eq!(
+        store
+            .update_execution("token", 0, "ack", &update, audit("replay"))
+            .await
+            .unwrap(),
+        acknowledged
+    );
+    assert_eq!(audit_count(&store).await, 2);
+}
+
+#[tokio::test]
+async fn invalid_expected_identity_and_failed_audit_never_commit_intent() {
+    let (directory, store) = seed().await;
+    for identity in [
+        "",
+        "wrapper",
+        "00000000-0000-0000-0000-000000000000",
+        "019ABC00-0000-7000-8000-000000000001",
+    ] {
+        let mut preparation = input();
+        preparation.expected_wrapper_identity = Some(identity.into());
+        assert!(
+            store
+                .prepare_execution(&preparation, audit("invalid"))
+                .await
+                .is_err()
+        );
+    }
+    assert!(store.execution("token").await.unwrap().is_none());
+    assert_eq!(audit_count(&store).await, 0);
+    let mut db = SqliteConnection::connect(&format!(
+        "sqlite://{}",
+        directory.path().join("control.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    db.execute("CREATE TRIGGER reject_preparation_audit BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT, 'injected audit refusal'); END;").await.unwrap();
+    let mut preparation = input();
+    preparation.expected_wrapper_identity = Some(uuid::Uuid::now_v7().to_string());
+    assert!(
+        store
+            .prepare_execution(&preparation, audit("failed"))
+            .await
+            .is_err()
+    );
+    assert!(store.execution("token").await.unwrap().is_none());
+    db.execute("DROP TRIGGER reject_preparation_audit")
+        .await
+        .unwrap();
+    let (_, fresh) = store
+        .prepare_execution_once(&preparation, audit("accepted"))
+        .await
+        .unwrap();
+    assert!(fresh);
+    db.execute("UPDATE executions SET expected_wrapper_identity='malformed'")
+        .await
+        .unwrap();
+    assert!(
+        store.execution("token").await.is_err(),
+        "corrupt stored binding must fail closed"
+    );
+}
+
+#[test]
+fn legacy_preparation_serialization_does_not_invent_an_expected_wrapper() {
+    let original = input();
+    let json = serde_json::to_value(&original).unwrap();
+    assert!(json.get("expected_wrapper_identity").is_none());
+    let decoded: ExecutionPreparation = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded, original);
 }

@@ -66,7 +66,9 @@ impl<C: Clock> PersistentControlService<C> {
         self.validate_runtime_owner(&launch.packet).await?;
         let packet_json =
             serde_json::to_string(&launch.packet).map_err(|_| runtime_error("packet encoding"))?;
+        let wrapper_identity = Uuid::now_v7().to_string();
         let input = ExecutionPreparation {
+            expected_wrapper_identity: Some(wrapper_identity.clone()),
             effect_token: effect_token.into(),
             task_id: launch.packet.contract.task_id.clone(),
             attempt_id: launch.packet.contract.attempt_id.clone(),
@@ -109,7 +111,6 @@ impl<C: Clock> PersistentControlService<C> {
                 .await?;
             self.validate_runtime_owner(&launch.packet).await?;
         }
-        let wrapper_identity = Uuid::now_v7().to_string();
         let identity = self.process_tag(&record, &wrapper_identity).await?;
         let mut acknowledged = None;
         let acknowledgement_slot = &mut acknowledged;
@@ -484,9 +485,6 @@ impl<C: Clock> PersistentControlService<C> {
     pub(super) async fn recover_fenced_receipts(&self) -> Result<(), StoreError> {
         let _guard = self.mutations.lock().await;
         for record in self.store.blocked_executions().await? {
-            if record.wrapper_identity.is_none() {
-                continue;
-            }
             let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
                 .map_err(|_| runtime_error("stored packet invalid"))?;
             if packet.contract.adapter.kind != AdapterKind::Claude
@@ -498,7 +496,7 @@ impl<C: Clock> PersistentControlService<C> {
             {
                 continue;
             }
-            let Ok(receipt) = conductor_runtime::read_terminal_receipt(&packet) else {
+            let Some(receipt) = self.recovery_receipt(&record, &packet).await? else {
                 continue;
             };
             let id = Uuid::now_v7().to_string();
@@ -507,10 +505,7 @@ impl<C: Clock> PersistentControlService<C> {
                     &record.preparation.effect_token,
                     record.revision,
                     &format!("receipt:{}", record.preparation.packet_sha256),
-                    &ExecutionUpdate::Fenced {
-                        reason: serde_json::to_string(&receipt)
-                            .map_err(|_| runtime_error("receipt encoding failed"))?,
-                    },
+                    &ExecutionUpdate::Fenced { reason: receipt },
                     EffectAudit {
                         id: &id,
                         actor_id: "conductor-runtime",
@@ -521,6 +516,41 @@ impl<C: Clock> PersistentControlService<C> {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn recovery_receipt(
+        &self,
+        record: &ExecutionRecord,
+        packet: &ResumePacket,
+    ) -> Result<Option<String>, StoreError> {
+        if let Some(expected) = record.preparation.expected_wrapper_identity.as_deref() {
+            if record
+                .wrapper_identity
+                .as_deref()
+                .is_some_and(|actual| actual != expected)
+            {
+                return Ok(None);
+            }
+            if let Some(identity) = self.process_tag(record, expected).await?
+                && let Ok(receipt) = conductor_runtime::read_unstarted_receipt(packet, &identity)
+            {
+                return serde_json::to_string(&receipt)
+                    .map(Some)
+                    .map_err(|_| runtime_error("receipt encoding failed"));
+            }
+        }
+        // Old terminal observations still require a durably acknowledged wrapper.
+        // An unknown expected identity cannot acquire pre-ACK recovery authority.
+        if record.wrapper_identity.is_none() {
+            return Ok(None);
+        }
+        conductor_runtime::read_terminal_receipt(packet)
+            .ok()
+            .map(|receipt| {
+                serde_json::to_string(&receipt)
+                    .map_err(|_| runtime_error("receipt encoding failed"))
+            })
+            .transpose()
     }
 
     pub(super) async fn validate_runtime_owner(

@@ -146,3 +146,69 @@ passed. A separate fresh-authority fixture imported completed synthetic rows fro
 schema 17: migration preserved task aggregates and unknown legacy process fields,
 the old binary refused schema 18, and the new binary reopened. This is migration
 compatibility evidence, not cross-path recovery or proof of orphan fencing.
+
+## Expected identity before spawn (migration 19)
+
+New service launches generate the wrapper UUID before preparing the execution and
+persist it as `expected_wrapper_identity` in the preparation transaction. The same
+UUID is passed to the wrapper and later required by ACK. A different UUID refuses
+without changing the execution, audit or replay receipt. A preparation replay
+never grants another spawn; a changed expected UUID is an idempotency collision.
+The expected identity survives a failed spawn and database reopen.
+
+This is intent, not an observed process. `wrapper_identity` and `process_json`
+remain absent until ACK. Legacy preparations keep NULL and retain their original
+serialized form; no identifier is inferred or backfilled. Malformed non-NULL
+identifiers refuse at preparation and record decoding. An audit failure rolls
+back the preparation and identity together. The new migration requires matching
+backup tools and binaries; do not use these tools against the running schema-18
+service until the normal verified upgrade procedure is complete.
+
+## Trusted proof that no worker started
+
+A matching tagged wrapper that abandons its Ready/release handshake writes a
+private `unstarted-<packet-sha256>.json` beside the attempt tree, then returns.
+The publication branch is before the worker task and cannot fall through to
+spawn. It covers Ready output failure, lost/invalid release, changed instructions
+at release and an already expired grant. Because a grant may arrive before a
+later pre-spawn check fails, the observation is precisely `worker_not_started`,
+not a claim that a release frame was never received. Earlier malformed launch or
+identity failures, and wrappers killed before publication, remain unknown.
+
+The versioned strict receipt binds the authority namespace, packet digest,
+expected wrapper UUID and attempt. Publication uses a private create-new pending
+file, file fsync, no-replace hard link, pending removal and parent fsync. Readers
+reject missing/partial evidence, symlinks, multiple links, wrong ownership or
+permissions, oversized files, extra fields and mismatched identities. A crash
+leaving both pending and final hard links is conservatively unreadable. The tag
+is not a secret or signature; the trust boundary is the trusted wrapper and the
+receipt directory outside the restricted writer's allowed root. This does not
+protect against a malicious same-user process with access to private state.
+
+Recovery accepts this proof only against the durable expected UUID and current
+authority, for the existing restricted Claude writer capability. Any recorded ACK
+must agree with the expected UUID. Legacy unknown expected identities cannot use
+this path. Accepted proof fences the execution through the existing revision,
+audit and replay transaction without inventing an ACK or process birth binding.
+The existing explicit continuation and finite automatic recovery policy then
+apply; cancelled/paused/operator-blocked work remains protected. Existing
+restricted stop/exit receipts still require an acknowledged wrapper.
+
+This does not fence escaped descendants of a worker that started, or prove
+recovery when the wrapper died without publishing evidence. PID absence,
+prepared state and expected identity alone never authorize a fence or retry.
+Local acceptance does not install the candidate in an existing operator runtime.
+
+Native candidate acceptance holds actual Ready before ACK, and separately holds
+Release after durable ACK, through a private instrumented relay. After controller
+loss the live orphan stays blocked. Closing its control input lets the actual
+wrapper publish no-spawn proof; exactly one automatic continuation then completes
+with a real Claude writer, declared checks and independent Codex review. Recovery
+including final restart takes 37.63 and 29.20 seconds respectively. Prior work and
+ACK/birth metadata (or their absence) are preserved, a new attempt and identity
+are recorded, and completed restart does not duplicate work. These timings are
+fixture observations, not performance guarantees. Both model workflows incurred
+unmeasured provider usage. A fresh-authority migration fixture imports completed
+schema-18 application rows, preserves their task/ACK/birth records, retains NULL
+expected identities, rejects the old binary and reopens with the new binary.
+This is migration evidence, not cross-path product restoration.

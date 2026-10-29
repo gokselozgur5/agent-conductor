@@ -21,6 +21,7 @@ async fn checkpoint_seed_execution(
     let prepared = store
         .prepare_execution(
             &ExecutionPreparation {
+                expected_wrapper_identity: None,
                 effect_token: token.into(),
                 task_id: packet.contract.task_id.clone(),
                 attempt_id: packet.contract.attempt_id.clone(),

@@ -102,22 +102,17 @@ async fn serve() -> Result<(), ()> {
             .map(|pin| pin.sha256.clone())
             .collect(),
     };
-    emit(&RunnerEvent::Ready { acknowledgement }).await?;
-    let release = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut input, 1024))
-        .await
-        .map_err(|_| ())??;
-    let mut lease_deadline = match serde_json::from_slice::<RunnerControl>(&release) {
-        Ok(RunnerControl::Release {
-            packet_sha256,
-            continuous_deadline_ms,
-        }) if packet_sha256 == packet_hash => continuous_deadline_ms,
-        _ => return Err(()),
-    };
-    conductor_runtime::read_pinned_instructions(&launch.packet).map_err(|_| ())?;
-    let started = continuous_millis().map_err(|_| ())?;
-    if started >= lease_deadline {
+    let Ok((started, mut lease_deadline)) =
+        prepare_release(&launch, &mut input, acknowledgement, &packet_hash).await
+    else {
+        // This return is before any worker task/spawn. Publication failure
+        // stays unknown; publication success must never reach the spawn path.
+        if let Some(identity) = identity.as_ref() {
+            conductor_runtime::write_unstarted_receipt(&receipt_packet, identity)
+                .map_err(|_| ())?;
+        }
         return Err(());
-    }
+    };
     let mut last_renewal = started;
     let max_runtime_ms = launch.packet.contract.max_runtime_ms;
     let specification = ProcessSpec {
@@ -220,4 +215,29 @@ async fn serve() -> Result<(), ()> {
         },
     )
     .await
+}
+
+async fn prepare_release(
+    launch: &RunnerLaunch,
+    input: &mut (impl AsyncBufRead + Unpin),
+    acknowledgement: PacketAcknowledgement,
+    packet_hash: &str,
+) -> Result<(u64, u64), ()> {
+    emit(&RunnerEvent::Ready { acknowledgement }).await?;
+    let release = tokio::time::timeout(Duration::from_secs(5), read_frame(input, 1024))
+        .await
+        .map_err(|_| ())??;
+    let lease_deadline = match serde_json::from_slice::<RunnerControl>(&release) {
+        Ok(RunnerControl::Release {
+            packet_sha256,
+            continuous_deadline_ms,
+        }) if packet_sha256 == packet_hash => continuous_deadline_ms,
+        _ => return Err(()),
+    };
+    conductor_runtime::read_pinned_instructions(&launch.packet).map_err(|_| ())?;
+    let started = continuous_millis().map_err(|_| ())?;
+    if started >= lease_deadline {
+        return Err(());
+    }
+    Ok((started, lease_deadline))
 }
