@@ -3369,6 +3369,143 @@ mod effect_tests {
         }
     }
 
+    fn assert_unstarted_binding(
+        record: &agent_conductor_store::ExecutionRecord,
+        preparation: &agent_conductor_store::ExecutionPreparation,
+    ) {
+        assert!(record.wrapper_identity.is_none());
+        assert!(record.process.is_none());
+        assert_eq!(&record.preparation, preparation);
+    }
+
+    async fn refuse_unstarted_fence_audit(
+        service: &PersistentControlService<FixedClock>,
+        store: &Store,
+        db: &mut sqlx::SqliteConnection,
+        token: &str,
+    ) {
+        sqlx::query("CREATE TRIGGER reject_unstarted_fence BEFORE INSERT ON audit_events WHEN NEW.kind='execution.fenced' BEGIN SELECT RAISE(ABORT, 'injected fence audit refusal'); END")
+            .execute(&mut *db).await.unwrap();
+        assert!(service.recover_runtime_observations().await.is_err());
+        let blocked = store.execution(token).await.unwrap().unwrap();
+        assert_eq!(
+            blocked.state,
+            agent_conductor_store::ExecutionState::Blocked
+        );
+        assert!(blocked.wrapper_identity.is_none());
+        assert!(store.has_unfenced_execution("task").await.unwrap());
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE kind='execution.fenced'")
+                .fetch_one(store.readers())
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("DROP TRIGGER reject_unstarted_fence")
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unstarted_recovery_requires_durable_identity_and_preserves_unknown_ack() {
+        use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionState};
+        use conductor_runtime::{AdapterKind, RunnerProcessIdentity, write_unstarted_receipt};
+        use sqlx::Connection;
+        for mode in [
+            "valid",
+            "legacy",
+            "wrong_wrapper",
+            "wrong_authority",
+            "commands",
+        ] {
+            let (directory, store) = lifecycle_store().await;
+            let service =
+                PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                    .await
+                    .unwrap();
+            let (_, token) = claim_task(&service).await;
+            let audit = |id| EffectAudit {
+                id,
+                actor_id: "runtime",
+                correlation_id: "fixture",
+                now_ms: 100,
+            };
+            store
+                .claim_effect(&token, "runner", 10000, audit("claim"))
+                .await
+                .unwrap();
+            let tree = directory.path().join("tree");
+            std::fs::create_dir(&tree).unwrap();
+            let mut launch = runtime_launch(&tree.canonicalize().unwrap());
+            launch.packet.contract.adapter.kind = AdapterKind::Claude;
+            launch.packet.contract.authority.allow_workspace_commands = mode == "commands";
+            let expected = Uuid::now_v7().to_string();
+            let preparation = ExecutionPreparation {
+                expected_wrapper_identity: if mode == "legacy" {
+                    None
+                } else {
+                    Some(expected.clone())
+                },
+                effect_token: token.clone(),
+                task_id: "task".into(),
+                attempt_id: "attempt".into(),
+                lease_epoch: 1,
+                runner_id: "runner".into(),
+                packet_json: serde_json::to_string(&launch.packet).unwrap(),
+                packet_sha256: launch.packet.sha256().unwrap(),
+            };
+            store
+                .prepare_execution(&preparation, audit("prepare"))
+                .await
+                .unwrap();
+            let mut db = sqlx::SqliteConnection::connect(&format!(
+                "sqlite://{}",
+                directory.path().join("state.sqlite3").display()
+            ))
+            .await
+            .unwrap();
+            sqlx::query("UPDATE recovery_authority SET authority_id=?")
+                .bind("a".repeat(64))
+                .execute(&mut db)
+                .await
+                .unwrap();
+            let identity = RunnerProcessIdentity {
+                authority_id: if mode == "wrong_authority" {
+                    "b".repeat(64)
+                } else {
+                    "a".repeat(64)
+                },
+                packet_sha256: preparation.packet_sha256.clone(),
+                wrapper_identity: if mode == "wrong_wrapper" {
+                    Uuid::now_v7().to_string()
+                } else {
+                    expected
+                },
+            };
+            write_unstarted_receipt(&launch.packet, &identity).unwrap();
+            if mode == "valid" {
+                refuse_unstarted_fence_audit(&service, &store, &mut db, &token).await;
+            }
+            service.recover_runtime_observations().await.unwrap();
+            let record = store.execution(&token).await.unwrap().unwrap();
+            assert_eq!(
+                record.state,
+                if mode == "valid" {
+                    ExecutionState::Fenced
+                } else {
+                    ExecutionState::Blocked
+                }
+            );
+            assert_unstarted_binding(&record, &preparation);
+            assert_eq!(
+                store.has_unfenced_execution("task").await.unwrap(),
+                mode != "valid"
+            );
+            service.recover_runtime_observations().await.unwrap();
+            assert_eq!(store.execution(&token).await.unwrap().unwrap(), record);
+        }
+    }
+
     #[tokio::test]
     async fn restart_blocks_unobserved_runtime_intent_without_spawning_or_losing_packet() {
         use agent_conductor_store::{EffectAudit, ExecutionPreparation, ExecutionState};

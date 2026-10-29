@@ -3,9 +3,13 @@
 ## Current result
 
 Candidate migration 19 persists the expected wrapper UUID before spawn and checks
-ACK against that intent. Legacy rows stay unknown. Never-released receipt recovery
-is still pending; expected identity alone grants no fence or retry. This candidate
-is not installed in the existing schema-18 operator runtime.
+ACK against that intent. A private trusted wrapper receipt can now prove that no
+worker started and fence the exact prepared attempt without inventing an ACK.
+Legacy/unknown evidence stays blocked; normal finite continuation gates apply.
+Native pre-ACK and post-ACK/pre-worker-release crash recovery completes with
+real writer/check/independent-verifier acceptance and exactly one continuation.
+The schema-18-to-19 fixture preserves legacy task/ACK/birth records and unknown
+expected identities. Remote CI and operator installation are still pending.
 
 Migration 18 binds parent-observed native PID/start/host/boot metadata to durable
 wrapper acknowledgement, before release. Missing or malformed metadata refuses

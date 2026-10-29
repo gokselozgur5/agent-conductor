@@ -21,7 +21,7 @@ pub struct TerminalReceipt {
     pub observation: String,
     pub output_sha256: String,
 }
-fn path(packet: &ResumePacket) -> Result<PathBuf, std::io::Error> {
+pub(crate) fn path(packet: &ResumePacket) -> Result<PathBuf, std::io::Error> {
     packet.validate().map_err(|_| invalid())?;
     let root = packet.contract.workspace.canonicalize()?;
     if root != packet.contract.workspace

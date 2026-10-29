@@ -785,3 +785,157 @@ async fn child_exit_after_acknowledgement_refuses_release() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!directory.path().join("changed").exists());
 }
+
+fn unstarted_identity(input: &RunnerLaunch) -> conductor_runtime::RunnerProcessIdentity {
+    conductor_runtime::RunnerProcessIdentity {
+        authority_id: "a".repeat(64),
+        packet_sha256: input.packet.sha256().unwrap(),
+        wrapper_identity: "12345678-1234-1234-1234-123456789abc".into(),
+    }
+}
+
+#[tokio::test]
+async fn trusted_wrapper_proves_no_spawn_on_lost_invalid_or_expired_release() {
+    use conductor_runtime::read_unstarted_receipt;
+    for mode in ["lost", "wrong", "expired", "released"] {
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        let input = launch(
+            &tree.canonicalize().unwrap(),
+            "printf changed > changed",
+            1000,
+        );
+        let identity = unstarted_identity(&input);
+        let (mut child, mut writer, mut reader) =
+            tagged_wrapper(&input, &[identity.argument().unwrap()]).await;
+        assert!(matches!(
+            event(&mut reader).await,
+            RunnerEvent::Ready { .. }
+        ));
+        assert!(read_unstarted_receipt(&input.packet, &identity).is_err());
+        if mode == "lost" {
+            drop(writer);
+        } else {
+            send(
+                &mut writer,
+                &RunnerControl::Release {
+                    packet_sha256: if mode == "wrong" {
+                        "0".repeat(64)
+                    } else {
+                        identity.packet_sha256.clone()
+                    },
+                    continuous_deadline_ms: if mode == "expired" {
+                        0
+                    } else {
+                        conductor_runtime::continuous_millis().unwrap() + 5000
+                    },
+                },
+            )
+            .await;
+            if mode == "released" {
+                assert!(matches!(
+                    event(&mut reader).await,
+                    RunnerEvent::Finished { .. }
+                ));
+            }
+        }
+        let status = exited(&mut child).await;
+        if mode == "released" {
+            assert!(status.success());
+            assert!(tree.join("changed").exists());
+            assert!(read_unstarted_receipt(&input.packet, &identity).is_err());
+        } else {
+            assert!(!status.success());
+            assert!(!tree.join("changed").exists());
+            read_unstarted_receipt(&input.packet, &identity).expect("trusted no-spawn proof");
+        }
+    }
+}
+
+#[test]
+fn unstarted_receipts_refuse_forged_partial_linked_and_replaced_evidence() {
+    use conductor_runtime::{read_unstarted_receipt, write_unstarted_receipt};
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let tree = root.path().join("tree");
+    fs::create_dir(&tree).unwrap();
+    let input = launch(&tree.canonicalize().unwrap(), "exit 0", 1000);
+    let identity = unstarted_identity(&input);
+    let path = root
+        .path()
+        .join(format!("unstarted-{}.json", input.packet.sha256().unwrap()));
+    let pending = path.with_extension("pending");
+    fs::write(&pending, b"{").unwrap();
+    assert!(read_unstarted_receipt(&input.packet, &identity).is_err());
+    assert!(write_unstarted_receipt(&input.packet, &identity).is_err());
+    fs::remove_file(&pending).unwrap();
+    write_unstarted_receipt(&input.packet, &identity).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    read_unstarted_receipt(&input.packet, &identity).unwrap();
+    assert!(write_unstarted_receipt(&input.packet, &identity).is_err());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let mut wrong = identity.clone();
+    wrong.authority_id = "b".repeat(64);
+    assert!(read_unstarted_receipt(&input.packet, &wrong).is_err());
+    wrong = identity.clone();
+    wrong.wrapper_identity = "22345678-1234-1234-1234-123456789abc".into();
+    assert!(read_unstarted_receipt(&input.packet, &wrong).is_err());
+    wrong = identity.clone();
+    wrong.packet_sha256 = "b".repeat(64);
+    assert!(read_unstarted_receipt(&input.packet, &wrong).is_err());
+    let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    for (field, value) in [
+        ("version", serde_json::json!(2)),
+        ("attempt_id", serde_json::json!("stale")),
+        ("observation", serde_json::json!("finished")),
+        ("extra", serde_json::json!(true)),
+    ] {
+        let mut bad = original.clone();
+        bad[field] = value;
+        fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(read_unstarted_receipt(&input.packet, &identity).is_err());
+    }
+    for bad in [b"{".to_vec(), vec![b'x'; 4097]] {
+        fs::write(&path, bad).unwrap();
+        assert!(read_unstarted_receipt(&input.packet, &identity).is_err());
+    }
+    fs::write(&path, &bytes).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(read_unstarted_receipt(&input.packet, &identity).is_err());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let alias = root.path().join("alias");
+    fs::hard_link(&path, &alias).unwrap();
+    assert!(read_unstarted_receipt(&input.packet, &identity).is_err());
+    fs::remove_file(&alias).unwrap();
+    read_unstarted_receipt(&input.packet, &identity).unwrap();
+    fs::rename(&path, &alias).unwrap();
+    symlink(&alias, &path).unwrap();
+    assert!(read_unstarted_receipt(&input.packet, &identity).is_err());
+}
+
+#[tokio::test]
+async fn killed_wrapper_before_release_cannot_supply_no_spawn_proof() {
+    let root = tempfile::tempdir().unwrap();
+    let tree = root.path().join("tree");
+    std::fs::create_dir(&tree).unwrap();
+    let input = launch(
+        &tree.canonicalize().unwrap(),
+        "printf changed > changed",
+        1000,
+    );
+    let identity = unstarted_identity(&input);
+    let (mut child, _writer, mut reader) =
+        tagged_wrapper(&input, &[identity.argument().unwrap()]).await;
+    assert!(matches!(
+        event(&mut reader).await,
+        RunnerEvent::Ready { .. }
+    ));
+    child.start_kill().unwrap();
+    assert!(!exited(&mut child).await.success());
+    assert!(!tree.join("changed").exists());
+    assert!(conductor_runtime::read_unstarted_receipt(&input.packet, &identity).is_err());
+}

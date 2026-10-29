@@ -164,10 +164,51 @@ back the preparation and identity together. The new migration requires matching
 backup tools and binaries; do not use these tools against the running schema-18
 service until the normal verified upgrade procedure is complete.
 
-This change is the prerequisite for a trusted never-released receipt, not that
-receipt's implementation. Pre-release failure still remains blocked after restart.
-Recovery must require an exact expected identity, packet and attempt in a private
-receipt published only after the trusted wrapper irrevocably abandons its path to
-worker spawn. PID absence, prepared state, the expected UUID or a forged argv tag
-alone must never authorize a fence. Existing restricted-writer receipt and finite
-continuation gates remain unchanged.
+## Trusted proof that no worker started
+
+A matching tagged wrapper that abandons its Ready/release handshake writes a
+private `unstarted-<packet-sha256>.json` beside the attempt tree, then returns.
+The publication branch is before the worker task and cannot fall through to
+spawn. It covers Ready output failure, lost/invalid release, changed instructions
+at release and an already expired grant. Because a grant may arrive before a
+later pre-spawn check fails, the observation is precisely `worker_not_started`,
+not a claim that a release frame was never received. Earlier malformed launch or
+identity failures, and wrappers killed before publication, remain unknown.
+
+The versioned strict receipt binds the authority namespace, packet digest,
+expected wrapper UUID and attempt. Publication uses a private create-new pending
+file, file fsync, no-replace hard link, pending removal and parent fsync. Readers
+reject missing/partial evidence, symlinks, multiple links, wrong ownership or
+permissions, oversized files, extra fields and mismatched identities. A crash
+leaving both pending and final hard links is conservatively unreadable. The tag
+is not a secret or signature; the trust boundary is the trusted wrapper and the
+receipt directory outside the restricted writer's allowed root. This does not
+protect against a malicious same-user process with access to private state.
+
+Recovery accepts this proof only against the durable expected UUID and current
+authority, for the existing restricted Claude writer capability. Any recorded ACK
+must agree with the expected UUID. Legacy unknown expected identities cannot use
+this path. Accepted proof fences the execution through the existing revision,
+audit and replay transaction without inventing an ACK or process birth binding.
+The existing explicit continuation and finite automatic recovery policy then
+apply; cancelled/paused/operator-blocked work remains protected. Existing
+restricted stop/exit receipts still require an acknowledged wrapper.
+
+This does not fence escaped descendants of a worker that started, or prove
+recovery when the wrapper died without publishing evidence. PID absence,
+prepared state and expected identity alone never authorize a fence or retry.
+The candidate is not installed in the existing schema-18 operator runtime.
+
+Native candidate acceptance holds actual Ready before ACK, and separately holds
+Release after durable ACK, through a private instrumented relay. After controller
+loss the live orphan stays blocked. Closing its control input lets the actual
+wrapper publish no-spawn proof; exactly one automatic continuation then completes
+with a real Claude writer, declared checks and independent Codex review. Recovery
+including final restart takes 37.63 and 29.20 seconds respectively. Prior work and
+ACK/birth metadata (or their absence) are preserved, a new attempt and identity
+are recorded, and completed restart does not duplicate work. These timings are
+fixture observations, not performance guarantees. Both model workflows incurred
+unmeasured provider usage. A fresh-authority migration fixture imports completed
+schema-18 application rows, preserves their task/ACK/birth records, retains NULL
+expected identities, rejects the old binary and reopens with the new binary.
+This is migration evidence, not cross-path product restoration.
