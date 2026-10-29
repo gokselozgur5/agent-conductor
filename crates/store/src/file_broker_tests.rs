@@ -530,3 +530,45 @@ async fn actual_file_write_with_failed_completion_remains_unknown_and_unreplayab
 async fn actual_file_write_records_success_before_clean_closure() {
     actual_write(false).await;
 }
+
+#[tokio::test]
+async fn prepared_launch_schema_blocks_fencing_until_receipt_closure() {
+    let (_root, store, binding) = fixture().await;
+    let mut db = store.inner.writer.lock().await;
+    sqlx::query("INSERT INTO file_broker_launches VALUES(?,?,'{}','{}','open',100,NULL)")
+        .bind(&binding.invocation_id)
+        .bind(&binding.execution_token)
+        .execute(&mut *db)
+        .await
+        .unwrap();
+    let unresolved: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM unresolved_file_broker_tasks WHERE task_id=?")
+            .bind(&binding.task_id)
+            .fetch_one(&mut *db)
+            .await
+            .unwrap();
+    assert_eq!(unresolved, 1);
+    assert!(
+        db.execute("UPDATE executions SET state='fenced'")
+            .await
+            .is_err()
+    );
+    assert!(
+        db.execute("UPDATE file_broker_launches SET state='closed'")
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE file_broker_launches SET state='closed',shutdown_sha256=?")
+        .bind("a".repeat(64))
+        .execute(&mut *db)
+        .await
+        .unwrap();
+    let unresolved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unresolved_file_broker_tasks")
+        .fetch_one(&mut *db)
+        .await
+        .unwrap();
+    assert_eq!(unresolved, 0);
+    db.execute("UPDATE executions SET state='fenced'")
+        .await
+        .unwrap();
+}

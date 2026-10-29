@@ -44,6 +44,7 @@ class BackupTests(unittest.TestCase):
               CREATE TABLE executions(state TEXT,packet_json TEXT);
               CREATE TABLE auxiliary_invocations(state TEXT);
               CREATE TABLE file_brokers(state TEXT);
+              CREATE TABLE file_broker_launches(state TEXT);
               CREATE TABLE file_operations(completed_at_ms INTEGER);
               CREATE TABLE legacy_auxiliary_ownership(task_id TEXT);
               CREATE TABLE leases(status TEXT);
@@ -63,7 +64,7 @@ class BackupTests(unittest.TestCase):
     def test_snapshot_preserves_bytes_modes_and_database(self):
         before = backup.inventory(self.state, backup.SKIP)
         result = backup.backup(self.state, self.target)
-        self.assertEqual(result['schema'], 28)
+        self.assertEqual(result['schema'], 29)
         manifest = json.loads((self.target / 'manifest.json').read_text())
         self.assertEqual(manifest['entries'], backup.inventory(self.target / 'state'))
         self.assertEqual(before, backup.inventory(self.state, backup.SKIP))
@@ -94,6 +95,17 @@ class BackupTests(unittest.TestCase):
         self.assertFalse(self.target.exists())
         with sqlite3.connect(self.state / 'state.sqlite3') as db:
             db.execute("update file_brokers set state='closed'")
+        backup.backup(self.state, self.target)
+        self.assertTrue(backup.verify(self.target)['verified'])
+
+    def test_prepared_broker_launch_refuses_backup_before_registration(self):
+        with sqlite3.connect(self.state / 'state.sqlite3') as db:
+            db.execute("insert into file_broker_launches values('open')")
+        with self.assertRaisesRegex(ValueError, 'file broker ownership unresolved'):
+            backup.backup(self.state, self.target)
+        self.assertFalse(self.target.exists())
+        with sqlite3.connect(self.state / 'state.sqlite3') as db:
+            db.execute("update file_broker_launches set state='closed'")
         backup.backup(self.state, self.target)
         self.assertTrue(backup.verify(self.target)['verified'])
 
