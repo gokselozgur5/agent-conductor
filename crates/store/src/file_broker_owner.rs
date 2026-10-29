@@ -54,6 +54,7 @@ impl Store {
         if bound(&mut tx, binding, &encoded_binding).await? != "open" {
             return Err(invalid());
         }
+        super::launch_binding::authorize_owner(&mut tx, binding, owner).await?;
         let existing: Option<String> =
             sqlx::query_scalar("SELECT owner_json FROM file_broker_owners WHERE invocation_id=?")
                 .bind(&binding.invocation_id)

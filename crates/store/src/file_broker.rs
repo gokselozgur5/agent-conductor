@@ -2,6 +2,15 @@
 use crate::{EffectAudit, Store, StoreError};
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, SqliteConnection};
+#[path = "file_broker_launch.rs"]
+mod launch;
+#[path = "file_broker_launch_binding.rs"]
+mod launch_binding;
+#[path = "file_broker_launch_diagnostic.rs"]
+mod launch_diagnostic;
+#[path = "file_broker_launch_prepare.rs"]
+mod launch_prepare;
+pub use launch::FileBrokerLaunchBinding;
 #[path = "file_broker_owner.rs"]
 mod ownership;
 pub use ownership::{FileBrokerOwner, FileBrokerRecoveryCandidate};
@@ -109,6 +118,7 @@ impl Store {
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
         live(&mut tx, b).await?;
+        launch_binding::registered_binding(&mut tx, b).await?;
         if sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM file_brokers WHERE invocation_id=?")
             .bind(&b.invocation_id)
             .fetch_one(&mut *tx)
@@ -290,6 +300,8 @@ impl Store {
             _ => return Err(invalid()),
         }
 
+        launch_binding::close_preparation(&mut tx, b, &state, evidence.map(|(_, receipt)| receipt))
+            .await?;
         let (last,pending):(i64,i64)=sqlx::query_as("SELECT COALESCE(MAX(sequence),0),COUNT(*) FILTER(WHERE completed_at_ms IS NULL) FROM file_operations WHERE invocation_id=?").bind(&b.invocation_id).fetch_one(&mut *tx).await?;
         if completed != last || pending != 0 {
             return Err(invalid());
@@ -321,7 +333,7 @@ impl Store {
         let rows=sqlx::query("SELECT substr(b.invocation_id,1,256) AS invocation_id,substr(e.task_id,1,256) AS task_id,b.state,COUNT(*) OVER() AS total FROM file_brokers b JOIN executions e ON e.effect_token=b.execution_token LEFT JOIN tasks t ON t.id=e.task_id LEFT JOIN leases l ON l.attempt_id=e.attempt_id JOIN runtime_metadata r ON r.singleton=1 JOIN recovery_authority a ON a.singleton=1 WHERE (b.state='open' AND (json_extract(b.binding_json,'$.boot_generation') IS NOT r.boot_generation OR json_extract(b.binding_json,'$.authority_id') IS NOT a.authority_id OR e.state!='started' OR t.state NOT IN ('claimed','running') OR l.status IS NOT 'active')) OR (b.state='closed' AND EXISTS(SELECT 1 FROM file_operations o WHERE o.invocation_id=b.invocation_id AND o.completed_at_ms IS NULL)) ORDER BY b.invocation_id LIMIT 128")
             .fetch_all(&self.inner.readers).await?;
         let Some(first) = rows.first() else {
-            return Ok(None);
+            return self.file_broker_launch_diagnostic().await;
         };
         let total: i64 = first.try_get("total")?;
         let mut records = Vec::with_capacity(rows.len());
@@ -348,8 +360,8 @@ impl Store {
         &self,
         token: &str,
     ) -> Result<bool, StoreError> {
-        let pending: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM file_brokers b WHERE b.execution_token=? AND (b.state='open' OR EXISTS(SELECT 1 FROM file_operations o WHERE o.invocation_id=b.invocation_id AND o.completed_at_ms IS NULL)))")
-            .bind(token).fetch_one(&self.inner.readers).await?;
+        let pending: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM file_brokers b WHERE b.execution_token=? AND (b.state='open' OR EXISTS(SELECT 1 FROM file_operations o WHERE o.invocation_id=b.invocation_id AND o.completed_at_ms IS NULL))) OR EXISTS(SELECT 1 FROM file_broker_launches WHERE execution_token=? AND state='open')")
+            .bind(token).bind(token).fetch_one(&self.inner.readers).await?;
         Ok(pending != 0)
     }
 }

@@ -1198,7 +1198,8 @@ async fn persist_in_transaction(
 
 mod file_broker;
 pub use file_broker::{
-    FileBrokerBinding, FileBrokerOwner, FileBrokerRecoveryCandidate, FileBrokerStatus,
+    FileBrokerBinding, FileBrokerLaunchBinding, FileBrokerOwner, FileBrokerRecoveryCandidate,
+    FileBrokerStatus,
 };
 #[cfg(test)]
 mod file_broker_barrier_tests;
