@@ -45,11 +45,30 @@ async fn tagged_wrapper(
     send(&mut writer, input).await;
     (child, writer, reader)
 }
-async fn send(writer: &mut ChildStdin, value: &impl serde::Serialize) {
+async fn try_send(writer: &mut ChildStdin, value: &impl serde::Serialize) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(value).expect("encode");
     bytes.push(b'\n');
-    writer.write_all(&bytes).await.expect("write frame");
-    writer.flush().await.expect("flush");
+    writer.write_all(&bytes).await?;
+    writer.flush().await
+}
+async fn send(writer: &mut ChildStdin, value: &impl serde::Serialize) {
+    try_send(writer, value).await.expect("write frame");
+}
+async fn changed_instruction_renewal(writer: &mut ChildStdin, hash: String) {
+    // A renewal queued by wait_for_progress may observe the changed pin and
+    // close the wrapper before this explicit trigger is written. The caller
+    // must still verify the exact instruction-change stop event and settled child.
+    if let Err(error) = try_send(
+        writer,
+        &RunnerControl::Renew {
+            packet_sha256: hash,
+            continuous_deadline_ms: conductor_runtime::continuous_millis().unwrap() + 5000,
+        },
+    )
+    .await
+    {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
 }
 async fn event(reader: &mut BufReader<ChildStdout>) -> RunnerEvent {
     let mut bytes = Vec::new();
@@ -556,6 +575,13 @@ async fn instruction_change_before_ack_or_release_never_starts_worker() {
 
 #[tokio::test]
 async fn changed_instruction_refuses_renewal_and_stops_live_worker() {
+    instruction_change_stop(false).await;
+}
+#[tokio::test]
+async fn instruction_change_stop_accepts_an_already_closed_control_pipe() {
+    instruction_change_stop(true).await;
+}
+async fn instruction_change_stop(already_stopped: bool) {
     use conductor_runtime::InstructionPin;
     use sha2::{Digest, Sha256};
     let directory = tempfile::tempdir().unwrap();
@@ -588,15 +614,20 @@ async fn changed_instruction_refuses_renewal_and_stops_live_worker() {
     let output_path = directory.path().join("writes");
     wait_for_progress(&mut writer, &hash, &output_path, 0).await;
     std::fs::write(instruction, "changed").unwrap();
-    send(
-        &mut writer,
-        &RunnerControl::Renew {
-            packet_sha256: hash,
-            continuous_deadline_ms: conductor_runtime::continuous_millis().unwrap() + 5000,
-        },
-    )
-    .await;
-    let RunnerEvent::Stopped { reason, .. } = event(&mut reader).await else {
+    changed_instruction_renewal(&mut writer, hash.clone()).await;
+    let stopped_event = event(&mut reader).await;
+    if already_stopped {
+        assert!(exited(&mut child).await.success());
+        assert_eq!(
+            try_send(&mut writer, &RunnerControl::Cancel)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        changed_instruction_renewal(&mut writer, hash).await;
+    }
+    let RunnerEvent::Stopped { reason, .. } = stopped_event else {
         panic!("expected stop")
     };
     assert_eq!(reason, "instruction_changed_or_unavailable");

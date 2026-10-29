@@ -197,7 +197,7 @@ restricted stop/exit receipts still require an acknowledged wrapper.
 This does not fence escaped descendants of a worker that started, or prove
 recovery when the wrapper died without publishing evidence. PID absence,
 prepared state and expected identity alone never authorize a fence or retry.
-The candidate is not installed in the existing schema-18 operator runtime.
+Local acceptance does not install the candidate in an existing operator runtime.
 
 Native candidate acceptance holds actual Ready before ACK, and separately holds
 Release after durable ACK, through a private instrumented relay. After controller
