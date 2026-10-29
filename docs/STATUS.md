@@ -45,7 +45,12 @@ at startup and maintenance from validated historical acceptance, without relaunc
 The reproduced native stale-queue fixture repairs across two starts with task and
 ownership records unchanged, no model calls and one reconciliation audit.
 
-Next acceptance work: complete the remaining abrupt-death matrix and operator
+A separate native verdict-to-completion interruption now passes: the accepted
+verdict survives daemon loss, exactly one continuation performs fresh checks and
+independent review, and one completion remains stable across restart. Original
+publications are preserved; this uses controlled completion-write refusal.
+
+Next acceptance work: complete the remaining abrupt filesystem boundary and operator
 recovery reporting; finish physical host recovery, native
 endurance, privacy and supported-host/release checks. Keep the existing
 control-plane-only soak separate from full native/v1 acceptance. No automatic

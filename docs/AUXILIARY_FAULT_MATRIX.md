@@ -23,7 +23,7 @@ and run through the workspace test command.
 | Settled ownership with result transaction interrupted at first task write | Abrupt child exit; exact pre-publication snapshot restored | Same, separate role | Store fixture; not daemon continuation orchestration |
 | During domain publication transaction | Abrupt exits at task and publication-link writes | Same, separate role | Synthetic validated store batch; not a native adapter result |
 | After check result, before verifier accepts launch | Prior check publication preserved in verifier unaccepted-launch fixture | Not applicable | Does not isolate the immediate post-commit scheduling boundary |
-| After verifier result publication, before task completion | Check result has equivalent after-commit exit/replay control | Abrupt store child exit after publication commit; exact batch retained, replay adds nothing | Full domain verdict-to-completion daemon interruption still required |
+| After verifier result publication, before task completion | Prior check publication preserved | `verdict-completion-crash-v1`: accepted verdict committed, completion write refused, daemon SIGKILL; one continuation completes and survives restart | Controlled SQL refusal isolates the boundary; not every scheduling interleaving |
 | After completed task, before dispatch bookkeeping | `completed-dispatch-crash-v1` reproduces stale queue after SIGKILL | Same completed workflow contains independent verdict | Controlled finish-write refusal isolates boundary; `completed-dispatch-repair-v1` repairs it without model calls or task mutation |
 
 `transaction_cancellation::auxiliary_admission_survives_process_death_on_both_sides`
@@ -60,7 +60,7 @@ They do not erase either field to fit the no-ACK path. Both complete one
 continuation, with old settlement audited before replacement execution and no
 old-invocation result publication.
 
-Prioritize the remaining domain completion orchestration and filesystem boundaries next.
+Prioritize the remaining abrupt filesystem capture/review-copy boundary next.
 Do not aggregate these short native controls into a seven-day run or describe
 synthetic host epochs as physical reboot acceptance. Full operational recovery,
 privacy, supported Linux hosts and release acceptance remain separate gates.
@@ -92,3 +92,24 @@ fix twice: dispatch became `finished`, task/attempt/lease/execution/effect/auxil
 records stayed byte-equivalent, with one original completion and one reconciliation
 audit. Both test daemons exited. This closes the observed bookkeeping defect, not
 the separate verdict-to-completion orchestration gap.
+
+## Accepted verdict / interrupted completion
+
+`verdict-completion-crash-v1` uses the frozen completed-dispatch candidate
+`89a4544`. Fixture-only SQLite triggers refuse completion and dispatch finish,
+leaving a real accepted independent verdict and successful check publication
+committed while the task remains `verifying`. The owned daemon is killed, the
+triggers are removed, and a frozen pre-recovery database preserves that boundary.
+
+With explicit fenced recovery enabled, restart performs exactly one continuation.
+The new attempt passes its own check and independent review, reaches `completed`
+and `finished`, and remains unchanged across another restart. Independent SQLite
+verification confirms the two original auxiliary rows/publication links are
+unchanged, all four invocations have scope-bound native settlement evidence, both
+writer executions are fenced, and only one completion audit exists. Original
+project files remain unchanged, excluding Git metadata. Owned daemons are stopped.
+
+This is native orchestration evidence with controlled completion-write refusal,
+not an abrupt exit inside the publication transaction or physical host failure.
+The continuation re-runs work and verification; it does not promote the historical
+verdict directly to completion. Real model calls were used; spend was not measured.
