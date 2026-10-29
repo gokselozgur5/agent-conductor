@@ -1,3 +1,5 @@
+mod broker_vendor_session;
+pub use broker_vendor_session::BrokerVendorOutcome;
 mod broker_session;
 pub use broker_session::NativeBrokerSession;
 mod broker_journal_session;
