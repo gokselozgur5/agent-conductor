@@ -7,9 +7,9 @@ that scope. Read this current audit before the historical paragraphs in STATUS.
 
 ## Candidate identity
 
-The local integration candidate combines auxiliary ownership `fafc2a0` (runtime
-implementation through `89a4544`) with native observation `b4b303a`. Their public
-PRs #90 and #88 remain separate drafts. The operator's existing schema-19 runtime
+Draft [PR #91](https://github.com/gokselozgur5/agent-conductor/pull/91) combines auxiliary ownership `fafc2a0` (runtime
+implementation through `89a4544`) with native observation `b4b303a`. Their original
+PRs #90 and #88 remain available as separate focused drafts. The operator's existing schema-19 runtime
 has not been upgraded; candidate schema is 25. Main and the running endurance
 fixture have different pinned bytes. Neither is evidence that this combined
 candidate is released or has completed endurance acceptance.

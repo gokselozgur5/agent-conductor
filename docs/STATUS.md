@@ -4,9 +4,10 @@ For the current requirement-by-requirement delivery gaps, see
 [Delivery acceptance audit](DELIVERY_ACCEPTANCE.md). Later sections retain
 historical evidence and must not be read as current feature inventories.
 
-## Local integration candidate
+## Integrated candidate
 
-The separate `codex/delivery-integration` branch combines the auxiliary ownership
+Draft [PR #91](https://github.com/gokselozgur5/agent-conductor/pull/91) on
+`codex/delivery-integration` combines the auxiliary ownership
 and native-observation candidates. It adds scoped auxiliary process observation,
 with 348 Rust and 112 Python tests and a real monitored Claude/check/Codex workflow.
 Both auxiliary roles are observed while live; an actual scoped orphan is detected.
