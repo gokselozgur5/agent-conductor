@@ -230,3 +230,29 @@ inferred complete from current file contents. Automatic reconciliation, a durabl
 broker shutdown receipt, production transport, inventory/backup/continuation
 barriers and native adapter launch remain required before enabling this route.
 No execution fencing or task completion is changed by these records.
+
+## Abrupt process-exit controls
+
+The broker crash matrix launches nine separate owned child processes and exits
+without Rust unwinding at these exact boundaries:
+
+- Registration row mutation before commit, and after registration commit.
+- Operation admission row mutation before commit, and after admission commit.
+- Actual filesystem publication before result persistence.
+- Result row mutation before commit, and after result commit.
+- Closure row mutation before commit, and after closure commit.
+
+SQLite update hooks select the pre-commit cuts; post-commit cuts follow successful
+store returns. The filesystem cut runs the concrete file port and its sync/name
+publication path. The parent requires the expected exit code, reopens the database
+and checks integrity, exact whole-database rollback at every transaction cut,
+unchanged unrelated tables, exact broker audit count and retained/absent file
+bytes. Committed admission never grants replay; an unknown result blocks sequence
+advance and clean closure. Completed operations remain non-replayable. A second
+open preserves state and a new generation refuses old-owner mutation.
+
+These are real process exits with synthetic acknowledged execution state and
+no model calls. They are not SIGKILL during a filesystem syscall, machine power
+loss, native proxy survival or accepted writer fencing. The unclosed broker and
+its pending evidence still need integration into production observation, backup,
+continuation and verified shutdown/recovery before native launch can be enabled.

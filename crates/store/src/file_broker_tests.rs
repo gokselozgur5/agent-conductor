@@ -2,7 +2,7 @@ use super::transaction_cancellation::{auxiliary_origin_fixture, snapshot};
 use super::*;
 use sqlx::Executor;
 
-fn audit(id: &str) -> EffectAudit<'_> {
+pub(super) fn audit(id: &str) -> EffectAudit<'_> {
     EffectAudit {
         id,
         actor_id: "broker",
@@ -10,7 +10,7 @@ fn audit(id: &str) -> EffectAudit<'_> {
         now_ms: 100,
     }
 }
-async fn fixture() -> (tempfile::TempDir, Store, FileBrokerBinding) {
+pub(super) async fn fixture() -> (tempfile::TempDir, Store, FileBrokerBinding) {
     let (root, store, aux, host) = auxiliary_origin_fixture("admit").await;
     let b = FileBrokerBinding {
         authority_id: host.authority_id,

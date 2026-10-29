@@ -71,3 +71,21 @@ a WITHOUT ROWID table, for which SQLite does not call the update hook. The final
 ACK barrier targets the delivery update after consumer state. These harness
 failures are not counted as product reproductions. No acceptance condition was
 weakened to hide them.
+
+## File broker transaction owners (schema 26)
+
+`register_file_broker`, `admit_file_operation`, `finish_file_operation` and
+`close_file_broker` each own a SQLx transaction covering the state mutation and
+its audit append. `file_broker_tests` deterministically aborts each caller at the
+actual SQLite row mutation, compares the complete application-table snapshot and
+then proves the same operation can succeed. Separate audit-refusal controls cover
+all four owners. This extends the historical owner inventory above; the old
+238-test validation count is not the current workspace count.
+
+`file_broker_crash_tests` additionally exits a real child without unwinding at
+these four pre-commit mutations and at their post-commit boundaries. A ninth cut
+occurs after actual file publication but before result persistence. The parent
+reopens SQLite, requires complete rollback or the exact committed state, compares
+unrelated ownership tables and audits, preserves file bytes, refuses replay of
+committed effects and rejects false closure of an unknown operation. These
+process exits are distinct from future cancellation and physical power loss.
