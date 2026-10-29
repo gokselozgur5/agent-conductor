@@ -59,6 +59,17 @@ pub struct CheckDefinition {
     pub timeout_ms: u64,
 }
 
+/// Coordinator-observed source identity; this grants no worker filesystem access.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitSourceIdentity {
+    pub root: PathBuf,
+    pub head: String,
+    pub reference: String,
+    pub device: u64,
+    pub inode: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptContract {
@@ -72,6 +83,8 @@ pub struct AttemptContract {
     pub adapter: AdapterIdentity,
     pub workspace: PathBuf,
     pub starting_head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_source: Option<Box<GitSourceIdentity>>,
     pub authority: CapabilityEnvelope,
     pub instructions: Vec<InstructionPin>,
     pub checks: Vec<CheckDefinition>,
@@ -145,6 +158,18 @@ impl AttemptContract {
             || !digest(&self.starting_head, &[40, 64])
         {
             return Err(ContractError::Digest);
+        }
+        if let Some(source) = &self.git_source
+            && (!absolute_clean(&source.root)
+                || source.head != self.starting_head
+                || source.reference.len() > 1024
+                || !(source.reference == "HEAD" || source.reference.starts_with("refs/"))
+                || source
+                    .reference
+                    .bytes()
+                    .any(|b| b.is_ascii_control() || b.is_ascii_whitespace()))
+        {
+            return Err(ContractError::Identity);
         }
         if self.max_runtime_ms == 0
             || self.max_runtime_ms > 86_400_000

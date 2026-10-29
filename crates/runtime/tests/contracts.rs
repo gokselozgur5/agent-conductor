@@ -21,6 +21,7 @@ fn packet() -> ResumePacket {
             },
             workspace: "/runtime/workspaces/task-1".into(),
             starting_head: "c".repeat(40),
+            git_source: None,
             authority: CapabilityEnvelope {
                 read_roots: vec!["/runtime/workspaces/task-1".into()],
                 write_roots: vec!["/runtime/workspaces/task-1/src".into()],
@@ -178,4 +179,55 @@ fn full_capability_is_explicit_and_account_selection_is_digest_bound() {
     assert_ne!(value.sha256().unwrap(), digest);
     value.contract.full_capability = None;
     assert_eq!(value.validate(), Err(ContractError::Authority));
+}
+
+#[test]
+fn git_source_is_hash_bound_and_legacy_packets_keep_their_encoding() {
+    let mut value = packet();
+    let legacy = serde_json::to_vec(&value).unwrap();
+    assert!(
+        !String::from_utf8(legacy.clone())
+            .unwrap()
+            .contains("git_source")
+    );
+    let decoded = ResumePacket::decode(&legacy).unwrap();
+    assert_eq!(serde_json::to_vec(&decoded).unwrap(), legacy);
+    let old_hash = value.sha256().unwrap();
+    value.contract.git_source = Some(Box::new(conductor_runtime::GitSourceIdentity {
+        root: "/source/project".into(),
+        head: value.contract.starting_head.clone(),
+        reference: "refs/heads/main".into(),
+        device: 1,
+        inode: 2,
+    }));
+    value.contract.validate().unwrap();
+    assert_ne!(value.sha256().unwrap(), old_hash);
+    let bound_hash = value.sha256().unwrap();
+    value.contract.git_source.as_mut().unwrap().reference = "HEAD".into();
+    value.contract.validate().unwrap();
+    assert_ne!(value.sha256().unwrap(), bound_hash);
+    let source = value.contract.git_source.as_mut().unwrap();
+    source.head = "e".repeat(40);
+    assert!(value.contract.validate().is_err());
+}
+
+#[test]
+fn git_source_rejects_relative_roots_and_unbounded_or_control_references() {
+    for (root, reference) in [
+        ("relative", "refs/heads/main".to_owned()),
+        ("/source", "refs/heads/a\nb".to_owned()),
+        ("/source", "refs/heads/a b".to_owned()),
+        ("/source", String::new()),
+        ("/source", format!("refs/heads/{}", "a".repeat(1024))),
+    ] {
+        let mut value = packet();
+        value.contract.git_source = Some(Box::new(conductor_runtime::GitSourceIdentity {
+            root: root.into(),
+            head: value.contract.starting_head.clone(),
+            reference,
+            device: 1,
+            inode: 2,
+        }));
+        assert!(value.contract.validate().is_err());
+    }
 }

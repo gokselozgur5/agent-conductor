@@ -143,6 +143,17 @@ impl<C: Clock> PersistentControlService<C> {
         .await
     }
 
+    async fn validate_workflow_trigger(&self, plan: &NativeWorkflowPlan) -> Result<(), StoreError> {
+        if plan.wake_subscription.is_some()
+            && self.store.workflow_trigger(&plan.task_id).await?.is_none()
+        {
+            return Err(invalid(
+                "event-triggered workflow has no durable wake admission",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn run_prepared_workflow(
         &self,
         plan: &NativeWorkflowPlan,
@@ -153,14 +164,11 @@ impl<C: Clock> PersistentControlService<C> {
         verifier_authentication: BTreeMap<String, String>,
     ) -> Result<WorkflowOutcome, StoreError> {
         validate_plan(plan)?;
-        if plan.wake_subscription.is_some()
-            && self.store.workflow_trigger(&plan.task_id).await?.is_none()
-        {
-            return Err(invalid(
-                "event-triggered workflow has no durable wake admission",
-            ));
-        }
+        self.validate_workflow_trigger(plan).await?;
         self.validate_workflow_dependencies(plan).await?;
+        let git_source = self
+            .workflow_git_source(plan, &baseline, continuing)
+            .await?;
         let original_baseline = self
             .review_baseline(plan, &baseline.manifest, continuing)
             .await?;
@@ -195,6 +203,7 @@ impl<C: Clock> PersistentControlService<C> {
                 adapter: identity(&worker_pin),
                 workspace: workspace.clone(),
                 starting_head: baseline.starting_head,
+                git_source,
                 authority: writer_authority(plan, workspace),
                 instructions: plan.instructions.clone(),
                 checks: plan.checks.clone(),
@@ -940,6 +949,42 @@ mod tests {
             advisory_sources: vec![],
         }
     }
+    #[tokio::test]
+    async fn accepted_dependency_input_does_not_invent_live_git_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let store = agent_conductor_store::Store::open(root.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        let service = PersistentControlService::start(store, 1).await.unwrap();
+        let mut selected = plan(
+            root.path().join("absent-project"),
+            root.path().join("artifacts"),
+        );
+        let baseline = conductor_runtime::GitSnapshot {
+            starting_head: "a".repeat(40),
+            starting_ref: None,
+            status_sha256: "b".repeat(64),
+            manifest: conductor_runtime::SnapshotManifest {
+                version: 1,
+                entries: vec![],
+            },
+        };
+        assert!(
+            service
+                .workflow_git_source(&selected, &baseline, false)
+                .await
+                .is_err()
+        );
+        selected.input_task = Some("accepted-predecessor".into());
+        assert!(
+            service
+                .workflow_git_source(&selected, &baseline, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn full_capability_plan_roundtrip_preserves_account_and_machine_authority() {
         let mut selected = plan("/project".into(), "/artifacts".into());
