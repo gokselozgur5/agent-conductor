@@ -772,3 +772,144 @@ async fn owned_session_failed_close_retains_receipt_for_independent_recovery() {
             .unwrap()
     );
 }
+
+async fn persist_vendor_packet(
+    setup: &NativeLaunchSetup,
+) -> (
+    conductor_runtime::VendorPin,
+    conductor_runtime::ResumePacket,
+) {
+    use conductor_runtime::{AdapterKind, ResumePacket, VendorPin};
+    let digest = conductor_runtime::binary_sha256(&setup.wrapper).unwrap();
+    let pin = VendorPin {
+        kind: AdapterKind::Codex,
+        version: "fixture".into(),
+        executable: setup.wrapper.clone(),
+        executable_sha256: digest.clone(),
+        conformance_sha256: "b".repeat(64),
+    };
+    // The executable stands in for an approved vendor identity; never run as Codex.
+    let packet: ResumePacket = serde_json::from_value(serde_json::json!({
+        "contract":{"version":1,"task_id":setup.binding.task_id,"attempt_id":setup.binding.attempt_id,
+            "lease_epoch":setup.binding.lease_epoch,"worker_id":"runner",
+            "adapter":{"kind":"codex","version":"fixture","executable_sha256":digest,"conformance_sha256":"b".repeat(64)},
+            "workspace":setup.launch.root,"starting_head":"c".repeat(40),
+            "authority":{"read_roots":[setup.launch.root],"write_roots":[setup.launch.root],"network":"inference_only","allow_workspace_commands":false},
+            "instructions":[],"checks":[],"max_runtime_ms":10000},
+        "objective":"Synthetic vendor handoff test","checkpoint":null,"untrusted_context":[]
+    })).unwrap();
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        setup.root.path().join("state.sqlite3").display()
+    ))
+    .await
+    .unwrap();
+    sqlx::query("UPDATE executions SET packet_json=?,packet_sha256=? WHERE effect_token=?")
+        .bind(serde_json::to_string(&packet).unwrap())
+        .bind(packet.sha256().unwrap())
+        .bind(&setup.binding.execution_token)
+        .execute(&mut db)
+        .await
+        .unwrap();
+    (pin, packet)
+}
+
+#[tokio::test]
+async fn owned_session_vendor_handoff_requires_exact_packet_and_single_issuance() {
+    for cancel_before in [false, true] {
+        let setup = native_launch_setup(false).await;
+        let (pin, packet) = persist_vendor_packet(&setup).await;
+        let acknowledged = crate::prepare_native_broker(
+            &setup.store,
+            &setup.binding,
+            &setup.launch,
+            &setup.wrapper,
+            &pin.executable_sha256,
+            setup.endpoint,
+            101,
+        )
+        .await
+        .unwrap();
+        let mut session = acknowledged
+            .release(
+                setup.store.clone(),
+                setup.binding.clone(),
+                continuous_millis().unwrap() + 4000,
+                Duration::from_secs(5),
+                broker_owner_audit("vendor-owner"),
+            )
+            .await
+            .unwrap();
+        let mut changed = packet.clone();
+        changed.objective.push_str(" substituted");
+        assert!(
+            session
+                .vendor_command(
+                    &pin,
+                    &changed,
+                    std::collections::BTreeMap::new(),
+                    &setup.wrapper,
+                    &pin.executable_sha256
+                )
+                .await
+                .is_err()
+        );
+        changed = packet.clone();
+        changed.contract.task_id = "another-task".into();
+        assert!(
+            session
+                .vendor_command(
+                    &pin,
+                    &changed,
+                    std::collections::BTreeMap::new(),
+                    &setup.wrapper,
+                    &pin.executable_sha256
+                )
+                .await
+                .is_err()
+        );
+        if cancel_before {
+            session.cancel().await.unwrap();
+        }
+        let result = session
+            .vendor_command(
+                &pin,
+                &packet,
+                std::collections::BTreeMap::new(),
+                &setup.wrapper,
+                &pin.executable_sha256,
+            )
+            .await;
+        if cancel_before {
+            assert!(result.is_err());
+        } else {
+            let spec = result.unwrap();
+            let secret = session.proxy_handoff();
+            assert!(
+                spec.environment
+                    .get(conductor_runtime::BROKER_HANDOFF_ENV)
+                    .is_some_and(|value| value == secret)
+            );
+            assert!(!spec.arguments.iter().any(|value| value.contains(secret)));
+            assert!(!format!("{spec:?}").contains(secret));
+            assert!(
+                session
+                    .vendor_command(
+                        &pin,
+                        &packet,
+                        std::collections::BTreeMap::new(),
+                        &setup.wrapper,
+                        &pin.executable_sha256
+                    )
+                    .await
+                    .is_err()
+            );
+            session.cancel().await.unwrap();
+        }
+        session
+            .finish(broker_owner_audit("vendor-close"))
+            .await
+            .unwrap();
+        assert_eq!(fs::read_dir(&setup.launch.root).unwrap().count(), 0);
+    }
+}
