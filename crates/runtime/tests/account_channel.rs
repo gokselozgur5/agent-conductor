@@ -165,3 +165,39 @@ async fn pinned_snapshot_crosses_authenticated_channel_without_sharing_destinati
     assert_eq!(sent.unwrap(), received.unwrap());
     assert_eq!(fs::read(source.join("answer")).unwrap(), b"42\n");
 }
+
+#[tokio::test]
+async fn persistent_worker_admits_new_packets_after_a_malformed_peer() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("worker.sock");
+    let uid = nix::unistd::geteuid().as_raw();
+    let mut listener = conductor_runtime::AccountWorkerListener::bind(&path, uid).unwrap();
+    let bad = async {
+        let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+        stream.write_all(&[b'x'; 69]).await.unwrap();
+        assert!(stream.read_u8().await.is_err());
+    };
+    let (refused, ()) = tokio::join!(listener.accept(WAIT), bad);
+    assert!(matches!(refused, Err(AccountChannelError::Refused)));
+    for digest in ["a".repeat(64), "b".repeat(64)] {
+        let address = conductor_runtime::AccountChannelAddress {
+            path: path.clone(),
+            worker_uid: uid,
+            coordinator_uid: uid,
+            packet_sha256: digest.clone(),
+        };
+        let (admitted, connected) = tokio::join!(
+            listener.accept(WAIT),
+            connect_account_channel(&address, WAIT)
+        );
+        let (mut receiver, selected) = admitted.unwrap();
+        assert_eq!(selected, digest);
+        connected.unwrap().write_all(b"payload").await.unwrap();
+        let mut bytes = [0; 7];
+        receiver.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"payload");
+        assert!(path.exists());
+    }
+    drop(listener);
+    assert!(!path.exists());
+}

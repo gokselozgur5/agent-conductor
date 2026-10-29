@@ -116,6 +116,59 @@ impl AccountChannelListener {
     }
 }
 
+/// Persistent rendezvous for tasks from one explicitly selected coordinator UID.
+/// The coordinator selects each packet after durable preparation; unlike the
+/// one-shot listener, no packet or receiver tag must be known at startup.
+pub struct AccountWorkerListener(AccountChannelListener);
+
+impl AccountWorkerListener {
+    /// Bind a worker-owned endpoint with the same directory and peer requirements.
+    /// # Errors
+    /// Refuses an invalid path or an occupied socket; never changes its parent.
+    pub fn bind(path: &Path, coordinator_uid: u32) -> Result<Self, AccountChannelError> {
+        AccountChannelListener::bind(path, coordinator_uid, "0".repeat(64)).map(Self)
+    }
+
+    /// Admit one packet identity from the authenticated coordinator. The caller
+    /// must bind the subsequent request to this digest and enforce ACK/Release.
+    /// A failed attempt does not consume the endpoint or grant task authority.
+    /// # Errors
+    /// Refuses wrong UID, malformed/version-mismatched headers and stalled peers.
+    pub async fn accept(
+        &mut self,
+        wait: Duration,
+    ) -> Result<(UnixStream, String), AccountChannelError> {
+        valid_wait(wait)?;
+        tokio::time::timeout(wait, async {
+            let (mut stream, _) = self
+                .0
+                .listener
+                .accept()
+                .await
+                .map_err(|_| AccountChannelError::Transport)?;
+            require_uid(&stream, self.0.address.coordinator_uid)?;
+            let mut incoming = [0; 69];
+            stream
+                .read_exact(&mut incoming)
+                .await
+                .map_err(|_| AccountChannelError::Transport)?;
+            let digest = std::str::from_utf8(&incoming[5..])
+                .map_err(|_| AccountChannelError::Refused)?
+                .to_owned();
+            if frame(&digest).map_err(|_| AccountChannelError::Refused)? != incoming {
+                return Err(AccountChannelError::Refused);
+            }
+            stream
+                .write_all(&[1])
+                .await
+                .map_err(|_| AccountChannelError::Transport)?;
+            Ok((stream, digest))
+        })
+        .await
+        .map_err(|_| AccountChannelError::Transport)?
+    }
+}
+
 impl Drop for AccountChannelListener {
     fn drop(&mut self) {
         if fs::symlink_metadata(&self.address.path)
