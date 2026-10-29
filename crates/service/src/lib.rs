@@ -1586,6 +1586,7 @@ mod effect_tests {
     include!("unowned_tests.rs");
     include!("full_capture_tests.rs");
     include!("account_execution_tests.rs");
+    include!("account_result_tests.rs");
     use super::*;
     use agent_conductor_domain::{AttemptId, EffectIntentSpec, EffectKind};
     use agent_conductor_store::{NewAgent, NewProject, NewTask, Store};
