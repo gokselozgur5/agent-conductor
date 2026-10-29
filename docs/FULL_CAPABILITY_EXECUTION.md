@@ -149,3 +149,17 @@ while exporting; changed content cannot publish a successful local manifest.
 The coordinator must establish execution/lease eligibility separately, then run
 required checks and independent review against the imported copy. These transport
 operations do not themselves advance task state or wire normal daemon dispatch.
+
+The persistent service records account outcomes separately from local process
+observations. `await_account_execution` renews current ownership, retains bounded
+checkpoints, parses the native output and records its digest. Malformed or unknown
+terminal outcomes cannot become successful reports. `finalize_account_source`
+consumes that report, captures and fetches the exact candidate, rechecks ownership,
+and records the imported digest before binding the task's verification source.
+
+Account executions remain `started` and unfenced with no fabricated process or
+exit code. An imported candidate is eligible for independent verification only
+while its recorded digest agrees with the task's selected source; blocked records
+lose that eligibility. Reporting alone does not permit capture-based checks.
+Schema 32 persists these separate report/import bindings. This service composition
+does not yet select account transport in the normal daemon workflow.
