@@ -690,3 +690,85 @@ async fn assert_first_write_refused(peer: tokio::net::UnixStream, binding: &File
         .unwrap();
     assert!(matches!(read, Ok(0) | Err(_)));
 }
+
+#[tokio::test]
+async fn owned_session_failed_close_retains_receipt_for_independent_recovery() {
+    let NativeLaunchSetup {
+        root,
+        store,
+        binding,
+        launch,
+        endpoint,
+        wrapper,
+    } = native_launch_setup(false).await;
+    let hash = format!("{:x}", Sha256::digest(fs::read(&wrapper).unwrap()));
+    let acknowledged =
+        crate::prepare_native_broker(&store, &binding, &launch, &wrapper, &hash, endpoint, 101)
+            .await
+            .unwrap();
+    let mut expected = acknowledged.runner.identity().clone();
+    let mut session = acknowledged
+        .release(
+            store.clone(),
+            binding.clone(),
+            continuous_millis().unwrap() + 4000,
+            Duration::from_secs(5),
+            broker_owner_audit("session-close-owner"),
+        )
+        .await
+        .unwrap();
+    let mut db = sqlx::SqliteConnection::connect(&format!(
+        "sqlite:{}",
+        root.path().join("state.sqlite3").display(),
+    ))
+    .await
+    .unwrap();
+    db.execute("CREATE TRIGGER reject_session_close BEFORE INSERT ON audit_events WHEN NEW.kind='file_broker.closed' BEGIN SELECT RAISE(FAIL,'fixture'); END").await.unwrap();
+    session.cancel().await.unwrap();
+    assert!(
+        session
+            .finish(broker_owner_audit("session-close-fail"))
+            .await
+            .is_err()
+    );
+    expected.observation = conductor_runtime::BrokerShutdownObservation::Revoked {
+        completed_sequence: 0,
+    };
+    conductor_runtime::BrokerReceiptDirectory::open(&launch.receipt_root)
+        .unwrap()
+        .read(&expected)
+        .unwrap();
+    assert_progress(&store, &binding, 0, 0).await;
+    assert!(
+        store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+    let closed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE kind='file_broker.closed'")
+            .fetch_one(&mut db)
+            .await
+            .unwrap();
+    assert_eq!(closed, 0);
+    db.execute("DROP TRIGGER reject_session_close")
+        .await
+        .unwrap();
+    assert!(
+        crate::close_broker_from_receipt(
+            &store,
+            &binding,
+            &expected,
+            &launch.receipt_root,
+            broker_owner_audit("session-close-recovered"),
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !store
+            .execution_has_unresolved_file_broker(&binding.execution_token)
+            .await
+            .unwrap()
+    );
+}
