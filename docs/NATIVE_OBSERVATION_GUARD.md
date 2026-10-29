@@ -81,3 +81,35 @@ acceptance guard, not the daemon or filesystem fencing. Earlier sampled native
 runs retain their original evidence and digest implementation; do not relabel
 them as version 2 runs. Future runs establish fresh baselines with pinned guard
 source bytes.
+
+## Unattended observation loop
+
+`run_native_monitor.run_native_monitor` runs an existing guard for an explicit
+bounded duration and interval. The caller supplies a fresh invariant reader,
+explicit runtime files to pin, and a new private output directory. It owns the
+isolated daemon, real workload submission, transport timeouts and cleanup. The
+monitor has no task-launch or process-stop authority.
+
+```python
+receipt = run_native_monitor(
+    guard, read_runtime_invariants, new_output_directory,
+    duration_seconds=120, interval_seconds=0.5,
+    pinned_files=[daemon_binary, control_binary, runner_binary, workflow_plan],
+)
+```
+
+The guard must have a board reader. Durations are bounded to seven days, sample
+counts to 150,000 and flushed JSONL evidence to 128 MiB. `run.json` records source
+and runtime file hashes; every sample is flushed and fsynced, and `status.json`
+is atomically replaced with private permissions. Existing output refuses rather
+than appending another run. Pin changes, missing native observations, uncertain
+terminal samples, reader exceptions and monitor violations fail the final receipt.
+Arbitrary exception text is omitted. Interrupted runs remain failed or visibly
+unfinished; a stale `running` file alone never establishes process liveness.
+
+A duration below seven days always yields `completed_short_native_probe`, even if
+a delayed run lasts longer. A full requested seven-day run can yield only
+`completed_sampled_native_soak`, with `full_v1_accepted` still false. Neither status
+proves complete fault coverage, arbitrary descendant containment, continuous
+workload activity, resource-growth bounds or revocation of write capability.
+Keep the existing control-plane endurance run separate.
