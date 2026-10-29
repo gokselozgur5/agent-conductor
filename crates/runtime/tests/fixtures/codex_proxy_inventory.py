@@ -1,5 +1,7 @@
 """Pinned Codex discovery against a local refusing provider; no model backend."""
 import hashlib
+import struct
+import zlib
 import http.server
 import json
 import os
@@ -19,8 +21,29 @@ ready = threading.Event()
 mode = os.environ.get("CONDUCTOR_PROXY_CALLS", "inventory")
 execute_calls = mode != "inventory"
 authorized = mode == "approved"
+image_probe = mode in ("image-inside", "image-outside", "image-symlink")
+broker_probe = mode in ("broker-read-outside", "broker-write-outside",
+                        "broker-read-traversal", "broker-write-traversal")
+broker_read = mode in ("broker-read-outside", "broker-read-traversal")
+outside_canary = b"SYNTHETIC_OUTSIDE_READ_MUST_NOT_REACH_MODEL"
 outputs = []
 capability = json.loads(os.environ["CONDUCTOR_BROKER_HANDOFF"])["token"].encode()
+
+
+def contains_image(value):
+    if isinstance(value, dict):
+        return value.get('type') in ('input_image', 'image_url') or any(contains_image(v) for v in value.values())
+    if isinstance(value, list):
+        return any(contains_image(v) for v in value)
+    return False
+
+
+def write_canary(path):
+    def chunk(kind, data):
+        return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data))
+    data = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!2I5B', 2, 2, 8, 2, 0, 0, 0))
+    data += chunk(b'IDAT', zlib.compress(b'\x00\xff\x00\x00\x00\xff\x00' * 2)) + chunk(b'IEND', b'')
+    path.write_bytes(data)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -34,6 +57,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         raw = self.rfile.read(size)
         assert capability not in raw, 'Capability leaked into model request'
+        assert outside_canary not in raw, 'Outside file contents reached model request'
         body = json.loads(raw)
         captured.append(body.get('tools', []))
         if not execute_calls:
@@ -53,7 +77,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             outputs.append(matches[0]['output'])
             encoded = json.dumps(matches[0]['output'])
             expected = ('written' if step == 1 else 'native codex proxy') if authorized else 'requires approval'
-            assert expected in encoded, 'Unexpected tool result'
+            if broker_probe:
+                assert '-32602: invalid file operation' in encoded.lower(), 'Outside path was not rejected by broker request validation'
+            elif image_probe:
+                image_present = contains_image(body.get('input', []))
+                assert image_present == (mode == 'image-inside'), 'Image access boundary violated'
+                if mode != 'image-inside':
+                    assert any(word in encoded.lower() for word in ('denied', 'outside', 'not allowed', 'permission')), 'Not an explicit permission refusal'
+            else:
+                assert expected in encoded, 'Unexpected tool result'
         if step < last_step:
             item = {'type': 'function_call', 'id': 'fc_' + str(step),
                     'call_id': 'call_write' if step == 0 else 'call_read',
@@ -62,6 +94,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     'arguments': json.dumps({'path': 'codex-answer', 'contents': 'native codex proxy\n',
                                              'expected_sha256': None} if step == 0 else {'path': 'codex-answer'}),
                     'status': 'completed'}
+            if broker_probe:
+                writing = not broker_read
+                item['name'] = 'conductor_write_text' if writing else 'conductor_read_text'
+                arguments = {'path': broker_path}
+                if writing:
+                    arguments.update(contents='forbidden outside write', expected_sha256=None)
+                item['arguments'] = json.dumps(arguments)
+            if image_probe:
+                item.pop('namespace')
+                item['name'] = 'view_image'
+                item['arguments'] = json.dumps({'path': str(image_path)})
         else:
             item = {'type': 'message', 'id': 'msg_fixture', 'role': 'assistant', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': 'Fixture done.', 'annotations': []}]}
@@ -105,11 +148,30 @@ config = {
 arguments = json.loads(os.environ['CONDUCTOR_CODEX_BROKER_ARGUMENTS'])
 assert isinstance(arguments, list) and all(isinstance(value, str) for value in arguments)
 exec_index = arguments.index('exec')
+if broker_probe:
+    outside_target = destination / 'outside-target.txt'
+    task_root = Path(arguments[arguments.index('-C') + 1])
+    broker_path = (os.path.relpath(outside_target, task_root)
+                   if mode.endswith('-traversal') else str(outside_target))
+    if mode.endswith('-traversal'):
+        assert broker_path.startswith('../')
+    if broker_read:
+        outside_target.write_bytes(outside_canary)
+    else:
+        assert not outside_target.exists()
+if image_probe:
+    task_root = Path(arguments[arguments.index('-C') + 1])
+    image_path = (task_root if mode == 'image-inside' else destination) / 'canary.png'
+    write_canary(image_path)
+    if mode == 'image-symlink':
+        link = task_root / 'outside-image-link.png'
+        link.symlink_to(image_path)
+        image_path = link
 args = [str(binary)]
 for key, value in config.items():
     args += ['-c', key + '=' + toml(value)]
 args += arguments[:exec_index]
-if not authorized:
+if not (authorized or broker_probe):
     for name in ('conductor_read_text', 'conductor_write_text'):
         args += ['-c', f'mcp_servers.conductor_files.tools.{name}.approval_mode="prompt"']
 args += arguments[exec_index:]
@@ -155,9 +217,16 @@ for tool in ('conductor_read_text', 'conductor_write_text'):
     assert sum(name.endswith(tool) for name in found) == 1, 'Expected broker tool missing or duplicated'
 for log in ('stdout.log', 'stderr.log', 'tools.json'):
     assert capability not in (destination / log).read_bytes(), 'Capability leaked into fixture log'
+if broker_probe:
+    if broker_read:
+        assert outside_target.read_bytes() == outside_canary
+    else:
+        assert not outside_target.exists(), 'Outside file was created'
+    for log in ('stdout.log', 'stderr.log', 'tools.json'):
+        assert outside_canary not in (destination / log).read_bytes()
 receipt = {'pinned_codex': True, 'tool_call_mode': mode, 'capability_absent_from_model_requests_and_logs': True, 'real_proxy_initialized': True, 'broker_tools_discovered': 2,
            'command_tools_absent': True, 'model_backend_invoked': False,
-           'file_tools_called': authorized, 'unapproved_call_refused': mode == 'denied', 'codex_child_stopped': child.poll() is not None}
+           'broker_path_denial': mode if broker_probe else None, 'image_access_control': mode if image_probe else None, 'file_tools_called': authorized or broker_probe, 'unapproved_call_refused': mode == 'denied', 'codex_child_stopped': child.poll() is not None}
 if execute_calls:
     assert len(outputs) == (2 if authorized else 1) and child.returncode == 0
     (destination / 'tool-outputs.json').write_text(json.dumps(outputs, indent=2) + '\n')

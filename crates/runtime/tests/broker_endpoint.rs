@@ -294,6 +294,41 @@ async fn pinned_codex_calls_real_proxy_tools_without_model_backend() {
 async fn pinned_codex_unapproved_call_never_reaches_broker() {
     codex_probe("denied").await;
 }
+#[tokio::test]
+#[ignore = "requires pinned Codex; actual inside-root image positive control"]
+async fn pinned_codex_image_inside_root_is_readable() {
+    codex_probe("image-inside").await;
+}
+#[tokio::test]
+#[ignore = "requires pinned Codex; actual outside-root image denial control"]
+async fn pinned_codex_image_outside_root_is_denied() {
+    codex_probe("image-outside").await;
+}
+#[tokio::test]
+#[ignore = "requires pinned Codex; outside image reached through in-root symlink"]
+async fn pinned_codex_image_symlink_outside_root_is_denied() {
+    codex_probe("image-symlink").await;
+}
+#[tokio::test]
+#[ignore = "requires pinned Codex; outside broker read canary never reaches model"]
+async fn pinned_codex_broker_outside_read_is_denied() {
+    codex_probe("broker-read-outside").await;
+}
+#[tokio::test]
+#[ignore = "requires pinned Codex; outside broker write never creates a file"]
+async fn pinned_codex_broker_outside_write_is_denied() {
+    codex_probe("broker-write-outside").await;
+}
+#[tokio::test]
+#[ignore = "requires pinned Codex; relative traversal read never reaches model"]
+async fn pinned_codex_broker_traversal_read_is_denied() {
+    codex_probe("broker-read-traversal").await;
+}
+#[tokio::test]
+#[ignore = "requires pinned Codex; relative traversal write never creates a file"]
+async fn pinned_codex_broker_traversal_write_is_denied() {
+    codex_probe("broker-write-traversal").await;
+}
 async fn codex_probe(mode: &str) {
     let root = private_tempdir();
     let directory = private_tempdir();
