@@ -25,3 +25,18 @@ pub(crate) fn redact_command(kind: &mut CommandKind) -> bool {
     *text = redacted;
     true
 }
+
+/// Sanitizes presentation fields without rewriting the authoritative task input.
+pub(crate) fn redact_task_response(response: &mut conductor_protocol::TaskResponse) {
+    response.objective = redact_credentials(&response.objective);
+    redact_task(&mut response.aggregate);
+}
+
+pub(crate) fn redact_creation_response(
+    mut response: conductor_protocol::Response,
+) -> conductor_protocol::Response {
+    if let conductor_protocol::Response::Task(task) = &mut response {
+        redact_task_response(task);
+    }
+    response
+}
