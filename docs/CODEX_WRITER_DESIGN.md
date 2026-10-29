@@ -931,3 +931,17 @@ file operations. These observations establish neither OS confinement nor native
 writer admission, execution fencing, source capture, review or task completion.
 A later publication step must revalidate ownership and bind source and independent
 verification; retaining a candidate must never extend its lease.
+
+## Forced disabled-command control
+
+A deterministic local provider injects an `exec_command` function call even
+though the actual pinned Codex tool catalog does not advertise it. The harness
+must return an explicit unknown/unsupported dispatch error, complete the response,
+and leave the test-only command marker absent. The real initialized broker must
+record zero operations. This tests dispatch refusal rather than relying solely
+on the declared tool list or a model's promise not to execute commands.
+
+The fixture bypasses the host HTTP proxy only for localhost via `NO_PROXY` so
+its synthetic provider remains local. Production authentication and networking
+are unchanged. This single forced-command test does not cover alternate tools,
+control sockets, credential reads, arbitrary network access or OS confinement.
