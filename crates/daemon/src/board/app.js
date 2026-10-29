@@ -199,7 +199,7 @@ async function control(task, action, fields = {}) {
     else if (response.status === 409) message = 'Task changed or action is not allowed. Refreshed state; inspect it before retrying.';
     else if (!response.ok) message = 'Action was not confirmed. Inspect refreshed state before retrying.';
     else if (['open_decision', 'resolve_decision'].includes(action)) message = 'Decision recorded. Existing instruction pins and capability limits remain authoritative.';
-    else message = ['ready', 'resume'].includes(action) ? 'Task is ready. Use the workflow queue to start or continue approved work.' : 'Action applied. Active execution stops after ownership revocation is observed.';
+    else message = ['ready', 'resume'].includes(action) ? 'Task is ready. Use the workflow queue to start or continue approved work.' : 'Action applied. Worker shutdown is not confirmed; inspect execution evidence before restarting work.';
   } catch (_) {
     message = 'Action outcome unknown. Inspect refreshed state before retrying.';
   } finally {
