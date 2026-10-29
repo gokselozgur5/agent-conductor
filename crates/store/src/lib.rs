@@ -16,6 +16,8 @@ use tokio::sync::Mutex;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+mod auxiliary;
+pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
 mod inventory;
 mod usage;
 pub use inventory::{InventoryKind, InventoryRow};

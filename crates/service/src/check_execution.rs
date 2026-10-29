@@ -44,6 +44,17 @@ impl<C: Clock> PersistentControlService<C> {
             let _guard = self.mutations.lock().await;
             self.check_context(execution_token, check_id).await?
         };
+        let definition = serde_json::to_vec(&before.definition)
+            .map_err(|_| invalid("check definition encoding failed"))?;
+        let invocation = self
+            .begin_auxiliary(
+                &before.task,
+                agent_conductor_store::AuxiliaryKind::Check,
+                &before.source.0,
+                &workspace.destination,
+                &definition,
+            )
+            .await?;
         let receipt = execute_check(
             &workspace.source,
             &workspace.inventory,
@@ -55,6 +66,10 @@ impl<C: Clock> PersistentControlService<C> {
         )
         .await
         .map_err(|_| invalid("required check capture or isolation failed"))?;
+        if receipt.outcome == CheckOutcome::InfrastructureError {
+            return Err(invalid("check process settlement is uncertain"));
+        }
+        self.finish_auxiliary(&invocation).await?;
         let _guard = self.mutations.lock().await;
         let after = self.check_context(execution_token, check_id).await?;
         if before.task.version != after.task.version

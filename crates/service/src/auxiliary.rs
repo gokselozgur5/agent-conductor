@@ -1,0 +1,93 @@
+//! Trusted auxiliary ownership shared by checks and independent review.
+use crate::{Clock, PersistentControlService};
+use agent_conductor_domain::Task;
+use agent_conductor_store::{AuxiliaryKind, AuxiliaryPreparation, EffectAudit, StoreError};
+use sha2::{Digest, Sha256};
+use std::path::Path;
+use uuid::Uuid;
+
+impl<C: Clock> PersistentControlService<C> {
+    pub(super) async fn begin_review_auxiliary(
+        &self,
+        task: &Task,
+        packet: &conductor_runtime::ResumePacket,
+        source: &str,
+        artifacts: &Path,
+    ) -> Result<AuxiliaryPreparation, StoreError> {
+        let definition = serde_json::to_vec(packet).map_err(|_| invalid())?;
+        self.begin_auxiliary(
+            task,
+            AuxiliaryKind::Verifier,
+            source,
+            &artifacts.join("review-input"),
+            &definition,
+        )
+        .await
+    }
+
+    pub(super) async fn begin_auxiliary(
+        &self,
+        task: &Task,
+        kind: AuxiliaryKind,
+        source: &str,
+        workspace: &Path,
+        definition: &[u8],
+    ) -> Result<AuxiliaryPreparation, StoreError> {
+        let attempt = task.attempt.as_ref().ok_or_else(invalid)?;
+        let execution = self
+            .store
+            .execution_for_attempt(&attempt.id.0)
+            .await?
+            .ok_or_else(invalid)?;
+        let input = AuxiliaryPreparation {
+            invocation_id: Uuid::now_v7().to_string(),
+            task_id: task.id.0.clone(),
+            execution_token: execution.preparation.effect_token,
+            attempt_id: attempt.id.0.clone(),
+            task_version: i64::try_from(task.version).map_err(|_| invalid())?,
+            boot_generation: i64::try_from(self.boot_generation).map_err(|_| invalid())?,
+            kind,
+            source: source.into(),
+            definition_sha256: format!("{:x}", Sha256::digest(definition)),
+            workspace: workspace.to_str().ok_or_else(invalid)?.into(),
+        };
+        let id = Uuid::now_v7().to_string();
+        if !self
+            .store
+            .prepare_auxiliary_once(
+                &input,
+                EffectAudit {
+                    id: &id,
+                    actor_id: "conductor-runtime",
+                    correlation_id: &input.invocation_id,
+                    now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+                },
+            )
+            .await?
+        {
+            return Err(invalid());
+        }
+        Ok(input)
+    }
+
+    pub(super) async fn finish_auxiliary(
+        &self,
+        input: &AuxiliaryPreparation,
+    ) -> Result<(), StoreError> {
+        let id = Uuid::now_v7().to_string();
+        self.store
+            .settle_auxiliary(
+                input,
+                EffectAudit {
+                    id: &id,
+                    actor_id: "conductor-runtime",
+                    correlation_id: &input.invocation_id,
+                    now_ms: self.clock.read(self.boot_generation).wall_unix_ms,
+                },
+            )
+            .await
+    }
+}
+fn invalid() -> StoreError {
+    StoreError::Integrity("auxiliary invocation admission refused".into())
+}

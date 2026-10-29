@@ -71,6 +71,7 @@ impl<C: Clock> PersistentControlService<C> {
         if task.version != version
             || task.state.is_terminal()
             || self.store.has_unfenced_execution(task_id).await?
+            || self.store.has_pending_auxiliary(task_id).await?
         {
             return Err(invalid(
                 "continuation requires current nonterminal task and verified prior write fences",

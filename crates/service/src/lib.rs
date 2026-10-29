@@ -30,6 +30,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 #[cfg(unix)]
+mod auxiliary;
 mod check_execution;
 #[cfg(unix)]
 mod checkpoint;
@@ -505,11 +506,16 @@ impl<C: Clock> PersistentControlService<C> {
         if matches!(
             command.kind,
             CommandKind::Claim { .. } | CommandKind::RequeueExpired
-        ) && self
+        ) && (self
             .store
             .has_unfenced_execution(task_id)
             .await
             .map_err(store_error)?
+            || self
+                .store
+                .has_pending_auxiliary(task_id)
+                .await
+                .map_err(store_error)?)
         {
             return Err(ErrorBody::new(
                 ErrorCode::Validation,
@@ -2396,6 +2402,52 @@ mod effect_tests {
             state, "active",
             "expiry does not require maintenance to reject launch"
         );
+    }
+
+    #[tokio::test]
+    async fn pending_auxiliary_refuses_direct_claim_and_requeue_despite_writer_fence() {
+        use sqlx::Connection;
+        let (directory, store) = lifecycle_store().await;
+        let service =
+            PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0))
+                .await
+                .unwrap();
+        let (task, _) = claim_task(&service).await;
+        let mut connection = sqlx::SqliteConnection::connect(&format!(
+            "sqlite://{}",
+            directory.path().join("state.sqlite3").display()
+        ))
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO executions(effect_token,task_id,attempt_id,lease_epoch,runner_id,packet_json,packet_sha256,state,created_at_ms,updated_at_ms) SELECT token,task_id,attempt_id,lease_epoch,'fixture','{}','hash','fenced',0,0 FROM effect_intents").execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO auxiliary_invocations SELECT 'aux',task_id,effect_token,'{}',1,'pending',0,NULL FROM executions").execute(&mut connection).await.unwrap();
+        assert!(!store.has_unfenced_execution("task").await.unwrap());
+        for kind in [
+            CommandKind::RequeueExpired,
+            CommandKind::Claim {
+                attempt_id: AttemptId("next".into()),
+                worker: ActorId("worker".into()),
+                lease_duration_ms: 10,
+                worker_margin_ms: 1,
+                recovery_grace_ms: 5,
+            },
+        ] {
+            let command = lifecycle_command(
+                &task,
+                Actor {
+                    id: ActorId("operator".into()),
+                    role: ActorRole::Operator,
+                },
+                kind,
+                "blocked-aux",
+            );
+            assert!(
+                service
+                    .validate_execution_fence("task", &command)
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

@@ -547,6 +547,9 @@ impl<C: Clock> PersistentControlService<C> {
         let mut packet = worker_packet.clone();
         packet.contract.worker_id = verifier.into();
         packet.contract.adapter = identity(&plan.verifier);
+        let invocation = self
+            .begin_review_auxiliary(&before, &packet, source, artifacts)
+            .await?;
         let (review_root, baseline_context) =
             crate::workflow_review::prepare_review(artifacts, baseline, inventory, source)?;
         packet.contract.workspace = review_root;
@@ -576,6 +579,7 @@ impl<C: Clock> PersistentControlService<C> {
                 _ => "verifier execution failed",
             })
         })?;
+        self.finish_auxiliary(&invocation).await?;
         self.record_vendor_usage(&packet, "reviewer", &usage_invocation, &output.stdout)
             .await?;
         let candidate = interpret_vendor_output(&packet, &output)
