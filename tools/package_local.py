@@ -12,7 +12,7 @@ import subprocess
 from adapter_pins import accepted_pins
 
 REPO = Path(__file__).resolve().parents[1]
-BINARIES = ('conductor-daemon', 'conductorctl', 'conductor-runner')
+BINARIES = ('conductor-daemon', 'conductorctl', 'conductor-runner', 'conductor-check-sandbox')
 LAUNCHER = '''"""Run this bundle without rebuilding or locating an adapter template."""
 import os
 from pathlib import Path
