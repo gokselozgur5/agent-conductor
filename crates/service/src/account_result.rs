@@ -1,5 +1,6 @@
 //! Persistent account reports and imported source binding, without local PID claims.
 use crate::{Clock, PersistentControlService};
+use agent_conductor_domain::{ActorRole, Blocker, CommandKind, TaskState};
 use agent_conductor_store::{
     EffectAudit, ExecutionRecord, ExecutionState, ExecutionUpdate, StoreError,
 };
@@ -52,11 +53,10 @@ impl<C: Clock> PersistentControlService<C> {
         let packet = ResumePacket::decode(record.preparation.packet_json.as_bytes())
             .map_err(|_| invalid("account packet invalid"))?;
         if let Err(error) = self.validate_runtime_owner(&packet).await {
-            self.account_update(
+            self.block_account_terminal_locked(
                 &record,
-                ExecutionUpdate::Blocked {
-                    reason: "account report lost current ownership".into(),
-                },
+                &packet,
+                "account report lost current ownership",
             )
             .await?;
             return Err(error);
@@ -67,11 +67,10 @@ impl<C: Clock> PersistentControlService<C> {
             stderr,
         }) = event
         else {
-            self.account_update(
+            self.block_account_terminal_locked(
                 &record,
-                ExecutionUpdate::Blocked {
-                    reason: "account terminal outcome unknown".into(),
-                },
+                &packet,
+                "account terminal outcome unknown",
             )
             .await?;
             return Err(invalid("account terminal outcome unknown"));
@@ -82,13 +81,8 @@ impl<C: Clock> PersistentControlService<C> {
             stderr,
         };
         let Ok(candidate) = conductor_runtime::interpret_vendor_output(&packet, &output) else {
-            self.account_update(
-                &record,
-                ExecutionUpdate::Blocked {
-                    reason: "account candidate refused".into(),
-                },
-            )
-            .await?;
+            self.block_account_terminal_locked(&record, &packet, "account candidate refused")
+                .await?;
             return Err(invalid("account candidate refused"));
         };
         let record = self
@@ -107,6 +101,45 @@ impl<C: Clock> PersistentControlService<C> {
             packet,
             candidate,
         })
+    }
+
+    // Caller holds the mutation lock. Persist uncertainty before changing task
+    // presentation; restart reconciliation also covers a crash between writes.
+    pub(super) async fn block_account_terminal_locked(
+        &self,
+        record: &ExecutionRecord,
+        packet: &ResumePacket,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        self.account_update(
+            record,
+            ExecutionUpdate::Blocked {
+                reason: reason.into(),
+            },
+        )
+        .await?;
+        let task = self.workflow_task(&packet.contract.task_id).await?;
+        if !matches!(
+            task.state,
+            TaskState::Claimed | TaskState::Running | TaskState::Verifying
+        ) || !task.attempt.as_ref().is_some_and(|attempt| {
+            attempt.id.0 == packet.contract.attempt_id
+                && attempt.lease.epoch == packet.contract.lease_epoch
+        }) {
+            return Ok(());
+        }
+        self.workflow_command_locked(
+            &task.id.0,
+            "conductor-account-result",
+            ActorRole::System,
+            CommandKind::Block { blocker: Blocker {
+                kind: "account_terminal_failed".into(),
+                detail: "account worker ended without an admissible candidate".into(),
+                resume_when: "reconcile the unresolved account execution before authorizing another attempt".into(),
+            }},
+            "account terminal result unavailable or refused",
+        ).await?;
+        Ok(())
     }
 
     async fn drain_account_terminal(

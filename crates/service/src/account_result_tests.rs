@@ -283,6 +283,9 @@ async fn account_result_malformed_terminal_preserves_unresolved_execution() {
     assert!(record.account_result.is_none());
     assert!(record.process.is_none());
     assert!(f.store.has_unfenced_execution("task").await.unwrap());
+    let task = f.service.workflow_task("task").await.unwrap();
+    assert_eq!(task.state, TaskState::Blocked);
+    assert_eq!(task.blocker.unwrap().kind, "account_terminal_failed");
     worker.kill().await.unwrap();
     worker.wait().await.unwrap();
 }
@@ -321,4 +324,46 @@ async fn assert_account_import_binding(
         .execute(&mut connection)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn account_result_failure_preserves_operator_stop() {
+    for command in [CommandKind::Pause, CommandKind::Cancel] {
+        let f = account_service_fixture().await;
+        fs::write(f.packet.contract.workspace.join("finish"), b"done").unwrap();
+        let address = account_result_address(&f);
+        let mut worker = account_result_worker(&address.path).await;
+        let connection = account_result_release(&f, &address).await;
+        f.service.workflow_command_locked(
+            "task", "operator", ActorRole::Operator, command, "operator stop",
+        ).await.unwrap();
+        let before = f.store.task("task").await.unwrap().unwrap().aggregate_json;
+        assert!(f.service.await_account_execution(&f.token, connection).await.is_err());
+        assert_eq!(f.store.task("task").await.unwrap().unwrap().aggregate_json, before);
+        assert_eq!(f.store.execution(&f.token).await.unwrap().unwrap().state,
+            agent_conductor_store::ExecutionState::Blocked);
+        worker.kill().await.unwrap();
+        worker.wait().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn account_result_failure_does_not_block_a_newer_attempt() {
+    let f = account_service_fixture().await;
+    fs::write(f.packet.contract.workspace.join("finish"), b"done").unwrap();
+    let address = account_result_address(&f);
+    let mut worker = account_result_worker(&address.path).await;
+    let connection = account_result_release(&f, &address).await;
+    let mut db = SqliteConnection::connect(&format!(
+        "sqlite://{}", f.directory.path().join("state.sqlite3").display(),
+    )).await.unwrap();
+    // Simulate a stale terminal report after the authoritative attempt changed.
+    sqlx::query("UPDATE tasks SET aggregate_json=json_set(aggregate_json,'$.attempt.id','newer-attempt','$.attempt.lease.epoch',2) WHERE id='task'")
+        .execute(&mut db).await.unwrap();
+    let before = f.store.task("task").await.unwrap().unwrap().aggregate_json;
+    assert!(f.service.await_account_execution(&f.token, connection).await.is_err());
+    assert_eq!(f.store.task("task").await.unwrap().unwrap().aggregate_json, before);
+    assert!(f.store.has_unfenced_execution("task").await.unwrap());
+    worker.kill().await.unwrap();
+    worker.wait().await.unwrap();
 }
