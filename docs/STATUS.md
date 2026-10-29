@@ -1,5 +1,9 @@
 # Status
 
+For the current requirement-by-requirement delivery gaps, see
+[Delivery acceptance audit](DELIVERY_ACCEPTANCE.md). Later sections retain
+historical evidence and must not be read as current feature inventories.
+
 ## Current result
 
 Draft [PR #90](https://github.com/gokselozgur5/agent-conductor/pull/90), tracked by
