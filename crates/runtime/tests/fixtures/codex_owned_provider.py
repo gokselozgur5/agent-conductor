@@ -9,6 +9,8 @@ import time
 
 home = Path(sys.argv[1])
 home.mkdir(mode=0o700)
+delay = int(sys.argv[3])
+assert delay in (0, 35)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -24,6 +26,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         step = Handler.step
         assert step <= 2
         (home / f'request-{step}.json').write_bytes(raw)
+        if step == 1 and delay:
+            started = time.monotonic()
+            time.sleep(delay)
+            (home / 'idle-delay.json').write_text(json.dumps({'elapsed_seconds': time.monotonic() - started}))
         body = json.loads(raw)
         if step:
             outputs = [v for v in body['input'] if v.get('type') == 'function_call_output'

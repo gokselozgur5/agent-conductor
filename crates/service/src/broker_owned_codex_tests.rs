@@ -5,11 +5,21 @@ use tokio::io::AsyncBufReadExt;
 #[tokio::test]
 #[ignore = "requires pinned Codex0.163.0; service owns actual vendor process"]
 async fn pinned_codex_runs_through_owned_vendor_supervision() {
+    run_owned_codex(0).await;
+}
+
+#[tokio::test]
+#[ignore = "requires pinned Codex0.163.0; real model idle exceeds 30 seconds"]
+async fn pinned_codex_survives_owned_idle_beyond_frame_budget() {
+    run_owned_codex(35).await;
+}
+
+async fn run_owned_codex(delay: u64) {
     let mut setup = native_launch_setup(false).await;
     let evidence = PathBuf::from(std::env::var_os("CONDUCTOR_CODEX_EVIDENCE").unwrap());
     fs::create_dir(&evidence).unwrap();
     let home = evidence.join("home");
-    let mut provider = start_owned_provider(&home, &evidence).await;
+    let mut provider = start_owned_provider(&home, &evidence, delay).await;
     let prepared = prepare_owned_codex(&setup, &home).await;
     // Establish the launch ceiling after expensive executable validation.
     setup.launch.maximum_deadline_ms = continuous_millis().unwrap() + 60000;
@@ -24,7 +34,7 @@ async fn pinned_codex_runs_through_owned_vendor_supervision() {
     )
     .await
     .unwrap();
-    let deadline = continuous_millis().unwrap() + 45000;
+    let deadline = continuous_millis().unwrap() + 55000;
     let session = acknowledged
         .release(
             setup.store.clone(),
@@ -58,6 +68,11 @@ async fn pinned_codex_runs_through_owned_vendor_supervision() {
     assert_eq!(output.exit_code, Some(0));
     assert!(outcome.broker.is_ok());
     assert_owned_process_observations(&home);
+    if delay != 0 {
+        let proof: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join("idle-delay.json")).unwrap()).unwrap();
+        assert!(proof["elapsed_seconds"].as_f64().unwrap() >= 35.0);
+    }
     for bytes in [&output.stdout, &output.stderr] {
         assert!(!bytes.windows(token.len()).any(|w| w == token));
     }
@@ -82,7 +97,7 @@ async fn pinned_codex_runs_through_owned_vendor_supervision() {
     .unwrap();
 }
 
-async fn start_owned_provider(home: &Path, evidence: &Path) -> tokio::process::Child {
+async fn start_owned_provider(home: &Path, evidence: &Path, delay: u64) -> tokio::process::Child {
     let mut child = tokio::process::Command::new("/usr/bin/python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -90,6 +105,7 @@ async fn start_owned_provider(home: &Path, evidence: &Path) -> tokio::process::C
         ))
         .arg(home)
         .arg(std::env::var_os("CONDUCTOR_CODEX_BIN").unwrap())
+        .arg(delay.to_string())
         .env_clear()
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
