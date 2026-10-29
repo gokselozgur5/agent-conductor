@@ -14,7 +14,7 @@ and run through the workspace test command.
 | --- | --- | --- | --- |
 | During admission transaction before commit | Abrupt child exit at SQLite audit write | Same, separate role | Not host power loss |
 | Admission committed, before any capture or spawn | Abrupt child exit immediately after admission returns | Same, separate role | Exercises store admission, not daemon scheduling |
-| Capture/review-copy creation before launch binding | Synchronous failure and transactional no-launch controls | Same preparation refusal family | Dedicated abrupt filesystem-boundary control still required |
+| Capture/review-copy creation before launch binding | `conductor-capture-crash-check-v1`: partial copy, SIGSTOP/SIGKILL before binding | `conductor-capture-crash-verifier-v1`: same at review source copy | Both preserve uncertainty through two same-boot restarts; no automatic recovery claim |
 | Launch bound, native supervisor has not accepted launch | `auxiliary-unaccepted-check-v1` | `auxiliary-unaccepted-verifier-v1` | Controlled gate process exists; not a zero-OS-spawn claim; same-boot refusal only |
 | Native Ready before durable ACK | `auxiliary-preack-recovery-v1` | `auxiliary-verifier-preack-v1` | Controlled Ready relay, versions differ |
 | Durable ACK/release authorization before Release delivery | `auxiliary-postack-check-v1` | `auxiliary-postack-verifier-v1` | PID-preserving stdin relay; authorization is not delivery |
@@ -60,7 +60,7 @@ They do not erase either field to fit the no-ACK path. Both complete one
 continuation, with old settlement audited before replacement execution and no
 old-invocation result publication.
 
-Prioritize the remaining abrupt filesystem capture/review-copy boundary next.
+Use this matrix when auditing the remaining operational and release gates.
 Do not aggregate these short native controls into a seven-day run or describe
 synthetic host epochs as physical reboot acceptance. Full operational recovery,
 privacy, supported Linux hosts and release acceptance remain separate gates.
@@ -113,3 +113,26 @@ This is native orchestration evidence with controlled completion-write refusal,
 not an abrupt exit inside the publication transaction or physical host failure.
 The continuation re-runs work and verification; it does not promote the historical
 verdict directly to completion. Real model calls were used; spend was not measured.
+
+## Partial filesystem preparation before launch binding
+
+Two isolated native fixtures on frozen `89a4544` observe the first copied file,
+stop the owned daemon, verify the snapshot manifest and launch binding are absent,
+and then kill that daemon. The projects contain 512 inert fixture files to make
+copying observable; this adds no production failpoint. The stopped-process
+inspection proves the observed boundary rather than relying on polling timing.
+
+For both the check capture and verifier review copy, two same-boot restarts each
+observe 42 samples with the exact pending preparation, absent binding/process,
+zero recorded release and no replacement writer or result publication. The single
+partial file remains unchanged and no completed manifest appears. The verifier
+fixture preserves its preceding check publication. Independent SQLite verification
+checks integrity, admission authority/generation, ownership preservation, absence
+of completion and binary pins. Original project files remain unchanged, excluding
+Git metadata; all owned daemons stop. Real model calls were used.
+
+These fixtures live under `/Volumes/GOKSSD/codex/conductor-capture-crash-ROLE-v1`;
+`aux-capture-validation-manifest.json` under the local evidence directory pins
+the scripts, boundary observations, receipts and independent checks. This proves
+refusal for incomplete preparation; it does not claim automatic task recovery,
+physical reboot acceptance or every possible interrupted filesystem operation.

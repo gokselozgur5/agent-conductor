@@ -50,8 +50,13 @@ verdict survives daemon loss, exactly one continuation performs fresh checks and
 independent review, and one completion remains stable across restart. Original
 publications are preserved; this uses controlled completion-write refusal.
 
-Next acceptance work: complete the remaining abrupt filesystem boundary and operator
-recovery reporting; finish physical host recovery, native
+Native partial-copy interruption controls also pass for check and verifier
+preparation: incomplete copies and unbound ownership remain unchanged across two
+same-boot restarts, with no result publication or replacement worker. This is
+verified refusal, not automatic recovery.
+
+Next acceptance work: audit remaining operational recovery and release gates;
+finish physical host recovery, native
 endurance, privacy and supported-host/release checks. Keep the existing
 control-plane-only soak separate from full native/v1 acceptance. No automatic
 reboot, marker deletion, fabricated receipt or CI-policy bypass is authorized by
