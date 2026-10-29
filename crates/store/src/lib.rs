@@ -1192,3 +1192,8 @@ async fn persist_in_transaction(
         outcome_json: batch.outcome_json.clone(),
     })
 }
+
+mod file_broker;
+pub use file_broker::{FileBrokerBinding, FileBrokerStatus};
+#[cfg(test)]
+mod file_broker_tests;

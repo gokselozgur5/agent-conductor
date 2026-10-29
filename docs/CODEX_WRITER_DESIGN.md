@@ -187,3 +187,46 @@ This minimum port handles existing directories and text files. Directory creatio
 listing, deletion and binary editing remain explicit capability work; they are not
 silently supported. Store admission, completion receipts, restart reconciliation,
 proxy transport and native end-to-end acceptance remain the next integration work.
+
+## Durable operation state and result ordering
+
+Migration 26 adds immutable broker bindings and sequenced operation records.
+Registration binds the current recovery authority/generation, acknowledged
+wrapper invocation, execution, task/attempt/lease and a trusted root identity
+hash. New admission requires the matching active execution/lease/task projection;
+the runtime's continuous deadline still governs elapsed time. The database stores
+request/result digests and audit metadata, not file contents or request paths.
+It does not derive or attest OS confinement from a caller-supplied root hash.
+
+`register_file_broker` and `admit_file_operation` return true only for a new
+registration or admission. Identical replay returns false and must never execute
+the external effect again. Changed bindings/digests, sequence gaps, a preceding
+pending operation, stale ownership and closed brokers are refused. An operation
+is pending until its exact successful result is committed. Result recording may
+finish after the lease/task stops accepting new work, while the owning authority
+and generation remain current; this records prior effects, not new permission.
+Closure requires the exact completed sequence and no pending operation. Each
+transition and its audit append share a cancellation-owned SQLite transaction.
+
+`execute_recorded` holds the runtime gate through both the filesystem operation
+and trusted result persistence. A result-persistence failure or panic therefore
+cannot produce a clean revocation even if the file was already published. The
+legacy `execute` convenience method has no completion port and supplies no such
+durability claim; production integration must use the recorded path.
+
+Tests connect actual `BrokerFilesystem` writes to a real SQLite store through
+synchronous callbacks on a dedicated blocking task. The successful control
+persists intent before the file and result before clean closure. A deliberately
+failed completion audit preserves written bytes with a pending operation, refuses
+clean closure and grants no replay after reopening the database. Separate controls
+cover exact replay, scope/lease/task refusal, all four transaction audit failures,
+and deterministic future cancellation at each actual SQLite mutation. A runtime
+race control holds result persistence while revocation waits for its completion.
+
+These fixtures use synthetic acknowledged execution setup. Database reopen and
+new runtime generation checks are not abrupt process-death or physical power-loss
+acceptance. Pending work remains inspectable across generations and is never
+inferred complete from current file contents. Automatic reconciliation, a durable
+broker shutdown receipt, production transport, inventory/backup/continuation
+barriers and native adapter launch remain required before enabling this route.
+No execution fencing or task completion is changed by these records.

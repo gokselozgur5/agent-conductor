@@ -206,6 +206,20 @@ impl FileBrokerGate {
         admit: impl FnOnce(&BrokerIntent) -> Result<(), BrokerError>,
         apply: impl FnOnce(&BrokerRequest) -> Result<T, BrokerError>,
     ) -> Result<T, BrokerError> {
+        self.execute_recorded(request, admit, apply, |_, _| Ok(()))
+    }
+    /// Persist successful results under the same serialization lock before
+    /// returning or granting a clean revocation acknowledgement.
+    /// # Errors
+    /// Failed result persistence closes the capability and retains uncertainty,
+    /// even if the filesystem effect itself completed successfully.
+    pub fn execute_recorded<T>(
+        &self,
+        request: &BrokerRequest,
+        admit: impl FnOnce(&BrokerIntent) -> Result<(), BrokerError>,
+        apply: impl FnOnce(&BrokerRequest) -> Result<T, BrokerError>,
+        complete: impl FnOnce(&BrokerIntent, &T) -> Result<(), BrokerError>,
+    ) -> Result<T, BrokerError> {
         let intent = request.intent()?;
         self.check_open()?;
         let mut completed = self.completed.lock().map_err(|_| BrokerError::Uncertain)?;
@@ -220,6 +234,10 @@ impl FileBrokerGate {
         }
         self.check_open()?;
         if let Ok(value) = apply(request) {
+            if complete(&intent, &value).is_err() {
+                self.closed.store(true, Ordering::SeqCst);
+                return Err(BrokerError::Uncertain);
+            }
             *completed = request.sequence;
             self.uncertain.store(false, Ordering::SeqCst);
             Ok(value)

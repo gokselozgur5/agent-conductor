@@ -292,3 +292,40 @@ fn concurrent_duplicate_requests_admit_and_apply_exactly_once() {
     assert_eq!(admitted.load(Ordering::SeqCst), 1);
     assert_eq!(applied.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn revocation_waits_for_successful_result_persistence() {
+    let request = request();
+    let gate = Arc::new(gate(&request));
+    let (entered, entry) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    thread::scope(|scope| {
+        let executor = Arc::clone(&gate);
+        let operation = scope.spawn(move || {
+            executor.execute_recorded(
+                &request,
+                |_| Ok(()),
+                |_| Ok("applied"),
+                |_, value| {
+                    assert_eq!(*value, "applied");
+                    entered.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                },
+            )
+        });
+        entry.recv_timeout(Duration::from_secs(5)).unwrap();
+        gate.request_revocation();
+        let revoker = Arc::clone(&gate);
+        let (finished, finish) = mpsc::channel();
+        let revocation = scope.spawn(move || {
+            let result = revoker.revoke();
+            finished.send(()).unwrap();
+            result
+        });
+        assert!(finish.recv_timeout(Duration::from_millis(20)).is_err());
+        release.send(()).unwrap();
+        assert_eq!(operation.join().unwrap(), Ok("applied"));
+        assert_eq!(revocation.join().unwrap(), Ok(1));
+    });
+}

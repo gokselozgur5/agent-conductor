@@ -70,82 +70,97 @@ impl BrokerFilesystem {
         request: &BrokerRequest,
         admit: impl FnOnce(&BrokerIntent) -> Result<(), BrokerError>,
     ) -> Result<BrokerFileResult, BrokerError> {
-        self.gate.execute(request, admit, |request| {
-            self.check_root()?;
-            match &request.operation {
-                BrokerOperation::ReadText { path } => {
-                    let (parent, name) = self.parent(path)?;
-                    let (contents, _) = read(&parent, name)?.ok_or(BrokerError::Refused)?;
-                    let sha256 = hash(contents.as_bytes());
-                    Ok(BrokerFileResult::Text { contents, sha256 })
-                }
-                BrokerOperation::WriteText {
-                    path,
-                    expected_sha256,
-                    contents,
-                } => {
-                    let (parent, name) = self.parent(path)?;
-                    let previous = read(&parent, name)?;
-                    let mode = match (&previous, expected_sha256) {
-                        (None, None) => 0o600,
-                        (Some((bytes, mode)), Some(expected))
-                            if hash(bytes.as_bytes()) == *expected =>
-                        {
-                            *mode
-                        }
-                        _ => return Err(BrokerError::Refused),
-                    };
-                    self.written_bytes
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |total| {
-                            total
-                                .checked_add(contents.len() as u64)
-                                .filter(|next| *next <= WRITE_BUDGET)
-                        })
-                        .map_err(|_| BrokerError::Refused)?;
-                    let staging = format!(
-                        ".conductor-broker-{}-{}",
-                        request.scope.invocation_id, request.sequence
-                    );
-                    let fd = openat(
-                        &parent,
-                        staging.as_str(),
-                        OFlag::O_WRONLY
-                            | OFlag::O_CREAT
-                            | OFlag::O_EXCL
-                            | OFlag::O_NOFOLLOW
-                            | OFlag::O_CLOEXEC,
-                        Mode::S_IRUSR | Mode::S_IWUSR,
-                    )
-                    .map_err(|_| BrokerError::Uncertain)?;
-                    let mut file = File::from(fd);
-                    file.write_all(contents.as_bytes())
-                        .map_err(|_| BrokerError::Uncertain)?;
-                    file.set_permissions(std::fs::Permissions::from_mode(mode))
-                        .map_err(|_| BrokerError::Uncertain)?;
-                    file.sync_all().map_err(|_| BrokerError::Uncertain)?;
-                    // Recheck observed preconditions. This detects changes; it is
-                    // not a compare-and-swap against hostile external writers.
-                    if read(&parent, name)? != previous {
-                        return Err(BrokerError::Uncertain);
-                    }
-                    self.check_root()?;
-                    if expected_sha256.is_none() {
-                        // Atomic create-only publication cannot replace a racer.
-                        linkat(&parent, staging.as_str(), &parent, name, AtFlags::empty())
-                            .map_err(|_| BrokerError::Uncertain)?;
-                        unlinkat(&parent, staging.as_str(), UnlinkatFlags::NoRemoveDir)
-                            .map_err(|_| BrokerError::Uncertain)?;
-                    } else {
-                        renameat(&parent, staging.as_str(), &parent, name)
-                            .map_err(|_| BrokerError::Uncertain)?;
-                    }
-                    parent.sync_all().map_err(|_| BrokerError::Uncertain)?;
-                    Ok(BrokerFileResult::Written {
-                        sha256: hash(contents.as_bytes()),
-                    })
-                }
+        self.execute_recorded(request, admit, |_, _| Ok(()))
+    }
+
+    /// Execute and persist the result before acknowledging or permitting closure.
+    /// # Errors
+    /// Admission, file or completion failures preserve uncertainty and close access.
+    pub fn execute_recorded(
+        &self,
+        request: &BrokerRequest,
+        admit: impl FnOnce(&BrokerIntent) -> Result<(), BrokerError>,
+        complete: impl FnOnce(&BrokerIntent, &BrokerFileResult) -> Result<(), BrokerError>,
+    ) -> Result<BrokerFileResult, BrokerError> {
+        self.gate
+            .execute_recorded(request, admit, |request| self.apply(request), complete)
+    }
+
+    fn apply(&self, request: &BrokerRequest) -> Result<BrokerFileResult, BrokerError> {
+        self.check_root()?;
+        match &request.operation {
+            BrokerOperation::ReadText { path } => {
+                let (parent, name) = self.parent(path)?;
+                let (contents, _) = read(&parent, name)?.ok_or(BrokerError::Refused)?;
+                let sha256 = hash(contents.as_bytes());
+                Ok(BrokerFileResult::Text { contents, sha256 })
             }
-        })
+            BrokerOperation::WriteText {
+                path,
+                expected_sha256,
+                contents,
+            } => {
+                let (parent, name) = self.parent(path)?;
+                let previous = read(&parent, name)?;
+                let mode = match (&previous, expected_sha256) {
+                    (None, None) => 0o600,
+                    (Some((bytes, mode)), Some(expected))
+                        if hash(bytes.as_bytes()) == *expected =>
+                    {
+                        *mode
+                    }
+                    _ => return Err(BrokerError::Refused),
+                };
+                self.written_bytes
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |total| {
+                        total
+                            .checked_add(contents.len() as u64)
+                            .filter(|next| *next <= WRITE_BUDGET)
+                    })
+                    .map_err(|_| BrokerError::Refused)?;
+                let staging = format!(
+                    ".conductor-broker-{}-{}",
+                    request.scope.invocation_id, request.sequence
+                );
+                let fd = openat(
+                    &parent,
+                    staging.as_str(),
+                    OFlag::O_WRONLY
+                        | OFlag::O_CREAT
+                        | OFlag::O_EXCL
+                        | OFlag::O_NOFOLLOW
+                        | OFlag::O_CLOEXEC,
+                    Mode::S_IRUSR | Mode::S_IWUSR,
+                )
+                .map_err(|_| BrokerError::Uncertain)?;
+                let mut file = File::from(fd);
+                file.write_all(contents.as_bytes())
+                    .map_err(|_| BrokerError::Uncertain)?;
+                file.set_permissions(std::fs::Permissions::from_mode(mode))
+                    .map_err(|_| BrokerError::Uncertain)?;
+                file.sync_all().map_err(|_| BrokerError::Uncertain)?;
+                // Recheck observed preconditions. This detects changes; it is
+                // not a compare-and-swap against hostile external writers.
+                if read(&parent, name)? != previous {
+                    return Err(BrokerError::Uncertain);
+                }
+                self.check_root()?;
+                if expected_sha256.is_none() {
+                    // Atomic create-only publication cannot replace a racer.
+                    linkat(&parent, staging.as_str(), &parent, name, AtFlags::empty())
+                        .map_err(|_| BrokerError::Uncertain)?;
+                    unlinkat(&parent, staging.as_str(), UnlinkatFlags::NoRemoveDir)
+                        .map_err(|_| BrokerError::Uncertain)?;
+                } else {
+                    renameat(&parent, staging.as_str(), &parent, name)
+                        .map_err(|_| BrokerError::Uncertain)?;
+                }
+                parent.sync_all().map_err(|_| BrokerError::Uncertain)?;
+                Ok(BrokerFileResult::Written {
+                    sha256: hash(contents.as_bytes()),
+                })
+            }
+        }
     }
 
     /// Close admission immediately; does not acknowledge completion of writes.
