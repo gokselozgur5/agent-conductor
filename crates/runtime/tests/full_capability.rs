@@ -107,8 +107,127 @@ async fn frozen_launch_checks_vendor_identity_and_retains_packet() {
     assert_full_group_stop_receipt(launch.clone()).await;
     assert_full_profile_never_starts_without_ack(launch).await;
     assert_account_native_entry(&pin, &packet).await;
+    assert_account_socket_entry(&pin, &packet, "refused").await;
+    assert_account_socket_entry(&pin, &packet, "accepted").await;
+    assert_account_socket_entry(&pin, &packet, "expired").await;
+    assert_account_socket_entry(&pin, &packet, "wrong-pin").await;
     pin.version = "changed".into();
     assert!(conductor_runtime::full_capability_launch(&pin, &packet).is_err());
+}
+
+async fn assert_account_socket_entry(
+    pin: &VendorPin,
+    packet: &conductor_runtime::ResumePacket,
+    decision: &str,
+) {
+    use conductor_runtime::{
+        AccountChannelAddress, AccountNativeLaunch, AccountRunnerConnection, RunnerConnectionError,
+        RunnerEvent, RunnerProcessIdentity,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runner.sock");
+    let mut request = AccountNativeLaunch {
+        pin: pin.clone(),
+        packet: packet.clone(),
+    };
+    request.packet.contract.attempt_id = format!("account-socket-{decision}");
+    if decision == "wrong-pin" {
+        request.pin.executable_sha256 = "a".repeat(64);
+    }
+    let digest = request.packet.sha256().unwrap();
+    let identity = RunnerProcessIdentity {
+        authority_id: "a".repeat(64),
+        packet_sha256: digest.clone(),
+        wrapper_identity: "12345678-1234-1234-1234-123456789abc".into(),
+    };
+    let uid = nix::unistd::geteuid().as_raw();
+    let mut child = start_account_receiver(&path, &identity).await;
+    let acknowledged = std::sync::atomic::AtomicBool::new(false);
+    let connection = AccountRunnerConnection::connect(
+        &AccountChannelAddress {
+            path,
+            worker_uid: uid,
+            coordinator_uid: uid,
+            packet_sha256: digest,
+        },
+        &request,
+        |ack| {
+            request.packet.verify_ack(&ack).unwrap();
+            acknowledged.store(true, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                match decision {
+                    "accepted" => Ok(conductor_runtime::continuous_millis().unwrap() + 1000),
+                    "expired" => Ok(conductor_runtime::continuous_millis().unwrap() - 1),
+                    _ => Err(RunnerConnectionError::Persistence),
+                }
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        acknowledged.load(std::sync::atomic::Ordering::SeqCst),
+        decision != "wrong-pin"
+    );
+    let release = decision == "accepted";
+    if release {
+        let mut connection = connection.unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(3), connection.event())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            RunnerEvent::Finished {
+                exit_code: Some(0),
+                ..
+            }
+        ));
+        drop(connection);
+    } else if decision == "wrong-pin" {
+        assert!(connection.is_err());
+    } else {
+        assert!(matches!(
+            connection,
+            Err(RunnerConnectionError::Persistence)
+        ));
+    }
+    let status = tokio::time::timeout(Duration::from_secs(3), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.success(), release);
+    if !release && decision != "wrong-pin" {
+        let receipt = conductor_runtime::read_unstarted_receipt(&request.packet, &identity);
+        assert!(receipt.is_ok());
+    }
+}
+
+async fn start_account_receiver(
+    path: &std::path::Path,
+    identity: &conductor_runtime::RunnerProcessIdentity,
+) -> tokio::process::Child {
+    let uid = nix::unistd::geteuid().as_raw();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_conductor-runner"))
+        .args([
+            "--account-listen",
+            path.to_str().unwrap(),
+            &uid.to_string(),
+            &identity.argument().unwrap(),
+        ])
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !path.exists() {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    child
 }
 
 async fn assert_account_native_entry(pin: &VendorPin, packet: &conductor_runtime::ResumePacket) {
