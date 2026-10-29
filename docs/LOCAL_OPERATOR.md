@@ -222,3 +222,23 @@ The remaining arguments and authorization rules are identical to `tools/conducto
 The manifest records whether packaging source was dirty and hashes all shipped
 files. Use a clean committed source and separately validate the actual workflow
 before handing a bundle to an operator.
+
+The host-local release bundle was exercised through its own launcher with two
+linked native tasks: Claude wrote each task, isolated checks passed, and distinct
+Codex reviewers accepted both outputs. The second task consumed the first task's
+exact accepted source identity. Independent SQLite/file verification confirmed
+one completion per task, four settled auxiliary invocations, both fenced writers,
+unchanged original files and 42 healthy invariant samples. A stopped/start/read/stop
+rehearsal preserved task aggregates, executions, publications and dispatch outcomes.
+The bundle's 26 shipped files retained their manifest hashes. Evidence is retained
+privately as `operator-bundle-native-v2/receipt.json` and
+`operator-bundle-native-v2/independent-verification.json`.
+
+The earlier debug bundle is not accepted: its second verifier failed during
+startup, leaving unresolved auxiliary ownership. A process sample observed
+executable SHA-256 validation; that sample does not establish the sole cause of
+the failure. Its extended observation, failure and owned-process cleanup records
+are preserved separately; no pending state was cleared or upgraded. The release
+exercise used a fresh state and project, not a repaired or relabelled debug run.
+Use release binaries for the operator workflow. This two-task local exercise does
+not establish native Codex writing, Linux isolation, full endurance or complete v1.

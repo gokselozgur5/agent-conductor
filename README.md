@@ -9,8 +9,8 @@ It does not trust a conversation to remain alive and it does not accept a worker
 Build once, initialize a private runtime for a committed Git project, then run it:
 
 ```sh
-cargo build --workspace
-./tools/conductor init --project /absolute/path/to/project
+cargo build --workspace --release
+./tools/conductor init --bin-dir "$PWD/target/release" --project /absolute/path/to/project
 ./tools/conductor run --dispatch
 ```
 
