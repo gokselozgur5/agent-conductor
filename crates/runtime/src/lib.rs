@@ -101,3 +101,6 @@ pub use auxiliary_runner::*;
 mod auxiliary_client;
 #[cfg(unix)]
 pub use auxiliary_client::*;
+
+mod file_broker;
+pub use file_broker::*;

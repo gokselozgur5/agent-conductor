@@ -106,3 +106,40 @@ continues to apply to command-capable workers.
 The first engineering step is the versioned broker capability and revocation
 contract, with a minimal synthetic read/write/proxy race harness. Do not enable
 Codex writing by changing the vendor enum check or copying Claude's fence label.
+
+## Implemented protocol and revocation primitive
+
+`crates/runtime/src/file_broker.rs` now defines strict version-1 scope/request
+types and a serial in-process capability gate. Scope binds authority, boot
+generation, invocation UUID, task, attempt and lease epoch. Requests use exact
+monotonic sequence numbers, at most 100,000 operations, a 1 MiB encoded frame
+limit, 256 KiB text writes and lexical relative paths. Write replacement requires
+an expected digest; absent digest means create-only. Actual filesystem enforcement
+of that precondition is the next trusted port, not implemented by the gate.
+
+The gate constructs a content-bound intent digest, invokes the trusted admission
+port, rechecks revocation/deadline, then invokes the synchronous operation port.
+Only successful completion advances the sequence. Concurrent duplicates cannot
+obtain two admissions. An admission error, failed/partial operation, interrupted
+admission or panic cannot produce a clean revocation acknowledgement. No payload
+type implements Debug; fixed errors omit paths and file contents.
+
+Revocation requests immediately close admission. Acknowledgement waits for an
+in-flight synchronous operation to finish; queued requests are refused. A stalled
+port can prevent acknowledgement indefinitely. The future wrapper must isolate
+that wait from its responsive control loop and report uncertainty on timeout,
+never assume that timeout stopped the write. Ports must not retain write access
+or spawn deferred work. This requirement is not enforceable by a generic Rust
+callback type and must be proved for the concrete broker implementation.
+
+Tests cover strict parsing/bounds, admission-before-effect, exact-once concurrent
+duplicates, stale scope/replay refusal, revocation during admission, revocation
+during a real temporary-file write, retained partial-write failure, expiry and
+panic poisoning. Port callbacks and intent markers are synthetic; these are not
+SQLite durability, process-death, proxy confinement or native Codex acceptance.
+No production launcher uses the gate yet and Codex writer admission stays closed.
+
+Next: connect concrete durable intent admission and root-scoped file operations
+to this primitive, then the private broker/proxy transport. Physical path races,
+symlinks/hardlinks, filesystem interruption, orphan proxy and actual adapter
+negative controls remain required before granting a write capability.
