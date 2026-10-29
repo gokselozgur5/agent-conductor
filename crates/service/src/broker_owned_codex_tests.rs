@@ -4,18 +4,19 @@ use tokio::io::AsyncBufReadExt;
 
 #[tokio::test]
 #[ignore = "requires pinned Codex0.163.0; service owns actual vendor process"]
-async fn pinned_codex_runs_through_owned_vendor_supervision() {
+async fn pinned_codex_runs_through_service_vendor_supervision() {
     run_owned_codex(0).await;
 }
 
 #[tokio::test]
 #[ignore = "requires pinned Codex0.163.0; real model idle exceeds 30 seconds"]
-async fn pinned_codex_survives_owned_idle_beyond_frame_budget() {
+async fn pinned_codex_survives_service_idle_beyond_frame_budget() {
     run_owned_codex(35).await;
 }
 
 async fn run_owned_codex(delay: u64) {
-    let mut setup = native_launch_setup(false).await;
+    let (mut setup, service) = native_launch_setup_with_service(false).await;
+    grant_owned_codex_lease(&setup, &service).await;
     let evidence = PathBuf::from(std::env::var_os("CONDUCTOR_CODEX_EVIDENCE").unwrap());
     fs::create_dir(&evidence).unwrap();
     let home = evidence.join("home");
@@ -34,7 +35,10 @@ async fn run_owned_codex(delay: u64) {
     )
     .await
     .unwrap();
-    let deadline = continuous_millis().unwrap() + 55000;
+    let deadline = service
+        .validate_runtime_owner(prepared.packet())
+        .await
+        .unwrap();
     let session = acknowledged
         .release(
             setup.store.clone(),
@@ -47,14 +51,7 @@ async fn run_owned_codex(delay: u64) {
         .unwrap();
     let handoff: serde_json::Value = serde_json::from_str(session.proxy_handoff()).unwrap();
     let token = handoff["token"].as_str().unwrap().as_bytes();
-    let (_authority, lease) = tokio::sync::watch::channel(Some(deadline));
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(65),
-        Box::pin(session.run_vendor(prepared, lease, broker_owner_audit("owned-codex-close"))),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let outcome = drive_owned_codex(&service, session, prepared).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     provider.start_kill().unwrap();
     provider.wait().await.unwrap();
@@ -199,6 +196,61 @@ fn assert_owned_process_observations(home: &Path) {
                     .unwrap()
                     .starts_with("git")
             );
+        }
+    }
+}
+
+async fn grant_owned_codex_lease(
+    setup: &NativeLaunchSetup,
+    service: &PersistentControlService<FixedClock>,
+) {
+    let row = setup.store.task("task").await.unwrap().unwrap();
+    let task: Task = serde_json::from_str(&row.aggregate_json).unwrap();
+    service
+        .apply_row(
+            row,
+            lifecycle_command(
+                &task,
+                Actor {
+                    id: ActorId("worker".into()),
+                    role: ActorRole::Worker,
+                },
+                CommandKind::Heartbeat {
+                    attempt_id: AttemptId("attempt".into()),
+                    lease_epoch: 1,
+                    lease_duration_ms: 55000,
+                    worker_margin_ms: 0,
+                },
+                "codex-service-heartbeat",
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+async fn drive_owned_codex(
+    service: &PersistentControlService<FixedClock>,
+    session: crate::NativeBrokerSession,
+    prepared: conductor_runtime::PreparedBrokerVendor,
+) -> crate::BrokerVendorOutcome {
+    // Advance the injected service clock from real elapsed host time. A frozen
+    // test clock would manufacture lease extensions on every authority refresh.
+    let started = continuous_millis().unwrap();
+    let operation = tokio::time::timeout(
+        Duration::from_secs(65),
+        Box::pin(service.run_broker_vendor(
+            session,
+            prepared,
+            broker_owner_audit("owned-codex-close"),
+        )),
+    );
+    tokio::pin!(operation);
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = &mut operation => return result.unwrap().unwrap(),
+            _ = tick.tick() => service.clock.set(continuous_millis().unwrap() - started),
         }
     }
 }
