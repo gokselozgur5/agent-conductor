@@ -54,15 +54,39 @@ def parse_tag(command):
     return match.groups() if match else None
 
 
+def pid_field(text):
+    if not text.isascii() or not text.isdigit() or len(text) > 10:
+        return None
+    value = int(text)
+    return value if 0 < value <= 2**31 - 1 else None
+
+
 def runner_pids(inventory):
-    result = []
+    result = set()
     for line in inventory.splitlines():
         fields = line.strip().split(None, 1)
-        if len(fields) == 2 and fields[0].isdigit() and Path(fields[1]).name == 'conductor-runner':
-            result.append(int(fields[0]))
+        if len(fields) == 2 and Path(fields[1]).name == 'conductor-runner':
+            pid = pid_field(fields[0])
+            if pid is not None:
+                result.add(pid)
     if len(result) > 128:
         raise ValueError('too_many_runner_observations')
-    return result
+    return sorted(result)
+
+
+def discover_runner_pids(names, arguments):
+    # Host argv is only a bounded candidate hint. Never trust its line structure,
+    # tag or process name as a binding; each PID gets an independent fresh read.
+    result = set(runner_pids(names))
+    for line in arguments.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) == 2:
+            pid = pid_field(fields[0])
+            if pid is not None and parse_tag(fields[1]) is not None:
+                result.add(pid)
+                if len(result) > 128:
+                    raise ValueError('too_many_runner_observations')
+    return sorted(result)
 
 
 def bounded_column(name, limit):
@@ -153,12 +177,22 @@ def inspect(database, host=None):
     code, inventory = ps(['-axo', 'pid=,comm='])
     if code:
         raise ValueError('process_inventory_failed')
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ValueError('inventory_deadline')
+    code, argument_hints = ps(['-ww', '-axo', 'pid=,args='], min(5, remaining))
+    if code:
+        raise ValueError('process_discovery_failed')
+    named_candidates = set(runner_pids(inventory))
+    candidates = discover_runner_pids(inventory, argument_hints)
+    del inventory, argument_hints  # Never retain raw host command lines in reports.
     observations = []
     unscoped = 0
+    unconfirmed = 0
     vanished = 0
     changed = 0
     births = {}
-    for pid in runner_pids(inventory):
+    for pid in candidates:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ValueError('inventory_deadline')
@@ -176,7 +210,10 @@ def inspect(database, host=None):
             continue
         tag = parse_tag(command)
         if tag is None:
-            unscoped += 1
+            if pid in named_candidates:
+                unscoped += 1
+            else:
+                unconfirmed += 1
         else:
             observations.append((pid, tag))
             births[pid] = before
@@ -203,8 +240,9 @@ def inspect(database, host=None):
         stable.append(item)
     if time.monotonic() > deadline:
         raise ValueError('inventory_deadline')
-    return dict(version=2, authority_id=row[0], boot_generation=str(row[1]), observations=stable,
+    return dict(version=2, discovery='bounded_host_argv_candidates', authority_id=row[0], boot_generation=str(row[1]), observations=stable,
                 changed_process_observations=changed,
+                unconfirmed_candidate_observations=unconfirmed,
                 unscoped_runners_on_host=unscoped, unavailable_process_observations=vanished,
                 process_liveness_proven=False, fencing_proven=False,
                 trust='Forgeable command-line metadata and a later SQLite snapshot. Kernel start markers were equal across reads, but timestamps have finite resolution. Races, exec changes and PID reuse are still possible. Expected wrapper identity is durable intent, not proof of ACK or worker release. Reobserve contradictions; never signal a PID or grant lifecycle authority from this report.')

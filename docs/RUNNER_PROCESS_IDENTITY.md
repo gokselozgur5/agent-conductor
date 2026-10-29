@@ -32,14 +32,26 @@ now requires migration 18 as described below.
 python3 tools/inspect_runner_processes.py /absolute/path/to/state.sqlite3
 ```
 
-The tool reads `ps` executable names, then arguments for at most 128 processes
-named `conductor-runner`. Each subprocess read is bounded to 4 MiB/five seconds;
-the complete observation has a ten-second budget, including SQLite progress.
-The database opens read-only and must have a valid authority binding. Only tags
-for that namespace are correlated; other scopes' identifiers are not reported.
-Output contains allowlisted identities and classifications, never raw argv or
-process environments. Untagged/unreadable process counts are host observations
-and cannot be assigned to this database.
+The tool reads `ps` executable names and a bounded host-wide argument snapshot
+to discover candidate PIDs, including renamed processes with canonical Conductor
+tags. Names additionally retain visibility of ordinary untagged `conductor-runner`
+processes. The union is deduplicated and limited to 128 candidates. Each subprocess
+read is bounded to 4 MiB/five seconds; the complete observation has a ten-second
+budget, including SQLite progress. Discovery failure or excess candidates refuses
+the report rather than returning a silently partial success.
+
+The argument snapshot is only a hint: multiline argv can invent candidate lines.
+Each candidate receives a separate PID-specific argument read surrounded by native
+birth observations, and another birth check after database correlation. The hint's
+tag is never accepted as the observed binding. Raw host arguments are transient
+and discarded; they are never persisted or printed. The database opens read-only
+and must have a valid authority binding. Only tags for that namespace are
+correlated; other scopes' identifiers are not reported. Output contains allowlisted
+identities and classifications, never raw argv or process environments. Untagged,
+unconfirmed and unreadable candidate counts are host observations and cannot be
+assigned to this database. `unconfirmed_candidate_observations` counts discovery
+hints whose direct read has no canonical tag; the legacy unscoped counter remains
+limited to initially named runners.
 
 Classifications distinguish a matching record, a prepared record awaiting ACK,
 missing/ambiguous records, wrapper mismatch and an observed process with a fenced
@@ -232,3 +244,20 @@ publishing its proof; this classification does not establish a surviving worker.
 A contradictory recorded ACK still refuses a match. Legacy schemas and NULL
 expected identities remain explicitly unknown. These are optional version-2
 observations, not permission to signal, fence, release or retry any process.
+
+## Name-independent discovery acceptance
+
+An actual immutable runner copied under a different basename, and a second such
+runner whose launcher exits before observation, are both found through their tags
+and matching native birth markers. The former name-only implementation omits both
+in the same controlled comparison. Private synthetic intent databases remain
+unchanged by inspection; no packet or worker is released and the owned processes
+settle after their input pipes close. Tests also cover malformed PID fields,
+candidate deduplication and overflow, discovery failure, changed birth markers,
+misleading multiline discovery hints and private argument exclusion from reports.
+
+This expands candidate discovery, not lifecycle authority. Processes with stripped
+or malformed tags and non-wrapper descendants still require separate inventory
+and containment evidence. Arguments can be forged; an observed tagged process is
+not automatically a trusted runner. A matching marker does not pin an OS handle,
+and reparented-wrapper observation is not escaped-worker write-fencing acceptance.

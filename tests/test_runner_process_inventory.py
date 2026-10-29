@@ -40,10 +40,22 @@ class ProcessInventory(unittest.TestCase):
         for bad in ['{}', '[]', 'x' * 1025, json.dumps(dict(value, pid=True))]:
             self.assertEqual(check(bad), 'invalid_recorded_process')
 
-    def test_runner_names_handle_spaces_without_reading_other_arguments(self):
+    def test_runner_names_handle_spaces_and_bound_candidates(self):
         self.assertEqual(inventory.runner_pids('  12 /path with spaces/conductor-runner\n13 unrelated\n14 conductor-runner\n'), [12, 14])
         with self.assertRaisesRegex(ValueError, 'too_many_runner_observations'):
-            inventory.runner_pids('\n'.join(str(i) + ' conductor-runner' for i in range(129)))
+            inventory.runner_pids('\n'.join(str(i) + ' conductor-runner' for i in range(1, 130)))
+
+    def test_discovery_finds_renamed_tagged_candidates_and_deduplicates_pids(self):
+        names = '12 /path with spaces/conductor-runner\n13 unrelated\n'
+        arguments = '12 named ' + TAG + '\n14 /renamed binary ' + TAG + '\n15 untagged\n'
+        self.assertEqual(inventory.discover_runner_pids(names, arguments), [12, 14])
+        invalid = '\n'.join(pid + ' renamed ' + TAG for pid in ['0', '-1', '2147483648', '①', '999999999999999999999'])
+        self.assertEqual(inventory.discover_runner_pids('', invalid), [])
+        self.assertEqual(inventory.runner_pids('0 conductor-runner\n① conductor-runner'), [])
+        with self.assertRaisesRegex(ValueError, 'too_many_runner_observations'):
+            inventory.discover_runner_pids('', '\n'.join(str(pid) + ' renamed ' + TAG for pid in range(1, 130)))
+        with self.assertRaisesRegex(ValueError, 'too_many_runner_observations'):
+            inventory.discover_runner_pids('1 conductor-runner', '\n'.join(str(pid) + ' renamed ' + TAG for pid in range(2, 130)))
 
     def test_correspondence_is_scoped_and_never_issues_mutations(self):
         db = sqlite3.connect(':memory:')
@@ -136,6 +148,30 @@ class BirthObservation(unittest.TestCase):
         for bad in [0, -1, True, 2**32]:
             self.assertIsNone(process_birth.observe(bad))
 
+    def test_argument_snapshot_is_only_a_hint_and_private_text_is_not_reported(self):
+        import tempfile
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'db'
+            with sqlite3.connect(path) as db:
+                db.executescript('create table recovery_authority(singleton,authority_id); create table runtime_metadata(singleton,boot_generation); create table executions(task_id,attempt_id,lease_epoch,state,wrapper_identity,packet_sha256);')
+                db.execute('insert into recovery_authority values(1,?)', (SCOPE,))
+                db.execute('insert into runtime_metadata values(1,1)')
+            # A newline in someone else's argv can invent a candidate line. The
+            # direct PID read must independently confirm the tag, or discard it.
+            hints = '7 untrusted PRIVATE_HINT\n42 renamed ' + TAG
+            for command, expected in [('unrelated PRIVATE_ARGV', 0), ('renamed ' + TAG, 1)]:
+                with mock.patch.object(inventory, 'ps', side_effect=[(0, ''), (0, hints), (0, command)]), mock.patch.object(inventory, 'process_birth', return_value='stable'):
+                    report = inventory.inspect(path)
+                self.assertEqual(len(report['observations']), expected)
+                self.assertEqual(report['unconfirmed_candidate_observations'], 1 - expected)
+                self.assertEqual(report['unscoped_runners_on_host'], 0)
+                self.assertNotIn('PRIVATE_', json.dumps(report))
+                self.assertFalse(report['fencing_proven'])
+            with mock.patch.object(inventory, 'ps', side_effect=[(0, ''), (1, '')]):
+                with self.assertRaisesRegex(ValueError, 'process_discovery_failed'):
+                    inventory.inspect(path)
+
     def test_birth_change_during_argv_read_is_discarded(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
@@ -150,7 +186,7 @@ class BirthObservation(unittest.TestCase):
                                               (['old', 'old', 'new'], 0, 1),
                                               (['old', 'old', 'old'], 1, 0),
                                               ([None], 0, 0)]:
-                with mock.patch.object(inventory, 'ps', side_effect=[(0, '42 conductor-runner'), (0, TAG)]), mock.patch.object(inventory, 'process_birth', side_effect=starts):
+                with mock.patch.object(inventory, 'ps', side_effect=[(0, '42 conductor-runner'), (0, '42 renamed ' + TAG), (0, TAG)]), mock.patch.object(inventory, 'process_birth', side_effect=starts):
                     result = inventory.inspect(path)
                 self.assertEqual(len(result['observations']), expected)
                 self.assertEqual(result['changed_process_observations'], changed)
