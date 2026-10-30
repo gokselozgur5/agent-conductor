@@ -137,3 +137,59 @@ async fn objective_projection_and_legacy_creation_replay_preserve_original_ident
         .fetch_one(store.readers()).await.unwrap();
     assert_eq!(saved, legacy);
 }
+
+#[tokio::test]
+async fn blocker_free_text_is_redacted_in_task_response() {
+    let (directory, store) = lifecycle_store().await;
+    let service = PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0)).await.unwrap();
+    let ready = decision_task(service.handle(decision_request(
+        &Task::new(TaskId("task".into()), vec![]), CommandKind::MarkReady, "ready"
+    )).await.unwrap());
+    let secret = decision_canary();
+    let request = decision_request(&ready.task.aggregate,
+        CommandKind::Block { blocker: agent_conductor_domain::Blocker {
+            kind: "operator_input".into(), detail: format!("Failure {secret}"),
+            resume_when: format!("Replace {secret}"),
+        } }, "block");
+    let mut invalid = request.clone();
+    let Request::ApplyCommand { command, .. } = &mut invalid else { unreachable!() };
+    let CommandKind::Block { blocker } = &mut command.kind else { unreachable!() };
+    blocker.kind = "   ".into();
+    assert!(service.handle(invalid).await.is_err());
+    assert_eq!(serde_json::from_str::<Task>(&store.task("task").await.unwrap().unwrap().aggregate_json).unwrap().state, agent_conductor_domain::TaskState::Ready);
+    let mut outcome = decision_task(service.handle(request.clone()).await.unwrap());
+    let blocker = outcome.task.aggregate.blocker.as_ref().unwrap();
+    assert_eq!(blocker.kind, "operator_input");
+    assert_eq!(blocker.detail, "Failure [redacted]");
+    assert_eq!(blocker.resume_when, "Replace [redacted]");
+    assert!(decision_task(service.handle(request.clone()).await.unwrap()).replayed);
+    let mut changed = request.clone();
+    let Request::ApplyCommand { command, .. } = &mut changed else { unreachable!() };
+    let CommandKind::Block { blocker } = &mut command.kind else { unreachable!() };
+    blocker.detail.push_str("DifferentSecret");
+    assert!(service.handle(changed).await.is_err());
+    for sql in ["SELECT aggregate_json FROM tasks", "SELECT payload_json FROM audit_events", "SELECT outcome_json FROM command_idempotency"] {
+        let rows: Vec<String> = sqlx::query_scalar(sql).fetch_all(store.readers()).await.unwrap();
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| !row.contains(&secret)));
+    }
+    // Legacy reads sanitize presentation without rewriting historical evidence.
+    let blocker = outcome.task.aggregate.blocker.as_mut().unwrap();
+    blocker.detail = format!("Legacy detail {secret}");
+    blocker.resume_when = format!("Legacy resume {secret}");
+    let raw = serde_json::to_string(&outcome.task.aggregate).unwrap();
+    let legacy = serde_json::to_string(&outcome).unwrap();
+    let mut db = SqliteConnection::connect(&format!("sqlite:{}", directory.path().join("state.sqlite3").display())).await.unwrap();
+    sqlx::query("UPDATE tasks SET aggregate_json=? WHERE id='task'").bind(&raw).execute(&mut db).await.unwrap();
+    sqlx::query("UPDATE command_idempotency SET outcome_json=? WHERE idempotency_key='block'").bind(&legacy).execute(&mut db).await.unwrap();
+    for query in [Request::GetTask { task_id: "task".into() }, Request::ListTasks { project_id: None }, Request::ListTaskPage { project_id: None, after: None }, request] {
+        let value = serde_json::to_string(&service.handle(query).await.unwrap()).unwrap();
+        assert!(!value.contains(&secret));
+        assert!(value.contains("Legacy detail [redacted]"));
+        assert!(value.contains("Legacy resume [redacted]"));
+        assert!(value.contains("operator_input"));
+    }
+    assert_eq!(store.task("task").await.unwrap().unwrap().aggregate_json, raw);
+    let saved: String = sqlx::query_scalar("SELECT outcome_json FROM command_idempotency WHERE idempotency_key='block'").fetch_one(store.readers()).await.unwrap();
+    assert_eq!(saved, legacy);
+}
