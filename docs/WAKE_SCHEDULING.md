@@ -67,3 +67,25 @@ observed median wake time decrease from 805.6 to 34.6 ms and p95 from 3013.8 to
 are observations, not isolated cross-host performance guarantees. The 500 ms wake
 and 100 ms board p95 targets still failed; this change does not close performance
 acceptance. No durability or timing threshold was relaxed.
+
+## Cooperative maintenance discovery
+
+Inactive candidates may require no asynchronous I/O after the initial bulk read.
+Both discovery loops therefore consume Tokio cooperative budget before processing
+each candidate. Exhausted budget yields to other ready tasks outside mutation
+ownership; current-row revalidation and lifecycle decisions remain unchanged.
+This bounds uninterrupted candidate processing, not the bulk query's memory use
+or a single candidate's decoding cost.
+
+An initial local comparison with the same 10,000-task background, 80 event wakes,
+two paginated board readers and 300 watched files measured wake p95 42.52 ms
+and board p95 5.36/5.22 ms. All 80 deliveries were acknowledged, background task
+aggregates stayed unchanged and the watcher converged. This run met the existing
+500/100 ms targets. It uses synthetic plans and no native vendor workers; one
+local observation does not establish sustained or cross-host performance.
+
+A subsequent reverse comparison using the unchanged lock-scope-only binary
+again missed the targets: wake p95 1603.09 ms and board p95 195.31/165.33 ms.
+Both runs retained the same assertions, load generator and workload parameters.
+This supports the scheduling change's local effect while retaining the limits
+of sequential measurements on a shared host.
