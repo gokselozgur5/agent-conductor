@@ -1,4 +1,6 @@
 mod broker_candidate_failure;
+mod conversation;
+pub use conversation::ConversationAgent;
 pub use broker_candidate_failure::BrokerCandidateFailure;
 mod broker_candidate;
 pub use broker_candidate::BrokerCandidate;
@@ -129,6 +131,7 @@ pub struct PersistentControlService<C = SystemClock> {
     broker_preowner_cursor: Arc<Mutex<Option<String>>>,
     watcher_status: Arc<RwLock<WatcherStatus>>,
     observed_projects: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
+    conversation_agents: Arc<RwLock<std::collections::BTreeMap<String, ConversationAgent>>>,
 }
 
 impl<C: Clock> Clone for PersistentControlService<C> {
@@ -144,6 +147,7 @@ impl<C: Clock> Clone for PersistentControlService<C> {
             broker_preowner_cursor: Arc::clone(&self.broker_preowner_cursor),
             watcher_status: Arc::clone(&self.watcher_status),
             observed_projects: Arc::clone(&self.observed_projects),
+            conversation_agents: Arc::clone(&self.conversation_agents),
         }
     }
 }
@@ -229,6 +233,7 @@ impl<C: Clock> PersistentControlService<C> {
             broker_preowner_cursor: Arc::new(Mutex::new(None)),
             watcher_status: Arc::new(RwLock::new(WatcherStatus::Disabled)),
             observed_projects: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            conversation_agents: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         };
         for lease in startup.recovery_pending {
             let Some(row) = service.store.task(&lease.task_id).await? else {
