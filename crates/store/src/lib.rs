@@ -282,6 +282,13 @@ pub struct PersistedTask {
     pub aggregate_json: String,
 }
 
+/// Advisory lifecycle discovery data; callers must reload before mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCandidate {
+    pub id: String,
+    pub aggregate_json: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStartup {
     pub boot_generation: u64,
@@ -476,6 +483,22 @@ impl Store {
             .await?
         };
         Ok(rows.into_iter().map(task_from_row).collect())
+    }
+
+    /// Reads all aggregate-bearing tasks in the same order as `tasks(None)`,
+    /// without copying objective, authority or project metadata for discovery.
+    /// # Errors
+    /// Returns database errors. Aggregate validation remains the caller's job.
+    pub async fn task_candidates(&self) -> Result<Vec<TaskCandidate>, StoreError> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, aggregate_json FROM tasks WHERE aggregate_json IS NOT NULL ORDER BY priority DESC, id",
+        )
+        .fetch_all(&self.inner.readers)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, aggregate_json)| TaskCandidate { id, aggregate_json })
+            .collect())
     }
 
     /// Reads a bounded task page in immutable task-ID order, plus one sentinel.

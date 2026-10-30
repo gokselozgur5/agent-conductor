@@ -89,3 +89,16 @@ again missed the targets: wake p95 1603.09 ms and board p95 195.31/165.33 ms.
 Both runs retained the same assertions, load generator and workload parameters.
 This supports the scheduling change's local effect while retaining the limits
 of sequential measurements on a shared host.
+
+## Maintenance discovery projection
+
+Discovery reads only task IDs and aggregate JSON. It retains every aggregate-bearing
+row, the existing priority/ID order and the original aggregate bytes; no state or
+JSON-field filter may hide malformed domain aggregates. Active candidates still
+reload the full current row under mutation ownership. This reduces unnecessary
+metadata copying, but does not bound inventory size or establish latency targets.
+
+The local combined-load run for this projection acknowledged all 80 events and
+preserved the 10,000 background aggregates and final watcher snapshot. Wake p95
+was 1060.37 ms and board p95 was 102.75/120.85 ms: the existing targets still
+failed. Earlier runs varied substantially, so this is not a stable speedup claim.

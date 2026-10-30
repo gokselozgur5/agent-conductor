@@ -970,3 +970,62 @@ async fn usage_observations_are_immutable_idempotent_and_survive_restart() {
         1
     );
 }
+
+#[tokio::test]
+async fn maintenance_candidates_preserve_all_states_order_and_aggregate_bytes() {
+    let (_directory, store) = seeded_store().await;
+    store
+        .create_project(NewProject {
+            id: "other-project",
+            canonical_path: "/other",
+            filesystem_identity: "other",
+            git_common_dir_identity: None,
+            created_at_ms: 1,
+        })
+        .await
+        .unwrap();
+    let states = [
+        "backlog",
+        "ready",
+        "claimed",
+        "running",
+        "paused",
+        "verifying",
+        "blocked",
+        "completed",
+        "cancelled",
+    ];
+    for (index, state) in states.iter().enumerate() {
+        let id = format!("candidate-{index}");
+        // Valid JSON but not a valid domain aggregate must reach caller validation.
+        let aggregate = format!("{{ \"fixture\": {index} }}");
+        store
+            .create_task(NewTask {
+                id: &id,
+                project_id: if index % 2 == 0 {
+                    "other-project"
+                } else {
+                    "project-1"
+                },
+                objective: "metadata is not needed for discovery",
+                state,
+                priority: (index % 3) as i64,
+                authority_json: "{}",
+                aggregate_json: &aggregate,
+                created_at_ms: 1,
+            })
+            .await
+            .unwrap();
+    }
+    let full = store.tasks(None).await.unwrap();
+    let candidates = store.task_candidates().await.unwrap();
+    assert_eq!(candidates.len(), 10);
+    assert_eq!(candidates.first().unwrap().id, "task-1");
+    for (candidate, row) in candidates.iter().zip(&full) {
+        assert_eq!(candidate.id, row.id);
+        assert_eq!(
+            candidate.aggregate_json.as_bytes(),
+            row.aggregate_json.as_bytes()
+        );
+    }
+}
