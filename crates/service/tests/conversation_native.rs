@@ -609,3 +609,33 @@ async fn restart_and_replayed_routing_do_not_relaunch_delegated_work() {
     assert_eq!(drain(&service, &receiver).await, 0);
     assert_eq!(launches(root.path()), 2);
 }
+
+#[tokio::test]
+async fn delegation_to_a_recipient_without_a_profile_is_blocked_visibly() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, _service, _receiver) = delegated_room(root.path(), false).await;
+    assert_eq!(launches(root.path()), 1);
+    let messages = store.conversation_messages("room", 0).await.unwrap();
+    assert_eq!(messages.len(), 2);
+    let examination = store
+        .conversation_reply_examination(&messages[1].id)
+        .await
+        .unwrap();
+    assert_eq!(examination.unwrap().outcome, "authorized");
+    assert_eq!(
+        store
+            .conversation_message_status("shared-request")
+            .await
+            .unwrap(),
+        "replied"
+    );
+    // The worker's job exists as a blocked record: re-blocking is idempotent and
+    // queueing a launch for it is still refused because no profile exists.
+    store
+        .block_conversation_recipient(&messages[1].id, "worker", 9)
+        .await
+        .unwrap();
+    assert!(store.next_conversation_job().await.unwrap().is_none());
+    let pending = store.next_unadmitted_conversation_assignment().await;
+    assert!(pending.unwrap().is_none());
+}
