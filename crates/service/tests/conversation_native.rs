@@ -558,3 +558,34 @@ async fn delegated_worker_receives_the_stored_instruction_not_the_contract() {
     delegated_room(root.path(), true).await;
     assert_delegation_prompts(root.path());
 }
+
+#[tokio::test]
+async fn delegation_outcomes_and_the_supervisor_report_are_durable() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, _service, _receiver) = delegated_room(root.path(), true).await;
+    let messages = store.conversation_messages("room", 0).await.unwrap();
+    let outcome = |index: usize| {
+        let store = store.clone();
+        let id = messages[index].id.clone();
+        async move {
+            let row = store.conversation_reply_examination(&id).await.unwrap();
+            row.unwrap().outcome
+        }
+    };
+    assert_eq!(outcome(1).await, "authorized");
+    assert_eq!(outcome(2).await, "ordinary");
+    let assignment = store
+        .conversation_assignment(&messages[1].id, "worker")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(assignment.root_message_id, "shared-request");
+    assert_eq!(assignment.author_agent_id, "lead");
+    let lead_inbox = store
+        .pending_conversation_deliveries("room", "lead")
+        .await
+        .unwrap();
+    assert!(lead_inbox.iter().any(|d| d.message_id == messages[2].id
+        && d.kind == "information"
+        && d.reason == "report_to_supervisor"));
+}
