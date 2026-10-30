@@ -47,6 +47,24 @@ async fn fixture(relationships: &[(&str, Option<&str>)]) -> (tempfile::TempDir, 
     (root, store)
 }
 
+async fn request(store: &Store, id: &str) {
+    store
+        .append_conversation_message(
+            &ConversationMessage {
+                sequence: 0,
+                id: id.into(),
+                conversation_id: "room".into(),
+                sender: "operator".into(),
+                agent_id: None,
+                body: "Coordinate again".into(),
+                created_at_ms: 1,
+            },
+            1,
+        )
+        .await
+        .unwrap();
+}
+
 // Synthetic settled turn provenance, not a real native-launch acceptance claim.
 async fn reply(store: &Store, id: &str, parent: &str, author: &str, body: &str) {
     {
@@ -461,4 +479,74 @@ async fn delegation_second_insert_failure_rolls_back_the_complete_batch() {
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn examination_records_each_settled_reply_once_without_launching_work() {
+    let (_root, store) = fixture(&[("lead", None), ("worker", Some("lead"))]).await;
+    for id in ["second", "third"] {
+        request(&store, id).await;
+    }
+    reply(
+        &store,
+        "prose",
+        "operator",
+        "lead",
+        "Done. {\"schema\": \"not a decision\"}",
+    )
+    .await;
+    reply(&store, "good", "second", "lead", &decision(&["worker"])).await;
+    reply(&store, "bad", "third", "lead", &decision(&["lead"])).await;
+    assert_eq!(
+        store.next_unexamined_room_reply().await.unwrap().as_deref(),
+        Some("prose")
+    );
+    let prose = store.examine_conversation_reply("prose", 3).await.unwrap();
+    assert_eq!(prose.outcome, "ordinary");
+    let good = store.examine_conversation_reply("good", 4).await.unwrap();
+    assert_eq!(good.outcome, "authorized");
+    assert_eq!(good.detail, "1 assignments");
+    assert_eq!(
+        store.conversation_assignments("good").await.unwrap().len(),
+        1
+    );
+    let bad = store.examine_conversation_reply("bad", 5).await.unwrap();
+    assert_eq!(bad.outcome, "rejected");
+    assert_eq!(bad.detail, "invalid or unauthorized delegation recipient");
+    assert!(
+        store
+            .conversation_assignments("bad")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Replay returns the recorded outcome and the queue never saw a launch.
+    assert_eq!(
+        store.examine_conversation_reply("bad", 6).await.unwrap(),
+        bad
+    );
+    assert_eq!(
+        store.conversation_reply_examination("good").await.unwrap(),
+        Some(good)
+    );
+    assert!(store.next_unexamined_room_reply().await.unwrap().is_none());
+    assert!(
+        store
+            .examine_conversation_reply("operator", 7)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .conversation_reply_examination("operator")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.next_conversation_job().await.unwrap().is_none());
+    let batches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_delegation_batches")
+        .fetch_one(&store.inner.readers)
+        .await
+        .unwrap();
+    assert_eq!(batches, 1);
 }
