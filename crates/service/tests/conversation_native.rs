@@ -657,7 +657,8 @@ async fn continuation_prompt_carries_reports_without_the_delegation_contract() {
         .unwrap();
     let continuation = &prompts[start..];
     assert!(continuation.contains("Worker finished the inspection"));
-    assert!(continuation.contains("report_to_supervisor"));
+    assert!(continuation.contains("\"delivery_kind\":\"report\""));
+    assert!(!continuation.contains("report_to_supervisor"));
     assert!(continuation.contains("Do not delegate again"));
     assert!(!continuation.contains("<one of"));
 }
@@ -686,4 +687,48 @@ async fn a_delegation_in_a_continuation_is_refused_and_launches_nothing() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn continuation_reads_reports_even_after_their_delivery_was_consumed() {
+    let root = tempfile::tempdir().unwrap();
+    let (lead, worker) = delegating_fixture(root.path(), "lead");
+    let store = seeded_room(root.path(), "room.sqlite3").await;
+    let service = PersistentControlService::start(store.clone(), 1)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![lead.clone(), worker.clone()])
+        .unwrap();
+    service
+        .configure_room("room", shared_configuration(&lead.id, &worker.id))
+        .await
+        .unwrap();
+    service
+        .route_room_request("shared-request", &[], false)
+        .await
+        .unwrap();
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    while store.conversation_messages("room", 0).await.unwrap().len() < 3 {
+        assert!(
+            service
+                .dispatch_next_conversation(receiver.clone())
+                .await
+                .unwrap()
+        );
+    }
+    // Another turn of the lead could consume the report before the continuation.
+    let report = store.conversation_messages("room", 0).await.unwrap()[2]
+        .id
+        .clone();
+    let routed = service.dispatch_next_conversation(receiver.clone()).await;
+    assert!(routed.unwrap());
+    store
+        .acknowledge_conversation_delivery(&report, "lead", 9)
+        .await
+        .unwrap();
+    drain(&service, &receiver).await;
+    let prompts = std::fs::read_to_string(root.path().join("prompts")).unwrap();
+    let start = prompts.find("Every assignment you delegated").unwrap();
+    assert!(prompts[start..].contains("Worker finished the inspection"));
 }

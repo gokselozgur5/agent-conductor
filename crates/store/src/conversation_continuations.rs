@@ -59,6 +59,21 @@ impl Store {
             .await?)
     }
 
+    /// The settled replies of a batch's recipients, including the summary of a
+    /// recipient that delegated further. Read from turns, not from inbox state,
+    /// so a report consumed by another turn still reaches the continuation.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn continuation_reports(
+        &self,
+        reply_id: &str,
+    ) -> Result<Vec<crate::ConversationMessage>, StoreError> {
+        Ok(sqlx::query_as("SELECT m.sequence,m.id,m.conversation_id,m.sender,m.agent_id,m.body,m.created_at_ms FROM conversation_turns t JOIN conversation_messages m ON m.id=t.reply_message_id WHERE t.state='replied' AND t.agent_id IN (SELECT agent_id FROM conversation_assignments WHERE source_reply_id=?1) AND (t.message_id=?1 OR t.message_id IN (SELECT r.reply_message_id FROM conversation_turns r WHERE r.message_id=?1 AND r.agent_id=t.agent_id)) ORDER BY m.sequence LIMIT 32")
+            .bind(reply_id)
+            .fetch_all(&self.inner.readers)
+            .await?)
+    }
+
     /// Whether a continuation admits this agent's turn on this decision message.
     /// # Errors
     /// Returns database errors.
