@@ -136,6 +136,26 @@ impl Store {
         })
     }
 
+    /// Reads a recorded examination outcome.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn conversation_reply_examination(
+        &self,
+        reply_id: &str,
+    ) -> Result<Option<ConversationReplyExamination>, StoreError> {
+        let mut connection = self.inner.readers.acquire().await?;
+        read_examination(&mut connection, reply_id).await
+    }
+
+    /// Finds the oldest settled native room reply that has not been examined,
+    /// including replies published before a coordinator restart.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn next_unexamined_room_reply(&self) -> Result<Option<String>, StoreError> {
+        Ok(sqlx::query_scalar("SELECT m.id FROM conversation_messages m JOIN conversation_rooms r ON r.conversation_id=m.conversation_id JOIN conversation_turns t ON t.reply_message_id=m.id AND t.state='replied' WHERE m.sender='agent' AND NOT EXISTS(SELECT 1 FROM conversation_reply_examinations e WHERE e.reply_message_id=m.id) ORDER BY m.sequence LIMIT 1")
+            .fetch_optional(&self.inner.readers).await?)
+    }
+
     /// Reads a bounded immutable authorization batch, without granting execution.
     /// # Errors
     /// Returns database errors.
