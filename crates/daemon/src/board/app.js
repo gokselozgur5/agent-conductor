@@ -14,6 +14,7 @@ const text = (tag, value, className) => {
   return node;
 };
 function disconnect() {
+  if (typeof clearChat === 'function') clearChat();
   token = '';
   el('diagnostics').hidden = true;
   el('diagnostics-entries').replaceChildren();
@@ -71,6 +72,7 @@ async function refresh() {
     el('connection').textContent = `${health.status === 'ready' ? 'Connected' : 'Degraded'} · Watcher: ${health.repository_watcher ?? 'unknown'} · ${new Date().toLocaleTimeString()}`;
     await refreshDiagnostics(currentToken);
     await refreshQueue(currentToken);
+    if (typeof refreshChat === 'function') await refreshChat(currentToken);
   } catch (error) {
     if (currentToken === token) { el('message').textContent = error.message; el('connection').textContent = 'Connection lost · displayed data may be stale'; }
   } finally { active = false; }

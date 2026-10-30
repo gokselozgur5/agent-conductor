@@ -58,6 +58,19 @@ def discovery_command(config, args):
     return command
 
 
+def conversation_arguments(config, args):
+    selected = args.conversation_agents or config.get('conversation_agents')
+    if not selected:
+        return []
+    if not args.dispatch:
+        raise ValueError('conversation agents require --dispatch')
+    path = Path(selected).expanduser().absolute()
+    profiles = json.loads(private_read(path))
+    if not isinstance(profiles, list) or len(profiles) > 32:
+        raise ValueError('conversation profiles must be an array of at most 32 agents')
+    return ['--conversation-agents', str(path)]
+
+
 def main():
     from adapter_pins import accepted_pins
 
@@ -71,6 +84,7 @@ def main():
     run = sub.add_parser('run', help='run the board and hooks in the foreground')
     run.add_argument('--anthropic-key-file', type=Path, help='read one existing API key into the daemon environment only')
     run.add_argument('--dispatch', action='store_true', help='execute explicitly submitted plans')
+    run.add_argument('--conversation-agents', type=Path, help='private JSON file containing selected native conversation profiles')
     run.add_argument('--recover-fenced', action='store_true')
     backup = sub.add_parser('backup', help='create a verified cold state snapshot; requires stopped and fenced work')
     backup.add_argument('destination', type=Path)
@@ -262,6 +276,7 @@ def main():
             raise ValueError('retained archive cannot be started as another dispatcher')
         if args.recover_fenced and not args.dispatch:
             raise ValueError('--recover-fenced requires --dispatch')
+        conversation = conversation_arguments(config, args)
         daemon = str(Path(config['bin_dir']) / 'conductor-daemon')
         common = [daemon, '--database', str(state / 'state.sqlite3'), '--socket', str(state / 'control.sock'), '--lock', str(state / 'runtime.lock')]
         try:
@@ -305,6 +320,7 @@ def main():
             argv.append('--dispatch')
         if args.recover_fenced:
             argv.append('--recover-fenced')
+        argv.extend(conversation)
         print(f"Board: http://127.0.0.1:{config['port']}\nUse the token command in another terminal to log in. Ctrl-C stops this runtime.", flush=True)
         os.execv(daemon, argv)
 

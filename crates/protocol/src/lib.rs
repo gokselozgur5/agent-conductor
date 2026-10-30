@@ -47,6 +47,27 @@ impl RequestEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    ListConversations {
+        after: String,
+    },
+    ConversationAgents,
+    QueueConversationTurn {
+        message_id: String,
+        agent_id: String,
+    },
+    CreateConversation {
+        id: String,
+        project_path: String,
+    },
+    SendConversationMessage {
+        conversation_id: String,
+        message_id: String,
+        body: String,
+    },
+    ConversationMessages {
+        conversation_id: String,
+        after: i64,
+    },
     Inventory {
         resource: InventoryResource,
         after: Option<String>,
@@ -188,6 +209,25 @@ pub enum ResponseResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
+    Conversations {
+        entries: Vec<Value>,
+    },
+    ConversationAgents {
+        agents: Vec<Value>,
+    },
+    ConversationTurnQueued {
+        message_id: String,
+    },
+    ConversationCreated {
+        id: String,
+    },
+    ConversationMessageSaved {
+        message: Value,
+    },
+    ConversationMessages {
+        messages: Vec<Value>,
+        next_after: Option<i64>,
+    },
     Inventory {
         resource: InventoryResource,
         entries: Vec<Value>,

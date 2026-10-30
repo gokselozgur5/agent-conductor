@@ -1,5 +1,7 @@
 mod broker_candidate_failure;
+mod conversation;
 pub use broker_candidate_failure::BrokerCandidateFailure;
+pub use conversation::ConversationAgent;
 mod broker_candidate;
 pub use broker_candidate::BrokerCandidate;
 mod broker_authority;
@@ -129,6 +131,7 @@ pub struct PersistentControlService<C = SystemClock> {
     broker_preowner_cursor: Arc<Mutex<Option<String>>>,
     watcher_status: Arc<RwLock<WatcherStatus>>,
     observed_projects: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
+    conversation_agents: Arc<RwLock<std::collections::BTreeMap<String, ConversationAgent>>>,
 }
 
 impl<C: Clock> Clone for PersistentControlService<C> {
@@ -144,6 +147,7 @@ impl<C: Clock> Clone for PersistentControlService<C> {
             broker_preowner_cursor: Arc::clone(&self.broker_preowner_cursor),
             watcher_status: Arc::clone(&self.watcher_status),
             observed_projects: Arc::clone(&self.observed_projects),
+            conversation_agents: Arc::clone(&self.conversation_agents),
         }
     }
 }
@@ -229,6 +233,7 @@ impl<C: Clock> PersistentControlService<C> {
             broker_preowner_cursor: Arc::new(Mutex::new(None)),
             watcher_status: Arc::new(RwLock::new(WatcherStatus::Disabled)),
             observed_projects: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            conversation_agents: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         };
         for lease in startup.recovery_pending {
             let Some(row) = service.store.task(&lease.task_id).await? else {
@@ -729,6 +734,111 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
     #[allow(clippy::too_many_lines)]
     async fn handle(&self, request: Request) -> Result<Response, ErrorBody> {
         match request.clone() {
+            Request::ListConversations { after } => {
+                let rows = self
+                    .store
+                    .list_conversations(&after)
+                    .await
+                    .map_err(store_error)?;
+                Ok(Response::Conversations {
+                    entries: rows
+                        .into_iter()
+                        .map(serde_json::to_value)
+                        .collect::<Result<_, _>>()
+                        .map_err(json_error)?,
+                })
+            }
+            Request::ConversationAgents => {
+                let agents = self.conversation_agents.read().map_err(|_| {
+                    store_error(StoreError::Integrity(
+                        "conversation configuration unavailable".into(),
+                    ))
+                })?;
+                Ok(Response::ConversationAgents { agents: agents.values().map(|a| serde_json::json!({"id": a.id, "account": a.account.name, "vendor": a.vendor.kind})).collect() })
+            }
+            Request::QueueConversationTurn {
+                message_id,
+                agent_id,
+            } => {
+                self.queue_conversation_turn(&message_id, &agent_id)
+                    .await
+                    .map_err(store_error)?;
+                Ok(Response::ConversationTurnQueued { message_id })
+            }
+            Request::CreateConversation { id, project_path } => {
+                let now = self.clock.read(self.boot_generation).wall_unix_ms;
+                self.store
+                    .create_conversation(&id, &project_path, now)
+                    .await
+                    .map_err(store_error)?;
+                Ok(Response::ConversationCreated { id })
+            }
+            Request::SendConversationMessage {
+                conversation_id,
+                message_id,
+                body,
+            } => {
+                let now = self.clock.read(self.boot_generation).wall_unix_ms;
+                let message = agent_conductor_store::ConversationMessage {
+                    sequence: 0,
+                    id: message_id,
+                    conversation_id,
+                    sender: "operator".into(),
+                    agent_id: None,
+                    body,
+                    created_at_ms: now,
+                };
+                let saved = self
+                    .store
+                    .append_conversation_message(&message, now)
+                    .await
+                    .map_err(store_error)?;
+                Ok(Response::ConversationMessageSaved {
+                    message: serde_json::to_value(saved).map_err(json_error)?,
+                })
+            }
+            Request::ConversationMessages {
+                conversation_id,
+                after,
+            } => {
+                let rows = self
+                    .store
+                    .conversation_messages(&conversation_id, after)
+                    .await
+                    .map_err(store_error)?;
+                let mut messages = Vec::new();
+                let mut bytes = 0;
+                let mut next_after = None;
+                for row in rows {
+                    // Bound escaped JSON below the existing HTTP response limit.
+                    if bytes + row.body.len() > 65_536 {
+                        break;
+                    }
+                    bytes += row.body.len();
+                    next_after = Some(row.sequence);
+                    let status = self
+                        .store
+                        .conversation_message_status(&row.id)
+                        .await
+                        .map_err(store_error)?;
+                    let mut value = serde_json::to_value(row).map_err(json_error)?;
+                    value["status"] = serde_json::Value::String(status);
+                    messages.push(value);
+                }
+                if let Some(cursor) = next_after
+                    && !self
+                        .store
+                        .conversation_has_more(&conversation_id, cursor)
+                        .await
+                        .map_err(store_error)?
+                {
+                    next_after = None;
+                }
+                Ok(Response::ConversationMessages {
+                    messages,
+                    next_after,
+                })
+            }
             Request::ReassignWorkflow {
                 task_id,
                 expected_version,

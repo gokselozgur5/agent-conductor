@@ -65,6 +65,15 @@ impl OperatorBoard {
         };
         let router = Router::new()
             .route(
+                "/chat.js",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                        include_str!("board/chat.js"),
+                    )
+                }),
+            )
+            .route(
                 "/",
                 get(|| async {
                     (
