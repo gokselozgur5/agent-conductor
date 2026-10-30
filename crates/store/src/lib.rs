@@ -26,6 +26,7 @@ pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
 pub use auxiliary_launch::{
     AuxiliaryInvocation, AuxiliaryLaunchBinding, AuxiliaryRecoveryCandidate,
 };
+mod conversation_continuations;
 mod conversation_delegations;
 pub use conversation_delegations::{ConversationAssignment, ConversationReplyExamination};
 mod conversation_jobs;
