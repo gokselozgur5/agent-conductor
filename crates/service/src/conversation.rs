@@ -132,24 +132,28 @@ impl<C: Clock> PersistentControlService<C> {
     /// The native instruction for one turn. An assignment turn carries the stored
     /// instruction and its recorded provenance, never the decision prose. Agents
     /// with direct reports receive the strict delegation contract.
-    fn turn_instructions(
-        agent_id: &str,
-        assignment: Option<&ConversationAssignment>,
-        reports: &[String],
-    ) -> String {
-        let mut text = match assignment {
-            Some(assignment) => format!(
+    fn turn_instructions(agent_id: &str, source: &TurnSource, reports: &[String]) -> String {
+        let mut text = match source {
+            TurnSource::Assignment(assignment) => format!(
                 "You are agent {agent_id} in this Conductor conversation. Your supervisor {} assigned you this instruction through a recorded Conductor delegation (operator request {}, depth {}):\n{}\nCarry out the instruction and reply with your result or blocker.",
                 assignment.author_agent_id,
                 assignment.root_message_id,
                 assignment.depth,
                 assignment.instruction
             ),
-            None => format!(
+            TurnSource::Operator => format!(
                 "Respond to the operator request in this Conductor conversation as agent {agent_id}."
             ),
+            TurnSource::Continuation => format!(
+                "You are agent {agent_id} in this Conductor conversation. Every assignment you delegated has now reported; their results and blockers are the information deliveries below. Write one consolidated response for your supervisor or the operator: what was done, the results, and any blockers. Do not delegate again; a delegation decision in this reply is refused."
+            ),
         };
-        if !reports.is_empty() && assignment.is_none_or(|a| a.depth < 4) {
+        let may_delegate = match source {
+            TurnSource::Operator => true,
+            TurnSource::Assignment(assignment) => assignment.depth < 4,
+            TurnSource::Continuation => false,
+        };
+        if !reports.is_empty() && may_delegate {
             let _ = write!(
                 text,
                 " To delegate part of this work, reply with exactly one JSON object and nothing else: {{\"schema\":\"conductor.delegation.v1\",\"assignments\":[{{\"agent_id\":\"<one of {}>\",\"instruction\":\"<what that agent must do>\"}}]}}. Use at most eight assignments, one per agent, each instruction under 4096 bytes. Any other reply is information for the operator and your supervisor, not a delegation.",
@@ -165,10 +169,10 @@ impl<C: Clock> PersistentControlService<C> {
         conversation_id: &str,
         through: i64,
         agent_id: &str,
-        assignment: Option<&ConversationAssignment>,
+        source: &TurnSource,
     ) -> Result<(String, Vec<String>), StoreError> {
         let reports = self.direct_reports(conversation_id, agent_id).await?;
-        let instructions = Self::turn_instructions(agent_id, assignment, &reports);
+        let instructions = Self::turn_instructions(agent_id, source, &reports);
         let mut context = Vec::new();
         let mut after = 0;
         loop {
@@ -231,29 +235,32 @@ impl<C: Clock> PersistentControlService<C> {
         &self,
         message_id: &str,
         agent_id: &str,
-    ) -> Result<
-        (
-            agent_conductor_store::ConversationMessage,
-            Option<ConversationAssignment>,
-        ),
-        StoreError,
-    > {
+    ) -> Result<(agent_conductor_store::ConversationMessage, TurnSource), StoreError> {
         let input = self
             .store
             .conversation_message(message_id)
             .await?
             .ok_or_else(|| invalid("conversation message missing"))?;
-        let assignment = if input.sender == "operator" {
-            None
-        } else {
-            Some(
-                self.store
-                    .conversation_assignment(message_id, agent_id)
-                    .await?
-                    .ok_or_else(|| invalid("operator message or authorized assignment required"))?,
-            )
-        };
-        Ok((input, assignment))
+        if input.sender == "operator" {
+            return Ok((input, TurnSource::Operator));
+        }
+        if let Some(assignment) = self
+            .store
+            .conversation_assignment(message_id, agent_id)
+            .await?
+        {
+            return Ok((input, TurnSource::Assignment(assignment)));
+        }
+        if self
+            .store
+            .conversation_continuation(message_id, agent_id)
+            .await?
+        {
+            return Ok((input, TurnSource::Continuation));
+        }
+        Err(invalid(
+            "operator message, authorized assignment or continuation required",
+        ))
     }
 
     /// Runs a recorded operator message, or a native reply whose stored delegation
@@ -272,18 +279,13 @@ impl<C: Clock> PersistentControlService<C> {
         if agent.timeout_ms == 0 || agent.timeout_ms > 300_000 {
             return Err(invalid("invalid conversation timeout"));
         }
-        let (input, assignment) = self.turn_source(message_id, &agent.id).await?;
+        let (input, source) = self.turn_source(message_id, &agent.id).await?;
         let project = self
             .store
             .conversation_project(&input.conversation_id)
             .await?;
         let (prompt, informed) = self
-            .conversation_prompt(
-                &input.conversation_id,
-                input.sequence,
-                &agent.id,
-                assignment.as_ref(),
-            )
+            .conversation_prompt(&input.conversation_id, input.sequence, &agent.id, &source)
             .await?;
         let spec = conductor_runtime::full_capability_command(
             &agent.account,
@@ -357,6 +359,14 @@ impl<C: Clock> PersistentControlService<C> {
         }
         Ok(true)
     }
+}
+
+/// What admits a native turn: the operator, a stored assignment for exactly this
+/// agent, or the single continuation opened after its delegated work settled.
+enum TurnSource {
+    Operator,
+    Assignment(ConversationAssignment),
+    Continuation,
 }
 
 fn invalid(message: &str) -> StoreError {
