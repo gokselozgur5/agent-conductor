@@ -18,7 +18,7 @@ class ConversationSchemaUpgrade(unittest.TestCase):
             profile = json.dumps({'id': 'codex'})
             db.execute("INSERT INTO conversation_jobs VALUES ('request',?,'queued',2)", (profile,))
             before = db.execute('SELECT * FROM conversation_turns').fetchall()
-            for number in (36, 37, 38, 39, 40, 41):
+            for number in (36, 37, 38, 39, 40, 41, 42):
                 db.executescript(next(migrations.glob(f'{number:04d}_*.sql')).read_text())
             self.assertEqual(db.execute('SELECT * FROM conversation_turns').fetchall(), before)
             self.assertEqual(db.execute('SELECT agent_id,agent_profile_json FROM conversation_jobs').fetchall(), [('codex', profile)])
@@ -41,7 +41,7 @@ class ConversationSchemaUpgrade(unittest.TestCase):
             decision = json.dumps({'schema': 'conductor.delegation.v1', 'assignments': [{'agent_id': 'worker', 'instruction': 'Old work'}]})
             db.execute("INSERT INTO conversation_messages(id,conversation_id,sender,agent_id,body,created_at_ms) VALUES ('old-reply','room','agent','lead',?,3)", (decision,))
             db.execute("INSERT INTO conversation_turns VALUES ('request','room','lead','old-launch',?,?,'old-reply',?,'replied',3)", ('a' * 64, 'b' * 64, 'c' * 64))
-            for number in (39, 40, 41):
+            for number in (39, 40, 41, 42):
                 db.executescript(next(migrations.glob(f'{number:04d}_*.sql')).read_text())
             # A historical decision must not be examined and launched after upgrade.
             self.assertEqual(db.execute('SELECT reply_message_id,outcome FROM conversation_reply_examinations').fetchall(), [('old-reply', 'ordinary')])

@@ -57,6 +57,7 @@ struct Batch {
     parent_message_id: String,
     author_agent_id: String,
     depth: i64,
+    round: i64,
     decision_json: String,
     room_configuration_json: String,
 }
@@ -221,17 +222,18 @@ async fn authorize_in(
     now_ms: i64,
 ) -> Result<Vec<ConversationAssignment>, StoreError> {
     let decision = validate_decision(&source)?;
-    let (root_message_id, depth) = ancestry(tx, &source).await?;
+    let (root_message_id, depth, round) = ancestry(tx, &source).await?;
     let expected = Batch {
         conversation_id: source.conversation_id,
         root_message_id,
         parent_message_id: source.parent_message_id,
         author_agent_id: source.author_agent_id,
         depth,
+        round,
         decision_json: source.body,
         room_configuration_json: source.configuration,
     };
-    let saved: Option<Batch> = sqlx::query_as("SELECT conversation_id,root_message_id,parent_message_id,author_agent_id,depth,decision_json,room_configuration_json FROM conversation_delegation_batches WHERE source_reply_id=?")
+    let saved: Option<Batch> = sqlx::query_as("SELECT conversation_id,root_message_id,parent_message_id,author_agent_id,depth,round,decision_json,room_configuration_json FROM conversation_delegation_batches WHERE source_reply_id=?")
         .bind(reply_id).fetch_optional(&mut *tx).await?;
     let assignments = expected_assignments(reply_id, &expected, decision);
     if let Some(saved) = saved {
@@ -322,7 +324,7 @@ fn validate_room(encoded: &str) -> Result<BTreeMap<String, Member>, StoreError> 
 async fn ancestry(
     connection: &mut SqliteConnection,
     source: &NativeSource,
-) -> Result<(String, i64), StoreError> {
+) -> Result<(String, i64, i64), StoreError> {
     let parent: Option<(String, String)> =
         sqlx::query_as("SELECT conversation_id,sender FROM conversation_messages WHERE id=?")
             .bind(&source.parent_message_id)
@@ -332,8 +334,17 @@ async fn ancestry(
     if conversation != source.conversation_id {
         return Err(invalid("delegation parent belongs to another room"));
     }
-    let (root, depth) = if sender == "operator" {
-        (source.parent_message_id.clone(), 1)
+    let correction: Option<(String, String, i64, i64)> = sqlx::query_as("SELECT b.root_message_id,b.conversation_id,b.depth,b.round FROM conversation_delegation_batches b JOIN conversation_continuations c ON c.source_reply_id=b.source_reply_id AND c.agent_id=b.author_agent_id WHERE b.source_reply_id=? AND b.author_agent_id=?")
+        .bind(&source.parent_message_id).bind(&source.author_agent_id)
+        .fetch_optional(&mut *connection).await?;
+    let (root, depth, round) = if sender == "operator" {
+        (source.parent_message_id.clone(), 1, 0)
+    } else if let Some((root, room, depth, round)) = correction {
+        // A continuation reply that delegates again opens a bounded correction round.
+        if room != source.conversation_id || round >= 2 {
+            return Err(invalid("correction round budget exhausted"));
+        }
+        (root, depth, round + 1)
     } else {
         let inherited: Option<(String, String, i64)> = sqlx::query_as("SELECT b.root_message_id,b.conversation_id,b.depth FROM conversation_assignments a JOIN conversation_delegation_batches b ON b.source_reply_id=a.source_reply_id WHERE a.source_reply_id=? AND a.agent_id=?")
             .bind(&source.parent_message_id).bind(&source.author_agent_id)
@@ -343,14 +354,14 @@ async fn ancestry(
         if room != source.conversation_id || !(1..4).contains(&depth) {
             return Err(invalid("delegation ancestry or depth refused"));
         }
-        (root, depth + 1)
+        (root, depth + 1, 0)
     };
     let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE id=? AND conversation_id=? AND sender='operator' AND agent_id IS NULL)")
         .bind(&root).bind(&source.conversation_id).fetch_one(connection).await?;
     if !valid {
         return Err(invalid("original operator request required in this room"));
     }
-    Ok((root, depth))
+    Ok((root, depth, round))
 }
 
 fn expected_assignments(
@@ -398,9 +409,9 @@ async fn insert_batch(
     if existing > 32 - additional {
         return Err(invalid("operator request delegation budget exhausted"));
     }
-    sqlx::query("INSERT INTO conversation_delegation_batches(source_reply_id,conversation_id,root_message_id,parent_message_id,author_agent_id,depth,decision_json,room_configuration_json,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO conversation_delegation_batches(source_reply_id,conversation_id,root_message_id,parent_message_id,author_agent_id,depth,round,decision_json,room_configuration_json,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?)")
         .bind(reply_id).bind(&batch.conversation_id).bind(&batch.root_message_id)
-        .bind(&batch.parent_message_id).bind(&batch.author_agent_id).bind(batch.depth)
+        .bind(&batch.parent_message_id).bind(&batch.author_agent_id).bind(batch.depth).bind(batch.round)
         .bind(&batch.decision_json).bind(&batch.room_configuration_json).bind(now_ms)
         .execute(&mut *connection).await?;
     for assignment in assignments {

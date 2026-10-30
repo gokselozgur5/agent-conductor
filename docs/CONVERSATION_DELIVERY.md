@@ -144,9 +144,10 @@ recorded with its reason and launches nothing. A recipient without a configured
 profile is a visible blocked job. This is proven with controlled processes only.
 
 When every delegated recipient has settled, the delegating agent receives one
-continuation turn with the reports and writes a consolidated response; a new
-delegation in that reply is refused. Controlled processes prove this round.
+continuation turn with the reports and writes a consolidated response. It may
+instead correct the work with a new delegation, at most twice per batch chain;
+a third is recorded as rejected. Controlled processes prove these rounds.
 
-Remaining: bounded correction rounds after a consolidated response, visible per-recipient delivery reasons/status and examination outcomes
+Remaining: visible per-recipient delivery reasons/status and examination outcomes
 in the browser, real-model shared-room acceptance, foreign-account conversation
 transport, complete delivery checks and installation.

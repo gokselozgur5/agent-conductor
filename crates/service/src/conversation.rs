@@ -144,14 +144,19 @@ impl<C: Clock> PersistentControlService<C> {
             TurnSource::Operator => format!(
                 "Respond to the operator request in this Conductor conversation as agent {agent_id}."
             ),
-            TurnSource::Continuation(_) => format!(
-                "You are agent {agent_id} in this Conductor conversation. Every assignment you delegated has now reported; their results and blockers are the information deliveries below. Write one consolidated response for your supervisor or the operator: what was done, the results, and any blockers. Do not delegate again; a delegation decision in this reply is refused."
+            TurnSource::Continuation(_, may_correct) => format!(
+                "You are agent {agent_id} in this Conductor conversation. Every assignment you delegated has now reported; their results and blockers are the information deliveries below. Write one consolidated response for your supervisor or the operator: what was done, the results, and any blockers. {}",
+                if *may_correct {
+                    "If a result must be corrected, you may instead reply with one new delegation decision; correction rounds are limited."
+                } else {
+                    "The correction budget is exhausted: do not delegate again; a delegation decision in this reply is refused."
+                }
             ),
         };
         let may_delegate = match source {
             TurnSource::Operator => true,
             TurnSource::Assignment(assignment) => assignment.depth < 4,
-            TurnSource::Continuation(_) => false,
+            TurnSource::Continuation(_, may_correct) => *may_correct,
         };
         if !reports.is_empty() && may_delegate {
             let _ = write!(
@@ -203,7 +208,7 @@ impl<C: Clock> PersistentControlService<C> {
         }
         let mut informed = Vec::new();
         let mut reported = std::collections::BTreeSet::new();
-        if let TurnSource::Continuation(reply) = source {
+        if let TurnSource::Continuation(reply, _) = source {
             for message in self.store.continuation_reports(reply).await? {
                 context.push(serde_json::json!({"sender": message.sender,
                     "agent": message.agent_id, "text": message.body, "delivery_kind": "report"}));
@@ -268,7 +273,11 @@ impl<C: Clock> PersistentControlService<C> {
             .conversation_continuation(message_id, agent_id)
             .await?
         {
-            return Ok((input, TurnSource::Continuation(message_id.into())));
+            let round = self.store.delegation_round(message_id).await?.unwrap_or(2);
+            return Ok((
+                input,
+                TurnSource::Continuation(message_id.into(), round < 2),
+            ));
         }
         Err(invalid(
             "operator message, authorized assignment or continuation required",
@@ -378,8 +387,9 @@ impl<C: Clock> PersistentControlService<C> {
 enum TurnSource {
     Operator,
     Assignment(ConversationAssignment),
-    /// The batch author on its own decision message, carried as the reply ID.
-    Continuation(String),
+    /// The batch author on its own decision message: the reply ID and whether a
+    /// correction round remains in the budget.
+    Continuation(String, bool),
 }
 
 fn invalid(message: &str) -> StoreError {

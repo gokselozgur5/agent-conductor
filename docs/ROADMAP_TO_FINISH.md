@@ -21,7 +21,7 @@ requirements; working chat alone does not complete the product.
 | Package | Slices | Depends on | Exit evidence | Current state |
 | --- | --- | --- | --- | --- |
 | P1 Delegation (estimated 8%) | D1 strict decision contract and persisted author provenance; D2 atomic assignment graph, root/parent binding and cumulative limits; D3 native prompt/output integration and authorized queue admission | Existing room topology and native reply storage | One default coordinator request creates authorized subordinate work; forged authors, peer/ancestor targets, changed replay, excessive fan-out/depth and crash duplicates are refused | D1/D2/D3 locally validated with controlled processes; real-model shared-room proof pending (P5 V2) |
-| P2 Reporting loop (5%) | R1 durable result/blocker correlation; R2 wait-for-children and one coordinator continuation; R3 bounded correction rounds and explicit terminal/blocked outcomes | P1 D2/D3 | One operator request produces worker results and a consolidated coordinator response; restart and duplicate receipts cannot repeat rounds; exhausted budgets surface as blocked | R1/R2 locally validated with controlled processes; R3 pending |
+| P2 Reporting loop (5%) | R1 durable result/blocker correlation; R2 wait-for-children and one coordinator continuation; R3 bounded correction rounds and explicit terminal/blocked outcomes | P1 D2/D3 | One operator request produces worker results and a consolidated coordinator response; restart and duplicate receipts cannot repeat rounds; exhausted budgets surface as blocked | R1/R2/R3 locally validated with controlled processes |
 | P3 Account execution (4%) | A1 reuse account-worker transport for conversations; A2 own-HOME/auth/profile enforcement and failure handling; A3 distinct-account real-vendor acceptance | P1 contract for delegated inputs; transport audit can begin independently | Native agents demonstrably execute under intended distinct accounts without credential copying or a same-account fallback | A1 reusable runtime API implemented; worker/service wiring and personal account acceptance pending |
 | P4 Operator visibility (2%) | U1 per-recipient reason/state/causality projection; U2 assignment tree, reports, blockers and final summary; U3 reconnect/layout/privacy acceptance | D2 for U1; P2 for U2 | Browser explains who received what, why and with which outcome; refresh preserves identity; text cannot execute markup | Room setup/addressing exists; delivery visibility pending |
 | P5 Combined acceptance (4%) | V1 controlled end-to-end and fault matrix; V2 real Codex/Claude and distinct-account scenarios; V3 original requirements audit, load, privacy, supported hosts and endurance | P1/P2/P3/P4; audit and harness work can proceed in parallel | Exact-source evidence for every required gate, with skips/blockers visible; no substitute of fixture results for real vendor acceptance | Read-only gate matrix/verifier implemented; final-candidate acceptance pending |
@@ -164,3 +164,10 @@ state before external delivery; dated documents are not current service state.
   rejected and launches nothing. Controlled room: operator request → coordinator
   decision → worker result → coordinator consolidated reply, three launches, no
   launch after restart. Correction rounds and their budget remain R3.
+
+- P2 R3 locally validated (`d5eaa79`..`de19cf1`, each commit at most 50 lines):
+  schema 42 adds a correction round to delegation batches. A delegation made in
+  the author's continuation keeps the root and depth and advances the round; a
+  third correction is recorded as rejected with "correction round budget
+  exhausted". The continuation prompt offers a correction only while budget
+  remains. Controlled room: two corrections, seven launches, refused third.

@@ -436,7 +436,7 @@ async fn drain(
     service: &PersistentControlService,
     receiver: &tokio::sync::watch::Receiver<bool>,
 ) -> usize {
-    for round in 0..24 {
+    for round in 0..48 {
         if !service
             .dispatch_next_conversation(receiver.clone())
             .await
@@ -547,8 +547,8 @@ async fn coordinator_delegates_to_its_subordinate_without_operator_relay() {
 
 fn assert_delegation_prompts(root: &std::path::Path) {
     let prompts = std::fs::read_to_string(root.join("prompts")).unwrap();
-    let (lead_prompt, worker_prompt) =
-        prompts.split_at(prompts.find("You are agent worker").unwrap());
+    let (lead_prompt, rest) = prompts.split_at(prompts.find("You are agent worker").unwrap());
+    let worker_prompt = &rest[..rest.find("Every assignment you delegated").unwrap()];
     assert!(lead_prompt.contains("as agent lead"));
     assert!(lead_prompt.contains("\"agent_id\":\"<one of worker>\""));
     assert!(worker_prompt.contains("Your supervisor lead assigned you this instruction"));
@@ -648,7 +648,7 @@ async fn delegation_to_a_recipient_without_a_profile_is_blocked_visibly() {
 }
 
 #[tokio::test]
-async fn continuation_prompt_carries_reports_without_the_delegation_contract() {
+async fn continuation_prompt_carries_reports_and_offers_a_correction() {
     let root = tempfile::tempdir().unwrap();
     delegated_room(root.path(), true).await;
     let prompts = std::fs::read_to_string(root.path().join("prompts")).unwrap();
@@ -659,30 +659,34 @@ async fn continuation_prompt_carries_reports_without_the_delegation_contract() {
     assert!(continuation.contains("Worker finished the inspection"));
     assert!(continuation.contains("\"delivery_kind\":\"report\""));
     assert!(!continuation.contains("report_to_supervisor"));
-    assert!(continuation.contains("Do not delegate again"));
-    assert!(!continuation.contains("<one of"));
+    assert!(continuation.contains("you may instead reply with one new delegation"));
+    assert!(continuation.contains("\"agent_id\":\"<one of worker>\""));
 }
 
 #[tokio::test]
-async fn a_delegation_in_a_continuation_is_refused_and_launches_nothing() {
+async fn corrections_stop_at_the_round_budget() {
     let root = tempfile::tempdir().unwrap();
     let again = r#"{\"schema\":\"conductor.delegation.v1\",\"assignments\":[{\"agent_id\":\"worker\",\"instruction\":\"Again\"}]}"#;
     std::fs::write(root.path().join("continuation-text"), again).unwrap();
     let (store, _service, _receiver) = delegated_room(root.path(), true).await;
-    assert_eq!(launches(root.path()), 3);
+    assert_eq!(launches(root.path()), 7);
     let messages = store.conversation_messages("room", 0).await.unwrap();
-    assert_eq!(messages.len(), 4);
+    assert_eq!(messages.len(), 8);
     let examination = store
-        .conversation_reply_examination(&messages[3].id)
+        .conversation_reply_examination(&messages[7].id)
         .await
         .unwrap()
         .unwrap();
-    assert!(messages[3].body.contains("\"instruction\":\"Again\""));
+    assert!(messages[7].body.contains("\"instruction\":\"Again\""));
     assert_eq!(examination.outcome, "rejected");
-    assert_eq!(examination.detail, "authorized parent assignment required");
+    assert_eq!(examination.detail, "correction round budget exhausted");
+    let prompts = std::fs::read_to_string(root.path().join("prompts")).unwrap();
+    let last = &prompts[prompts.rfind("Every assignment you delegated").unwrap()..];
+    assert!(last.contains("The correction budget is exhausted"));
+    assert!(!last.contains("<one of"));
     assert!(
         store
-            .conversation_assignments(&messages[3].id)
+            .conversation_assignments(&messages[7].id)
             .await
             .unwrap()
             .is_empty()
