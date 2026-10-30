@@ -111,3 +111,15 @@ Reopening must preserve the entire pre-transaction or post-transaction table
 snapshot through both writer and reader connections, with SQLite integrity intact.
 The after-commit positive control must change state. These selected boundaries do
 not prove physical reboot, unrestricted worker fencing, or every statement/branch.
+
+## Auxiliary launch and settlement crash boundaries
+
+`auxiliary_launch_crash_tests` targets launch binding, release authorization,
+acknowledged and unreleased receipt settlement, and both unbound settlement entry
+points. These six paths cover four transaction owners. Each child exits at the
+audit mutation before commit or immediately after successful return: twelve
+selected cuts. The parent checks SQLite integrity and exact full-table snapshots
+through writer and reader connections. Post-commit controls must change state.
+Synthetic receipt data establishes database atomicity only; it does not validate
+external receipt provenance, stop a native worker, or prove physical power-loss
+recovery. Existing ownership/refusal tests remain separate.
