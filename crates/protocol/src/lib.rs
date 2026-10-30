@@ -51,6 +51,18 @@ pub enum Request {
         after: String,
     },
     ConversationAgents,
+    ConversationRoom {
+        conversation_id: String,
+    },
+    ConfigureConversationRoom {
+        conversation_id: String,
+        configuration: Value,
+    },
+    RouteConversationMessage {
+        message_id: String,
+        recipients: Vec<String>,
+        everyone: bool,
+    },
     QueueConversationTurn {
         message_id: String,
         agent_id: String,
@@ -209,6 +221,12 @@ pub enum ResponseResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
+    ConversationRoom {
+        configuration: Option<Value>,
+    },
+    ConversationRoomConfigured {
+        conversation_id: String,
+    },
     Conversations {
         entries: Vec<Value>,
     },

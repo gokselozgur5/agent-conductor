@@ -174,3 +174,176 @@ printf '%s\n' '{"type":"thread.started","thread_id":"fixture"}' '{"type":"turn.s
     };
     (worker, agent)
 }
+
+#[tokio::test]
+async fn shared_room_fans_out_and_automatically_informs_the_next_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let (_, first) = fixture_agent(root.path());
+    let mut second = first.clone();
+    second.id = "reviewer".into();
+    let store = Store::open(root.path().join("room.sqlite3")).await.unwrap();
+    store
+        .create_conversation("room", root.path().to_str().unwrap(), 1)
+        .await
+        .unwrap();
+    store
+        .append_conversation_message(
+            &ConversationMessage {
+                sequence: 0,
+                id: "shared-request".into(),
+                conversation_id: "room".into(),
+                sender: "operator".into(),
+                agent_id: None,
+                body: "Work together".into(),
+                created_at_ms: 0,
+            },
+            2,
+        )
+        .await
+        .unwrap();
+    let service = PersistentControlService::start(store.clone(), 1)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![first.clone(), second.clone()])
+        .unwrap();
+    service
+        .configure_room("room", shared_configuration(&first.id, &second.id))
+        .await
+        .unwrap();
+    service
+        .route_room_request("shared-request", &[], true)
+        .await
+        .unwrap();
+    drop(service);
+    // Recover routing admitted before process loss, without a second submission.
+    let service = PersistentControlService::start(store.clone(), 2)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![first, second])
+        .unwrap();
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    let mut idle = false;
+    for _ in 0..16 {
+        if !service
+            .dispatch_next_conversation(receiver.clone())
+            .await
+            .unwrap()
+        {
+            idle = true;
+            break;
+        }
+    }
+    assert!(idle, "information delivery must not create a reply loop");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("launches"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    let messages = store.conversation_messages("room", 0).await.unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_ne!(messages[1].agent_id, messages[2].agent_id);
+    let args = std::fs::read_to_string(root.path().join("received-arguments")).unwrap();
+    assert!(args.contains("Native fixture reply"));
+    assert!(args.contains("dependency_update"));
+    assert!(
+        store
+            .pending_conversation_deliveries("room", "reviewer")
+            .await
+            .unwrap()
+            .iter()
+            .all(|d| d.kind != "information")
+    );
+    service
+        .route_room_request("shared-request", &[], true)
+        .await
+        .unwrap();
+    assert!(!service.dispatch_next_conversation(receiver).await.unwrap());
+}
+
+fn shared_configuration(lead: &str, worker: &str) -> conductor_service::RoomConfiguration {
+    use conductor_service::{RoomConfiguration, RoomMember};
+    RoomConfiguration {
+        coordinator: lead.into(),
+        members: vec![
+            RoomMember {
+                agent_id: lead.into(),
+                reports_to: None,
+                observes: std::collections::BTreeSet::new(),
+            },
+            RoomMember {
+                agent_id: worker.into(),
+                reports_to: Some(lead.into()),
+                observes: [lead.into()].into(),
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn room_rpc_retains_topology_and_refuses_authority_changes() {
+    use conductor_protocol::{Request, Response};
+    use conductor_service::ControlService;
+    let root = tempfile::tempdir().unwrap();
+    let (_, first) = fixture_agent(root.path());
+    let mut second = first.clone();
+    second.id = "reviewer".into();
+    let store = Store::open(root.path().join("rpc.sqlite3")).await.unwrap();
+    store
+        .create_conversation("room", "/project", 1)
+        .await
+        .unwrap();
+    let service = PersistentControlService::start(store.clone(), 1)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![first.clone(), second.clone()])
+        .unwrap();
+    let read = Request::ConversationRoom {
+        conversation_id: "room".into(),
+    };
+    assert_eq!(
+        service.handle(read.clone()).await.unwrap(),
+        Response::ConversationRoom {
+            configuration: None
+        }
+    );
+    let configuration = serde_json::to_value(shared_configuration(&first.id, &second.id)).unwrap();
+    let request = Request::ConfigureConversationRoom {
+        conversation_id: "room".into(),
+        configuration: configuration.clone(),
+    };
+    service.handle(request.clone()).await.unwrap();
+    service.handle(request).await.unwrap();
+    assert!(
+        service
+            .handle(Request::ConfigureConversationRoom {
+                conversation_id: "room".into(),
+                configuration: serde_json::to_value(shared_configuration(&second.id, &first.id))
+                    .unwrap(),
+            })
+            .await
+            .is_err()
+    );
+    drop(service);
+    let service = PersistentControlService::start(store, 2).await.unwrap();
+    assert_eq!(
+        service.handle(read).await.unwrap(),
+        Response::ConversationRoom {
+            configuration: Some(configuration)
+        }
+    );
+    assert!(
+        service
+            .handle(Request::RouteConversationMessage {
+                message_id: "missing".into(),
+                recipients: vec![],
+                everyone: true,
+            })
+            .await
+            .is_err()
+    );
+}
