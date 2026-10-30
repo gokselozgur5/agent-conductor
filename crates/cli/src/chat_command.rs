@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use conductor_cli::send;
@@ -9,11 +9,25 @@ use serde_json::{Value, json};
 pub enum ChatCommand {
     /// List conversations.
     Ls,
+    /// Create a conversation and its room; members default to every configured agent.
+    New {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        lead: String,
+        #[arg(long = "member")]
+        members: Vec<String>,
+    },
 }
 
 pub async fn run(socket: &Path, command: ChatCommand) -> i32 {
     let result = match command {
         ChatCommand::Ls => list(socket).await,
+        ChatCommand::New {
+            project,
+            lead,
+            members,
+        } => create(socket, &project, lead, members).await,
     };
     result.unwrap_or_else(|message| {
         eprintln!("{message}");
@@ -52,7 +66,6 @@ async fn list(socket: &Path) -> Result<i32, String> {
     Ok(0)
 }
 
-#[allow(dead_code)] // Used by `chat new` in the next commit.
 /// Everyone but the lead reports to and observes the lead.
 fn room_config(lead: &str, members: &[String]) -> Value {
     let mut all = vec![json!({"agent_id": lead, "reports_to": null, "observes": []})];
@@ -60,6 +73,52 @@ fn room_config(lead: &str, members: &[String]) -> Value {
         all.push(json!({"agent_id": member, "reports_to": lead, "observes": [lead]}));
     }
     json!({"coordinator": lead, "members": all})
+}
+
+async fn create(
+    socket: &Path,
+    project: &Path,
+    lead: String,
+    mut members: Vec<String>,
+) -> Result<i32, String> {
+    if !project.is_absolute() || !project.is_dir() {
+        return Err(format!(
+            "project folder does not exist: {}",
+            project.display()
+        ));
+    }
+    if members.is_empty() {
+        let Response::ConversationAgents { agents } =
+            rpc(socket, Request::ConversationAgents).await?
+        else {
+            return Err("unexpected daemon response".into());
+        };
+        members = agents
+            .iter()
+            .filter_map(|a| a["id"].as_str().map(String::from))
+            .collect();
+    }
+    let id = format!("chat-{}", uuid::Uuid::now_v7());
+    let project_path = project.to_string_lossy().into_owned();
+    rpc(
+        socket,
+        Request::CreateConversation {
+            id: id.clone(),
+            project_path,
+        },
+    )
+    .await?;
+    let configuration = room_config(&lead, &members);
+    rpc(
+        socket,
+        Request::ConfigureConversationRoom {
+            conversation_id: id.clone(),
+            configuration,
+        },
+    )
+    .await?;
+    println!("{id}");
+    Ok(0)
 }
 
 #[cfg(test)]
