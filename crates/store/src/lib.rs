@@ -26,6 +26,8 @@ pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
 pub use auxiliary_launch::{
     AuxiliaryInvocation, AuxiliaryLaunchBinding, AuxiliaryRecoveryCandidate,
 };
+mod conversation_turns;
+pub use conversation_turns::ConversationTurnIntent;
 mod conversations;
 mod inventory;
 pub use conversations::ConversationMessage;
