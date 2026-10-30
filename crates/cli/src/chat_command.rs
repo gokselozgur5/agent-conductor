@@ -18,6 +18,16 @@ pub enum ChatCommand {
         #[arg(long = "member")]
         members: Vec<String>,
     },
+    /// Post an operator message; it goes to the coordinator unless addressed.
+    Send {
+        conversation: String,
+        #[arg(long, conflicts_with = "all")]
+        to: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+    },
 }
 
 pub async fn run(socket: &Path, command: ChatCommand) -> i32 {
@@ -28,6 +38,12 @@ pub async fn run(socket: &Path, command: ChatCommand) -> i32 {
             lead,
             members,
         } => create(socket, &project, lead, members).await,
+        ChatCommand::Send {
+            conversation,
+            to,
+            all,
+            text,
+        } => post(socket, conversation, to, all, text.join(" ")).await,
     };
     result.unwrap_or_else(|message| {
         eprintln!("{message}");
@@ -121,6 +137,32 @@ async fn create(
     Ok(0)
 }
 
+fn address(message_id: String, to: Option<String>, everyone: bool) -> Request {
+    Request::RouteConversationMessage {
+        message_id,
+        recipients: to.into_iter().collect(),
+        everyone,
+    }
+}
+
+async fn post(
+    socket: &Path,
+    conversation_id: String,
+    to: Option<String>,
+    everyone: bool,
+    body: String,
+) -> Result<i32, String> {
+    let message_id = format!("msg-{}", uuid::Uuid::now_v7());
+    let saved = Request::SendConversationMessage {
+        conversation_id,
+        message_id: message_id.clone(),
+        body,
+    };
+    rpc(socket, saved).await?;
+    rpc(socket, address(message_id, to, everyone)).await?;
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +177,24 @@ mod tests {
             room["members"][1],
             json!({"agent_id": "worker", "reports_to": "lead", "observes": ["lead"]})
         );
+    }
+
+    #[test]
+    fn unaddressed_message_goes_to_the_coordinator_only() {
+        let Request::RouteConversationMessage {
+            recipients,
+            everyone,
+            ..
+        } = address("m".into(), None, false)
+        else {
+            panic!("wrong request")
+        };
+        assert!(recipients.is_empty() && !everyone);
+        let Request::RouteConversationMessage { recipients, .. } =
+            address("m".into(), Some("worker".into()), false)
+        else {
+            panic!("wrong request")
+        };
+        assert_eq!(recipients, ["worker"]);
     }
 }
