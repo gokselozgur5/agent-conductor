@@ -1022,3 +1022,45 @@ async fn only_an_opened_continuation_admits_the_author_on_its_decision() {
     assert!(store.reserve_conversation_turn(&intent, 9).await.unwrap());
     assert!(!store.reserve_conversation_turn(&intent, 10).await.unwrap());
 }
+
+#[tokio::test]
+async fn a_blocked_nested_continuation_still_settles_the_parent_batch() {
+    let (_root, store) = fixture(&[
+        ("lead", None),
+        ("worker", Some("lead")),
+        ("child", Some("worker")),
+    ])
+    .await;
+    reply(&store, "reply", "operator", "lead", &decision(&["worker"])).await;
+    store.examine_conversation_reply("reply", 3).await.unwrap();
+    reply(
+        &store,
+        "worker-reply",
+        "reply",
+        "worker",
+        &decision(&["child"]),
+    )
+    .await;
+    store
+        .examine_conversation_reply("worker-reply", 4)
+        .await
+        .unwrap();
+    reply(&store, "child-reply", "worker-reply", "child", "Done").await;
+    store
+        .examine_conversation_reply("child-reply", 5)
+        .await
+        .unwrap();
+    store
+        .open_conversation_continuation("worker-reply", 6)
+        .await
+        .unwrap();
+    // The worker's profile is gone, so its continuation is blocked, not run.
+    store
+        .block_conversation_recipient("worker-reply", "worker", 7)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.next_ready_continuation().await.unwrap(),
+        Some(("reply".into(), "lead".into()))
+    );
+}
