@@ -538,3 +538,23 @@ async fn coordinator_delegates_to_its_subordinate_without_operator_relay() {
     assert_eq!(messages[2].body, "Worker finished the inspection");
     assert!(store.workflows().await.unwrap().is_empty());
 }
+
+fn assert_delegation_prompts(root: &std::path::Path) {
+    let prompts = std::fs::read_to_string(root.join("prompts")).unwrap();
+    let (lead_prompt, worker_prompt) =
+        prompts.split_at(prompts.find("You are agent worker").unwrap());
+    assert!(lead_prompt.contains("as agent lead"));
+    assert!(lead_prompt.contains("\"agent_id\":\"<one of worker>\""));
+    assert!(worker_prompt.contains("Your supervisor lead assigned you this instruction"));
+    assert!(worker_prompt.contains("operator request shared-request, depth 1"));
+    // The stored instruction itself, not only the decision text echoed in context.
+    assert!(worker_prompt.contains("depth 1):\nInspect the parser\nCarry out the instruction"));
+    assert!(!worker_prompt.contains("<one of"));
+}
+
+#[tokio::test]
+async fn delegated_worker_receives_the_stored_instruction_not_the_contract() {
+    let root = tempfile::tempdir().unwrap();
+    delegated_room(root.path(), true).await;
+    assert_delegation_prompts(root.path());
+}
