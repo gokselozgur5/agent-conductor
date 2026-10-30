@@ -304,4 +304,40 @@ mod tests {
         };
         assert_eq!(recipients, ["worker"]);
     }
+
+    fn message(sender: Option<&str>, body: &str, outcome: Option<&str>, routing: &Value) -> Value {
+        let examination = outcome.map(|o| json!({"outcome": o, "detail": "agent not in room"}));
+        json!({"sequence": 2, "agent_id": sender, "body": body, "examination": examination, "routing": routing})
+    }
+
+    #[test]
+    fn authorized_decision_reads_as_tasks_with_recipient_state() {
+        let decision = r#"{"schema":"conductor.delegation.v1","assignments":[{"agent_id":"worker","instruction":"write fib.py"}]}"#;
+        let routing = json!([{"agent_id": "worker", "kind": "delegated", "state": "unknown"},
+            {"agent_id": "worker", "kind": "information", "state": "pending"}]);
+        let shown = render(&message(
+            Some("lead"),
+            decision,
+            Some("authorized"),
+            &routing,
+        ));
+        assert_eq!(
+            shown,
+            "#2 lead → worker (unknown)\n    [task for worker] write fib.py\n"
+        );
+    }
+
+    #[test]
+    fn refused_decision_keeps_its_text_and_reason() {
+        let shown = render(&message(
+            Some("lead"),
+            "{\"x\":1}",
+            Some("rejected"),
+            &json!([]),
+        ));
+        assert_eq!(
+            shown,
+            "#2 lead\n    {\"x\":1}\n    ! delegation refused: agent not in room\n"
+        );
+    }
 }
