@@ -100,3 +100,13 @@ reopens SQLite, requires complete rollback or the exact committed state, compare
 unrelated ownership tables and audits, preserves file bytes, refuses replay of
 committed effects and rejects false closure of an unknown operation. These
 process exits are distinct from future cancellation and physical power loss.
+
+## Auxiliary host reconciliation crash boundaries
+
+`host_reconciliation_survives_abrupt_exit_on_both_sides` exercises both host
+observation and settlement branches using synthetic auxiliary records. Four real
+child exits occur at the audit write before commit or after successful return.
+Reopening must preserve the entire pre-transaction or post-transaction table
+snapshot through both writer and reader connections, with SQLite integrity intact.
+The after-commit positive control must change state. These selected boundaries do
+not prove physical reboot, unrestricted worker fencing, or every statement/branch.
