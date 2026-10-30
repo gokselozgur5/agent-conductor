@@ -9,4 +9,4 @@
 #chat .controls{flex-wrap:wrap}#chat-conversations{min-width:0;flex:1;width:0}#chat-agent{min-width:0;max-width:100%}#chat .controls label{flex-shrink:0}
 
 #queue{padding-left:24px;overflow-wrap:anywhere}#queue li{min-width:0;max-width:100%}#chat-room-summary{overflow-wrap:anywhere}
-.chat-routing{margin:6px 0 0;padding-left:18px;color:#98a5b8;font-size:.85em}.chat-routing li{overflow-wrap:anywhere}.chat-message small{display:block}
+.chat-routing{margin:6px 0 0;padding-left:18px;color:#98a5b8;font-size:.85em}.chat-routing li{overflow-wrap:anywhere}.chat-assignments{margin:6px 0;padding-left:18px}.chat-assignments li{white-space:pre-wrap;overflow-wrap:anywhere}.chat-message small{display:block}
