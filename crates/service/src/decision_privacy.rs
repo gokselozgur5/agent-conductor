@@ -1,8 +1,12 @@
 use agent_conductor_domain::{CommandKind, Task};
 use conductor_runtime::redact_credentials;
 
-/// Redacts only free decision text, retaining identities and authority fields.
+/// Redacts free decision/blocker text, retaining identities and authority fields.
 pub(crate) fn redact_task(task: &mut Task) {
+    if let Some(blocker) = &mut task.blocker {
+        blocker.detail = redact_credentials(&blocker.detail);
+        blocker.resume_when = redact_credentials(&blocker.resume_when);
+    }
     for decision in &mut task.decisions {
         decision.question = redact_credentials(&decision.question);
         if let Some(resolution) = &mut decision.resolution {
@@ -13,6 +17,14 @@ pub(crate) fn redact_task(task: &mut Task) {
 
 /// Call only after validating the original command and hashing its full input.
 pub(crate) fn redact_command(kind: &mut CommandKind) -> bool {
+    if let CommandKind::Block { blocker } = kind {
+        let detail = redact_credentials(&blocker.detail);
+        let resume_when = redact_credentials(&blocker.resume_when);
+        let changed = detail != blocker.detail || resume_when != blocker.resume_when;
+        blocker.detail = detail;
+        blocker.resume_when = resume_when;
+        return changed;
+    }
     let text = match kind {
         CommandKind::OpenDecision { question, .. } => question,
         CommandKind::ResolveDecision { rationale, .. } => rationale,
