@@ -134,3 +134,40 @@ both writer and reader connections. Each post-commit control must change state.
 These four paths map to three transaction owners. Fixture process identities and
 shutdown proofs are synthetic; this verifies database atomicity, not receipt
 provenance, native process fencing, physical reboot or every transaction branch.
+
+## Conversation route transaction owner (schema 36)
+
+`route_conversation_message` owns a SQLx transaction spanning the immutable
+recipient snapshot and every inbox row. `cancel_conversation_route` aborts the
+caller at the first actual inbox insert, after the route insert. The test compares
+all tables through both writer and reader connections, then reruns the operation
+as a positive control. This selected cancellation boundary covers partial fan-out;
+it does not establish native worker fencing or every crash boundary.
+
+## Conversation delegation authorization owner (schema 38)
+
+`authorize_conversation_delegation` re-reads native reply provenance, room topology,
+causal ancestry and cumulative assignment usage while owning a SQLx transaction.
+The immutable batch and every recipient assignment commit together. The selected
+cancellation regression pauses at the first actual assignment insert and compares
+all tables through writer and reader connections after abort. A separate trigger
+refuses the second insert and requires complete rollback before a successful retry.
+Concurrent admissions at the root budget cannot exceed 32 assignments. These tests
+prove the selected database boundaries, not native execution, reporting-round
+limits, unrestricted descendant fencing or physical reboot recovery.
+
+## Conversation reply examination owner (schema 39)
+
+`examine_conversation_reply` records exactly one durable outcome per settled
+native room reply: `ordinary` (not a delegation decision, information only),
+`authorized` or `rejected` with the semantic reason. An authorized decision and
+its examination record commit in one SQLx-owned transaction through the shared
+`authorize_in` path; a semantic refusal rolls that transaction back and records
+the rejection in a fresh one; a database failure is returned and nothing is
+recorded, so the reply is examined again later. The selected cancellation
+regression pauses at the examination insert after the batch and assignment
+writes and requires complete rollback through writer and reader connections
+before a successful retry. A trigger-induced batch failure proves the database
+failure path records nothing. Examination never launches work; queue and turn
+reservation separately require an operator message or an assignment authorized
+for that exact recipient.

@@ -19,7 +19,28 @@ pub struct ConversationTurnIntent<'a> {
     pub prompt_sha256: &'a str,
 }
 
+/// Native reply provenance, read from the settled turn rather than model fields.
+#[derive(Debug, sqlx::FromRow)]
+pub struct ConversationReplyOrigin {
+    pub conversation_id: String,
+    pub parent_message_id: String,
+    pub author_agent_id: String,
+    pub body: String,
+}
+
 impl Store {
+    /// Resolves an actual settled native reply and its immutable author binding.
+    /// Agent-looking text without a corresponding turn is not execution authority.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn conversation_reply_origin(
+        &self,
+        reply_id: &str,
+    ) -> Result<Option<ConversationReplyOrigin>, StoreError> {
+        Ok(sqlx::query_as("SELECT m.conversation_id,t.message_id AS parent_message_id,t.agent_id AS author_agent_id,m.body FROM conversation_turns t JOIN conversation_messages m ON m.id=t.reply_message_id WHERE m.id=? AND t.state='replied' AND m.sender='agent' AND m.agent_id=t.agent_id AND m.conversation_id=t.conversation_id")
+            .bind(reply_id).fetch_optional(&self.inner.readers).await?)
+    }
+
     /// Retains an uncertain execution without granting another launch.
     /// # Errors
     /// Returns database errors.
@@ -92,11 +113,13 @@ impl Store {
         Ok(())
     }
 
-    /// Reserves an operator message for exactly one native launch attempt.
+    /// Reserves a message-recipient pair for exactly one native launch attempt.
     /// Only a fresh `true` result permits the caller to initiate execution.
+    /// The message must be an operator request or a native reply whose stored
+    /// delegation batch authorizes exactly this recipient.
     /// A crash after reservation leaves uncertainty; replay must not launch again.
     /// # Errors
-    /// Rejects changed bindings, non-operator messages and overlapping turns.
+    /// Rejects changed bindings, unauthorized messages and overlapping turns.
     pub async fn reserve_conversation_turn(
         &self,
         intent: &ConversationTurnIntent<'_>,
@@ -119,12 +142,12 @@ impl Store {
             ));
         }
         let mut writer = self.inner.writer.lock().await;
-        let inserted = sqlx::query("INSERT INTO conversation_turns(message_id,conversation_id,agent_id,launch_id,profile_sha256,prompt_sha256,state,created_at_ms) SELECT id,conversation_id,?,?,?,?,'launch_intent',? FROM conversation_messages WHERE id=? AND sender='operator' ON CONFLICT(message_id) DO NOTHING")
+        let inserted = sqlx::query("INSERT INTO conversation_turns(message_id,conversation_id,agent_id,launch_id,profile_sha256,prompt_sha256,state,created_at_ms) SELECT id,conversation_id,?,?,?,?,'launch_intent',? FROM conversation_messages WHERE id=? AND (sender='operator' OR EXISTS(SELECT 1 FROM conversation_assignments a WHERE a.source_reply_id=conversation_messages.id AND a.agent_id=?) OR EXISTS(SELECT 1 FROM conversation_continuations c WHERE c.source_reply_id=conversation_messages.id AND c.agent_id=?)) ON CONFLICT(message_id,agent_id) DO NOTHING")
             .bind(intent.agent_id).bind(intent.launch_id).bind(intent.profile_sha256)
-            .bind(intent.prompt_sha256).bind(now_ms).bind(intent.message_id)
+            .bind(intent.prompt_sha256).bind(now_ms).bind(intent.message_id).bind(intent.agent_id).bind(intent.agent_id)
             .execute(&mut *writer).await?.rows_affected();
-        let saved: Option<(String, String, String, String)> = sqlx::query_as("SELECT agent_id,launch_id,profile_sha256,prompt_sha256 FROM conversation_turns WHERE message_id=?")
-            .bind(intent.message_id).fetch_optional(&mut *writer).await?;
+        let saved: Option<(String, String, String, String)> = sqlx::query_as("SELECT agent_id,launch_id,profile_sha256,prompt_sha256 FROM conversation_turns WHERE message_id=? AND agent_id=?")
+            .bind(intent.message_id).bind(intent.agent_id).fetch_optional(&mut *writer).await?;
         let expected = (
             intent.agent_id.into(),
             intent.launch_id.into(),
@@ -135,7 +158,7 @@ impl Store {
             Some(value) if value == expected => Ok(inserted == 1),
             Some(_) => Err(StoreError::IdempotencyCollision),
             None => Err(StoreError::Integrity(
-                "operator message required for conversation turn".into(),
+                "operator message, authorized assignment or continuation required for conversation turn".into(),
             )),
         }
     }

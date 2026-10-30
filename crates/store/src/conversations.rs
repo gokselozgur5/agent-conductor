@@ -36,7 +36,7 @@ impl Store {
     /// # Errors
     /// Returns database errors.
     pub async fn conversation_message_status(&self, id: &str) -> Result<String, StoreError> {
-        Ok(sqlx::query_scalar("SELECT CASE WHEN m.sender='agent' THEN 'replied' ELSE COALESCE(t.state,j.state,'saved') END FROM conversation_messages m LEFT JOIN conversation_jobs j ON j.message_id=m.id LEFT JOIN conversation_turns t ON t.message_id=m.id WHERE m.id=?")
+        Ok(sqlx::query_scalar("SELECT CASE WHEN m.sender='agent' THEN 'replied' WHEN EXISTS(SELECT 1 FROM conversation_turns t WHERE t.message_id=m.id AND t.state='unknown') THEN 'unknown' WHEN EXISTS(SELECT 1 FROM conversation_turns t WHERE t.message_id=m.id AND t.state='launch_intent') THEN 'launch_intent' WHEN EXISTS(SELECT 1 FROM conversation_jobs j WHERE j.message_id=m.id AND j.state='blocked') THEN 'blocked' WHEN EXISTS(SELECT 1 FROM conversation_jobs j WHERE j.message_id=m.id AND NOT EXISTS(SELECT 1 FROM conversation_turns t WHERE t.message_id=j.message_id AND t.agent_id=j.agent_id)) THEN 'queued' WHEN EXISTS(SELECT 1 FROM conversation_deliveries d WHERE d.message_id=m.id AND d.kind='assignment' AND NOT EXISTS(SELECT 1 FROM conversation_jobs j WHERE j.message_id=d.message_id AND j.agent_id=d.agent_id)) THEN 'queued' WHEN EXISTS(SELECT 1 FROM conversation_turns t WHERE t.message_id=m.id AND t.state='replied') THEN 'replied' ELSE 'saved' END FROM conversation_messages m WHERE m.id=?")
             .bind(id).fetch_one(&self.inner.readers).await?)
     }
 

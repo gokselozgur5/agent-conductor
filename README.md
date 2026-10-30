@@ -23,6 +23,8 @@ socket, database, project registration and repository watcher. In another termin
 See [local operator setup](docs/LOCAL_OPERATOR.md) for model authentication,
 preparing plans with accepted adapter pins, event-triggered tasks and restart.
 
+The active completion sequence and exit criteria are in the [roadmap to finish](docs/ROADMAP_TO_FINISH.md).
+
 ## Current implementation
 
 The Rust runtime supports durable task/lease state, private dirty Git snapshots,

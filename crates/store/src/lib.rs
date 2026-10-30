@@ -26,10 +26,16 @@ pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
 pub use auxiliary_launch::{
     AuxiliaryInvocation, AuxiliaryLaunchBinding, AuxiliaryRecoveryCandidate,
 };
+mod conversation_continuations;
+mod conversation_delegations;
+pub use conversation_delegations::{ConversationAssignment, ConversationReplyExamination};
 mod conversation_jobs;
+mod conversation_rooms;
+mod conversation_routes;
+pub use conversation_routes::{ConversationDelivery, ConversationRecipient};
 mod conversation_turns;
 mod conversations;
-pub use conversation_turns::ConversationTurnIntent;
+pub use conversation_turns::{ConversationReplyOrigin, ConversationTurnIntent};
 mod inventory;
 pub use conversations::{ConversationHeader, ConversationMessage};
 mod usage;

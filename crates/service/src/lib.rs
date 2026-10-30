@@ -1,7 +1,15 @@
 mod broker_candidate_failure;
 mod conversation;
+mod conversation_delegation;
+mod conversation_room;
+pub use conversation_delegation::{DelegationPlan, parse_delegation};
+pub use conversation_room::NativeDelegationProposal;
+mod conversation_routing;
 pub use broker_candidate_failure::BrokerCandidateFailure;
 pub use conversation::ConversationAgent;
+pub use conversation_routing::{
+    ConversationRoom, RoomConfiguration, RoomDeliveryKind, RoomMember, RoomRecipient,
+};
 mod broker_candidate;
 pub use broker_candidate::BrokerCandidate;
 mod broker_authority;
@@ -747,6 +755,37 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                         .collect::<Result<_, _>>()
                         .map_err(json_error)?,
                 })
+            }
+            Request::ConversationRoom { conversation_id } => {
+                let configuration = self
+                    .store
+                    .conversation_room(&conversation_id)
+                    .await
+                    .map_err(store_error)?
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()
+                    .map_err(json_error)?;
+                Ok(Response::ConversationRoom { configuration })
+            }
+            Request::ConfigureConversationRoom {
+                conversation_id,
+                configuration,
+            } => {
+                let config = serde_json::from_value(configuration).map_err(json_error)?;
+                self.configure_room(&conversation_id, config)
+                    .await
+                    .map_err(store_error)?;
+                Ok(Response::ConversationRoomConfigured { conversation_id })
+            }
+            Request::RouteConversationMessage {
+                message_id,
+                recipients,
+                everyone,
+            } => {
+                self.route_room_request(&message_id, &recipients, everyone)
+                    .await
+                    .map_err(store_error)?;
+                Ok(Response::ConversationTurnQueued { message_id })
             }
             Request::ConversationAgents => {
                 let agents = self.conversation_agents.read().map_err(|_| {
