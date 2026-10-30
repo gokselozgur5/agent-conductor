@@ -402,6 +402,35 @@ async fn delegation_proposal_requires_native_provenance_and_never_queues_work() 
     assert!(store.workflows().await.unwrap().is_empty());
 }
 
+/// Replies with a strict delegation decision unless the prompt carries a stored
+/// assignment, in which case it reports finished work. Each launch is recorded.
+fn delegating_fixture(
+    root: &std::path::Path,
+    lead: &str,
+) -> (ConversationAgent, ConversationAgent) {
+    let worker = root.join("delegating-fixture");
+    std::fs::write(&worker, r#"#!/bin/sh
+set -eu
+printf 'launch\n' >> launches
+printf '%s\n' "$@" >> prompts
+case "$*" in
+  *"assigned you this instruction"*) text='Worker finished the inspection';;
+  *) text='{\"schema\":\"conductor.delegation.v1\",\"assignments\":[{\"agent_id\":\"worker\",\"instruction\":\"Inspect the parser\"}]}';;
+esac
+printf '%s\n' '{"type":"thread.started","thread_id":"fixture"}' '{"type":"turn.started"}' "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"$text\"}}" '{"type":"turn.completed","usage":{}}'
+"#).unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_, template) = fixture_agent(root);
+    let mut coordinator = template;
+    coordinator.id = lead.into();
+    coordinator.vendor.executable.clone_from(&worker);
+    coordinator.vendor.executable_sha256 =
+        format!("{:x}", Sha256::digest(std::fs::read(&worker).unwrap()));
+    let mut subordinate = coordinator.clone();
+    subordinate.id = "worker".into();
+    (coordinator, subordinate)
+}
+
 async fn drain(
     service: &PersistentControlService,
     receiver: &tokio::sync::watch::Receiver<bool>,
@@ -447,4 +476,65 @@ fn launches(root: &std::path::Path) -> usize {
         .unwrap()
         .lines()
         .count()
+}
+
+/// A configured two-member room after one default operator request has been
+/// dispatched to rest. `keep_worker` false drops the worker's profile on restart.
+async fn delegated_room(
+    root: &std::path::Path,
+    keep_worker: bool,
+) -> (
+    Store,
+    PersistentControlService,
+    tokio::sync::watch::Receiver<bool>,
+) {
+    let (lead, worker) = delegating_fixture(root, "lead");
+    let store = seeded_room(root, "room.sqlite3").await;
+    let service = PersistentControlService::start(store.clone(), 1)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![lead.clone(), worker.clone()])
+        .unwrap();
+    service
+        .configure_room("room", shared_configuration(&lead.id, &worker.id))
+        .await
+        .unwrap();
+    drop(service);
+    let service = PersistentControlService::start(store.clone(), 2)
+        .await
+        .unwrap();
+    let profiles = if keep_worker {
+        vec![lead, worker]
+    } else {
+        vec![lead]
+    };
+    service.configure_conversation_agents(profiles).unwrap();
+    // The default route reaches only the coordinator; nobody selects the worker.
+    service
+        .route_room_request("shared-request", &[], false)
+        .await
+        .unwrap();
+    let (cancel, receiver) = tokio::sync::watch::channel(false);
+    std::mem::forget(cancel);
+    drain(&service, &receiver).await;
+    (store, service, receiver)
+}
+
+#[tokio::test]
+async fn coordinator_delegates_to_its_subordinate_without_operator_relay() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, _service, _receiver) = delegated_room(root.path(), true).await;
+    assert_eq!(launches(root.path()), 2);
+    let messages = store.conversation_messages("room", 0).await.unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[1].agent_id.as_deref(), Some("lead"));
+    assert!(
+        messages[1]
+            .body
+            .starts_with("{\"schema\":\"conductor.delegation.v1\"")
+    );
+    assert_eq!(messages[2].agent_id.as_deref(), Some("worker"));
+    assert_eq!(messages[2].body, "Worker finished the inspection");
+    assert!(store.workflows().await.unwrap().is_empty());
 }
