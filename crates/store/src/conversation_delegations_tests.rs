@@ -1064,3 +1064,42 @@ async fn a_blocked_nested_continuation_still_settles_the_parent_batch() {
         Some(("reply".into(), "lead".into()))
     );
 }
+
+/// Runs `rounds` continuations of the lead, each replying with a new decision.
+async fn correct(store: &Store, rounds: usize) -> Vec<ConversationReplyExamination> {
+    let (mut parent, mut outcomes) = ("reply".to_string(), Vec::new());
+    for round in 0..rounds {
+        let (done, next) = (format!("worker-{round}"), format!("correction-{round}"));
+        reply(store, &done, &parent, "worker", "Done").await;
+        store.examine_conversation_reply(&done, 5).await.unwrap();
+        store
+            .open_conversation_continuation(&parent, 6)
+            .await
+            .unwrap();
+        reply(store, &next, &parent, "lead", &decision(&["worker"])).await;
+        outcomes.push(store.examine_conversation_reply(&next, 7).await.unwrap());
+        parent = next;
+    }
+    outcomes
+}
+
+#[tokio::test]
+async fn continuations_may_correct_twice_and_the_third_round_is_refused() {
+    let (_root, store) = fixture(&[("lead", None), ("worker", Some("lead"))]).await;
+    reply(&store, "reply", "operator", "lead", &decision(&["worker"])).await;
+    store.examine_conversation_reply("reply", 3).await.unwrap();
+    let outcomes = correct(&store, 3).await;
+    assert_eq!(outcomes[0].outcome, "authorized");
+    assert_eq!(outcomes[1].outcome, "authorized");
+    assert_eq!(outcomes[2].outcome, "rejected");
+    assert_eq!(outcomes[2].detail, "correction round budget exhausted");
+    // Corrections keep the original root and depth and advance only the round.
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT root_message_id,depth,round FROM conversation_delegation_batches ORDER BY round",
+    )
+    .fetch_all(&store.inner.readers)
+    .await
+    .unwrap();
+    let expected = |round| ("operator".to_string(), 1, round);
+    assert_eq!(rows, vec![expected(0), expected(1), expected(2)]);
+}
