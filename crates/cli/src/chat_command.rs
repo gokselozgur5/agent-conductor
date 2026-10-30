@@ -28,9 +28,11 @@ pub enum ChatCommand {
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
     },
+    /// Show the room history.
+    Log { conversation: String },
 }
 
-pub async fn run(socket: &Path, command: ChatCommand) -> i32 {
+pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
     let result = match command {
         ChatCommand::Ls => list(socket).await,
         ChatCommand::New {
@@ -44,6 +46,7 @@ pub async fn run(socket: &Path, command: ChatCommand) -> i32 {
             all,
             text,
         } => post(socket, conversation, to, all, text.join(" ")).await,
+        ChatCommand::Log { conversation } => history(socket, &conversation, json).await,
     };
     result.unwrap_or_else(|message| {
         eprintln!("{message}");
@@ -160,6 +163,46 @@ async fn post(
     };
     rpc(socket, saved).await?;
     rpc(socket, address(message_id, to, everyone)).await?;
+    Ok(0)
+}
+
+/// Reads every page after `after`, returning the messages and the last sequence.
+async fn page(
+    socket: &Path,
+    conversation_id: &str,
+    mut after: i64,
+) -> Result<(Vec<Value>, i64), String> {
+    let mut all = Vec::new();
+    loop {
+        let request = Request::ConversationMessages {
+            conversation_id: conversation_id.into(),
+            after,
+        };
+        let Response::ConversationMessages {
+            messages,
+            next_after,
+        } = rpc(socket, request).await?
+        else {
+            return Err("unexpected daemon response".into());
+        };
+        after = messages
+            .last()
+            .and_then(|m| m["sequence"].as_i64())
+            .unwrap_or(after);
+        all.extend(messages);
+        if next_after.is_none() {
+            return Ok((all, after));
+        }
+    }
+}
+
+async fn history(socket: &Path, conversation_id: &str, json: bool) -> Result<i32, String> {
+    let (messages, _) = page(socket, conversation_id, 0).await?;
+    for message in messages {
+        if json {
+            println!("{message}");
+        }
+    }
     Ok(0)
 }
 

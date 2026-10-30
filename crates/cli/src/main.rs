@@ -155,7 +155,7 @@ enum Command {
 async fn main() {
     let cli = Cli::parse();
     if let Command::Chat(command) = cli.command {
-        std::process::exit(chat_command::run(&cli.socket, command).await);
+        std::process::exit(chat_command::run(&cli.socket, cli.json, command).await);
     }
     if let Command::TransferSnapshot(args) = &cli.command {
         std::process::exit(snapshot_command::run(args));
