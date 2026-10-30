@@ -631,7 +631,7 @@ impl<C: Clock> PersistentControlService<C> {
         // Validate the original bounded input first. Keep its request_hash so
         // distinct secrets cannot collapse into the same idempotent request.
         let mut command = command;
-        let request_json = if decision_privacy::redact_command(&mut command.kind) {
+        let request_json = if decision_privacy::redact_command(&mut command) {
             applied = apply(&old, &command, clock).map_err(rejection_error)?;
             serde_json::to_string(&(row.id.as_str(), &command)).map_err(json_error)?
         } else {

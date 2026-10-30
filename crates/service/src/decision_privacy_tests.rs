@@ -193,3 +193,31 @@ async fn blocker_free_text_is_redacted_in_task_response() {
     let saved: String = sqlx::query_scalar("SELECT outcome_json FROM command_idempotency WHERE idempotency_key='block'").fetch_one(store.readers()).await.unwrap();
     assert_eq!(saved, legacy);
 }
+
+#[tokio::test]
+async fn command_reason_privacy_preserves_validation_and_original_identity() {
+    let (_directory, store) = lifecycle_store().await;
+    let service = PersistentControlService::start_with_clock(store.clone(), 100, FixedClock::new(0)).await.unwrap();
+    let mut request = decision_request(&Task::new(TaskId("task".into()), vec![]), CommandKind::MarkReady, "reason");
+    let secret = decision_canary();
+    let Request::ApplyCommand { command, .. } = &mut request else { unreachable!() };
+    command.reason = format!("Operator reason {secret}");
+    let mut invalid = request.clone();
+    let Request::ApplyCommand { command, .. } = &mut invalid else { unreachable!() };
+    command.reason = "   ".into();
+    assert!(service.handle(invalid).await.is_err());
+    let applied = decision_task(service.handle(request.clone()).await.unwrap());
+    assert_eq!(applied.task.aggregate.version, 1);
+    assert!(decision_task(service.handle(request.clone()).await.unwrap()).replayed);
+    let mut changed = request;
+    let Request::ApplyCommand { command, .. } = &mut changed else { unreachable!() };
+    command.reason.push_str("DifferentSecret");
+    assert!(service.handle(changed).await.is_err());
+    let rows: Vec<String> = sqlx::query_scalar("SELECT payload_json FROM audit_events WHERE task_id='task'").fetch_all(store.readers()).await.unwrap();
+    assert!(rows.iter().any(|row| row.contains("Operator reason [redacted]")));
+    assert!(rows.iter().all(|row| !row.contains(&secret)));
+    let task = store.task("task").await.unwrap().unwrap();
+    assert!(!task.aggregate_json.contains(&secret));
+    let outcomes: Vec<String> = sqlx::query_scalar("SELECT outcome_json FROM command_idempotency").fetch_all(store.readers()).await.unwrap();
+    assert!(outcomes.iter().all(|row| !row.contains(&secret)));
+}
