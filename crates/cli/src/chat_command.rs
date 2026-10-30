@@ -29,8 +29,12 @@ pub enum ChatCommand {
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
     },
-    /// Show the room history.
-    Log { conversation: String },
+    /// Show the room history; --follow keeps printing new messages and state changes.
+    Log {
+        conversation: String,
+        #[arg(long)]
+        follow: bool,
+    },
 }
 
 pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
@@ -47,7 +51,10 @@ pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
             all,
             text,
         } => post(socket, conversation, to, all, text.join(" ")).await,
-        ChatCommand::Log { conversation } => history(socket, &conversation, json).await,
+        ChatCommand::Log {
+            conversation,
+            follow,
+        } => history(socket, &conversation, json, follow).await,
     };
     result.unwrap_or_else(|message| {
         eprintln!("{message}");
@@ -258,16 +265,35 @@ fn render(message: &Value) -> String {
     out
 }
 
-async fn history(socket: &Path, conversation_id: &str, json: bool) -> Result<i32, String> {
-    let (messages, _) = page(socket, conversation_id, 0).await?;
-    for message in messages {
-        if json {
-            println!("{message}");
-        } else {
-            println!("{}", render(&message));
+async fn history(
+    socket: &Path,
+    conversation_id: &str,
+    json: bool,
+    follow: bool,
+) -> Result<i32, String> {
+    let mut shown = std::collections::BTreeMap::new();
+    loop {
+        let (messages, _) = page(socket, conversation_id, 0).await?;
+        for message in messages {
+            let state = recipients(&message);
+            match shown.insert(message["sequence"].to_string(), state.clone()) {
+                None if json => println!("{message}"),
+                None => println!("{}", render(&message)),
+                Some(before) if before != state && !json => {
+                    println!(
+                        "#{} {}{state}\n",
+                        message["sequence"],
+                        message["agent_id"].as_str().unwrap_or("you")
+                    );
+                }
+                Some(_) => {}
+            }
         }
+        if !follow {
+            return Ok(0);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
-    Ok(0)
 }
 
 #[cfg(test)]
