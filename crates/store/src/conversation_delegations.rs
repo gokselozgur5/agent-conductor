@@ -156,6 +156,29 @@ impl Store {
             .fetch_optional(&self.inner.readers).await?)
     }
 
+    /// Finds an authorized assignment whose native job has not been admitted for
+    /// that exact recipient. Authorization alone never launches work.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn next_unadmitted_conversation_assignment(
+        &self,
+    ) -> Result<Option<(String, String)>, StoreError> {
+        Ok(sqlx::query_as("SELECT a.source_reply_id,a.agent_id FROM conversation_assignments a JOIN conversation_messages m ON m.id=a.source_reply_id WHERE NOT EXISTS(SELECT 1 FROM conversation_jobs j WHERE j.message_id=a.source_reply_id AND j.agent_id=a.agent_id) ORDER BY m.sequence,a.agent_id LIMIT 1")
+            .fetch_optional(&self.inner.readers).await?)
+    }
+
+    /// Reads the assignment authorized for exactly this recipient, if any.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn conversation_assignment(
+        &self,
+        reply_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<ConversationAssignment>, StoreError> {
+        Ok(sqlx::query_as("SELECT a.source_reply_id,b.conversation_id,b.root_message_id,b.parent_message_id,b.author_agent_id,a.agent_id,a.instruction,b.depth FROM conversation_assignments a JOIN conversation_delegation_batches b ON b.source_reply_id=a.source_reply_id WHERE a.source_reply_id=? AND a.agent_id=?")
+            .bind(reply_id).bind(agent_id).fetch_optional(&self.inner.readers).await?)
+    }
+
     /// Reads a bounded immutable authorization batch, without granting execution.
     /// # Errors
     /// Returns database errors.

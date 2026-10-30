@@ -115,9 +115,11 @@ impl Store {
 
     /// Reserves a message-recipient pair for exactly one native launch attempt.
     /// Only a fresh `true` result permits the caller to initiate execution.
+    /// The message must be an operator request or a native reply whose stored
+    /// delegation batch authorizes exactly this recipient.
     /// A crash after reservation leaves uncertainty; replay must not launch again.
     /// # Errors
-    /// Rejects changed bindings, non-operator messages and overlapping turns.
+    /// Rejects changed bindings, unauthorized messages and overlapping turns.
     pub async fn reserve_conversation_turn(
         &self,
         intent: &ConversationTurnIntent<'_>,
@@ -140,9 +142,9 @@ impl Store {
             ));
         }
         let mut writer = self.inner.writer.lock().await;
-        let inserted = sqlx::query("INSERT INTO conversation_turns(message_id,conversation_id,agent_id,launch_id,profile_sha256,prompt_sha256,state,created_at_ms) SELECT id,conversation_id,?,?,?,?,'launch_intent',? FROM conversation_messages WHERE id=? AND sender='operator' ON CONFLICT(message_id,agent_id) DO NOTHING")
+        let inserted = sqlx::query("INSERT INTO conversation_turns(message_id,conversation_id,agent_id,launch_id,profile_sha256,prompt_sha256,state,created_at_ms) SELECT id,conversation_id,?,?,?,?,'launch_intent',? FROM conversation_messages WHERE id=? AND (sender='operator' OR EXISTS(SELECT 1 FROM conversation_assignments a WHERE a.source_reply_id=conversation_messages.id AND a.agent_id=?)) ON CONFLICT(message_id,agent_id) DO NOTHING")
             .bind(intent.agent_id).bind(intent.launch_id).bind(intent.profile_sha256)
-            .bind(intent.prompt_sha256).bind(now_ms).bind(intent.message_id)
+            .bind(intent.prompt_sha256).bind(now_ms).bind(intent.message_id).bind(intent.agent_id)
             .execute(&mut *writer).await?.rows_affected();
         let saved: Option<(String, String, String, String)> = sqlx::query_as("SELECT agent_id,launch_id,profile_sha256,prompt_sha256 FROM conversation_turns WHERE message_id=? AND agent_id=?")
             .bind(intent.message_id).bind(intent.agent_id).fetch_optional(&mut *writer).await?;
@@ -156,7 +158,7 @@ impl Store {
             Some(value) if value == expected => Ok(inserted == 1),
             Some(_) => Err(StoreError::IdempotencyCollision),
             None => Err(StoreError::Integrity(
-                "operator message required for conversation turn".into(),
+                "operator message or authorized assignment required for conversation turn".into(),
             )),
         }
     }

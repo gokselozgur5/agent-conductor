@@ -1,9 +1,11 @@
 use crate::{Store, StoreError};
 
 impl Store {
-    /// Queues a stored operator message with an immutable trusted agent profile.
+    /// Queues a stored message with an immutable trusted agent profile. The
+    /// message must be an operator request or a native reply whose delegation
+    /// batch authorizes exactly this recipient; agent prose alone is refused.
     /// # Errors
-    /// Rejects unknown/non-operator messages, invalid JSON and changed replay.
+    /// Rejects unknown/unauthorized messages, invalid JSON and changed replay.
     pub async fn queue_conversation_job(
         &self,
         message_id: &str,
@@ -23,8 +25,8 @@ impl Store {
             ));
         }
         let mut writer = self.inner.writer.lock().await;
-        sqlx::query("INSERT INTO conversation_jobs(message_id,agent_id,agent_profile_json,state,created_at_ms) SELECT id,?,?,'queued',? FROM conversation_messages WHERE id=? AND sender='operator' ON CONFLICT(message_id,agent_id) DO NOTHING")
-            .bind(agent_id).bind(profile_json).bind(now_ms).bind(message_id).execute(&mut *writer).await?;
+        sqlx::query("INSERT INTO conversation_jobs(message_id,agent_id,agent_profile_json,state,created_at_ms) SELECT id,?,?,'queued',? FROM conversation_messages WHERE id=? AND (sender='operator' OR EXISTS(SELECT 1 FROM conversation_assignments a WHERE a.source_reply_id=conversation_messages.id AND a.agent_id=?)) ON CONFLICT(message_id,agent_id) DO NOTHING")
+            .bind(agent_id).bind(profile_json).bind(now_ms).bind(message_id).bind(agent_id).execute(&mut *writer).await?;
         let saved: Option<String> = sqlx::query_scalar(
             "SELECT agent_profile_json FROM conversation_jobs WHERE message_id=? AND agent_id=?",
         )
@@ -35,7 +37,9 @@ impl Store {
         match saved {
             Some(value) if value == profile_json => Ok(()),
             Some(_) => Err(StoreError::IdempotencyCollision),
-            None => Err(StoreError::Integrity("operator message required".into())),
+            None => Err(StoreError::Integrity(
+                "operator message or authorized assignment required".into(),
+            )),
         }
     }
 
