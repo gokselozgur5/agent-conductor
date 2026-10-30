@@ -334,8 +334,17 @@ async fn ancestry(
     if conversation != source.conversation_id {
         return Err(invalid("delegation parent belongs to another room"));
     }
-    let (root, depth) = if sender == "operator" {
-        (source.parent_message_id.clone(), 1)
+    let correction: Option<(String, String, i64, i64)> = sqlx::query_as("SELECT b.root_message_id,b.conversation_id,b.depth,b.round FROM conversation_delegation_batches b JOIN conversation_continuations c ON c.source_reply_id=b.source_reply_id AND c.agent_id=b.author_agent_id WHERE b.source_reply_id=? AND b.author_agent_id=?")
+        .bind(&source.parent_message_id).bind(&source.author_agent_id)
+        .fetch_optional(&mut *connection).await?;
+    let (root, depth, round) = if sender == "operator" {
+        (source.parent_message_id.clone(), 1, 0)
+    } else if let Some((root, room, depth, round)) = correction {
+        // A continuation reply that delegates again opens a bounded correction round.
+        if room != source.conversation_id || round >= 2 {
+            return Err(invalid("correction round budget exhausted"));
+        }
+        (root, depth, round + 1)
     } else {
         let inherited: Option<(String, String, i64)> = sqlx::query_as("SELECT b.root_message_id,b.conversation_id,b.depth FROM conversation_assignments a JOIN conversation_delegation_batches b ON b.source_reply_id=a.source_reply_id WHERE a.source_reply_id=? AND a.agent_id=?")
             .bind(&source.parent_message_id).bind(&source.author_agent_id)
@@ -345,14 +354,14 @@ async fn ancestry(
         if room != source.conversation_id || !(1..4).contains(&depth) {
             return Err(invalid("delegation ancestry or depth refused"));
         }
-        (root, depth + 1)
+        (root, depth + 1, 0)
     };
     let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE id=? AND conversation_id=? AND sender='operator' AND agent_id IS NULL)")
         .bind(&root).bind(&source.conversation_id).fetch_one(connection).await?;
     if !valid {
         return Err(invalid("original operator request required in this room"));
     }
-    Ok((root, depth, 0))
+    Ok((root, depth, round))
 }
 
 fn expected_assignments(
