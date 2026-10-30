@@ -1,3 +1,4 @@
+mod chat_command;
 mod check_command;
 mod snapshot_command;
 use std::path::PathBuf;
@@ -22,6 +23,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Shared conversation room from the terminal.
+    #[command(subcommand)]
+    Chat(chat_command::ChatCommand),
     /// Transfer a source snapshot between accounts without sharing its directory.
     TransferSnapshot(snapshot_command::Args),
     /// Run an approved check in a disposable source copy (does not complete a task).
@@ -150,6 +154,9 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    if let Command::Chat(command) = cli.command {
+        std::process::exit(chat_command::run(&cli.socket, cli.json, command).await);
+    }
     if let Command::TransferSnapshot(args) = &cli.command {
         std::process::exit(snapshot_command::run(args));
     }
@@ -226,7 +233,8 @@ async fn main() {
 #[allow(clippy::too_many_lines)] // Keep the declarative CLI-to-protocol mapping together.
 fn command_request(command: Command) -> Request {
     match command {
-        Command::TransferSnapshot(_)
+        Command::Chat(_)
+        | Command::TransferSnapshot(_)
         | Command::RunCheck(_)
         | Command::InspectProject { .. }
         | Command::InspectWorkspace { .. } => {

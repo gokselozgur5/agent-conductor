@@ -107,6 +107,19 @@ send a message. Switching agents within the same conversation passes prior
 messages to the selected agent. Unknown execution outcomes remain retained and
 are never automatically retried.
 
+The same room runs from the terminal over the daemon's local socket:
+
+```
+conductorctl --socket <sock> chat new --project /abs/dir --lead lead   # prints the ID
+conductorctl --socket <sock> chat send <id> "task for the coordinator"
+conductorctl --socket <sock> chat send <id> --to worker "..."          # or --all
+conductorctl --socket <sock> chat log <id> --follow
+```
+
+`chat new` refuses a project folder that does not exist. `chat log` prints each
+message as `author → recipient (state)`, shows an authorized delegation as its
+tasks and a refused one with its reason; `--json` prints the raw messages.
+
 Native conversation replies do not prove that unrestricted descendants stopped
 writing. Cold backup therefore refuses state containing native conversation turn
 records, including replied turns, until a separate verified recovery procedure
