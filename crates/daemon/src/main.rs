@@ -1,3 +1,4 @@
+mod conversation_dispatcher;
 mod dispatcher;
 mod host_epoch;
 mod recovery_authority;
@@ -34,6 +35,9 @@ struct Args {
     /// Execute explicitly submitted native plans sequentially; credentials stay in process memory.
     #[arg(long, conflicts_with = "run_plan")]
     dispatch: bool,
+    /// Operator-selected native conversation profiles for this OS account.
+    #[arg(long, requires = "dispatch")]
+    conversation_agents: Option<PathBuf>,
     /// Allow one automatic continuation per interrupted workflow with a verified fence.
     #[arg(long, requires = "dispatch")]
     recover_fenced: bool,
@@ -99,6 +103,12 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(path) = &args.conversation_agents
+        && conversation_dispatcher::configure(&service, path).is_err()
+    {
+        eprintln!("conversation profiles could not be loaded for this OS account");
+        std::process::exit(1);
+    }
     if let Some(configs) = &watches {
         service.configure_repository_observation(configs);
         service.set_watcher_status(conductor_protocol::WatcherStatus::Starting);
@@ -119,10 +129,27 @@ async fn main() {
         return;
     }
 
+    serve_operator(&args, watches, workflow_service, server).await;
+    stop_board(board_stop, board_task).await;
+}
+
+async fn serve_operator(
+    args: &Args,
+    watches: Option<Vec<conductor_service::RepositoryWatch>>,
+    workflow_service: PersistentControlService,
+    server: LocalServer<PersistentControlService>,
+) {
     let (watch_stop, watch_rx) = tokio::sync::watch::channel(false);
     let watch_task = watches
         .map(|configs| tokio::spawn(watcher::serve(workflow_service.clone(), configs, watch_rx)));
     let (dispatch_stop, dispatch_rx) = tokio::sync::watch::channel(false);
+    let (conversation_stop, conversation_rx) = tokio::sync::watch::channel(false);
+    let conversation_task = args.conversation_agents.is_some().then(|| {
+        tokio::spawn(conversation_dispatcher::serve(
+            workflow_service.clone(),
+            conversation_rx,
+        ))
+    });
     let dispatch_task = args.dispatch.then(|| {
         tokio::spawn(dispatcher::serve(
             workflow_service,
@@ -142,6 +169,10 @@ async fn main() {
         std::process::exit(1);
     }
     let _ = watch_stop.send(true);
+    let _ = conversation_stop.send(true);
+    if let Some(task) = conversation_task {
+        let _ = task.await;
+    }
     if let Some(task) = watch_task {
         let _ = task.await;
     }
@@ -149,7 +180,6 @@ async fn main() {
     if let Some(task) = dispatch_task {
         let _ = task.await;
     }
-    stop_board(board_stop, board_task).await;
 }
 
 async fn read_host_epoch() -> host_epoch::HostEpoch {
