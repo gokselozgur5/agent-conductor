@@ -985,3 +985,40 @@ async fn a_recipient_that_delegated_settles_after_its_own_continuation() {
         Some(("reply".into(), "lead".into()))
     );
 }
+
+#[tokio::test]
+async fn only_an_opened_continuation_admits_the_author_on_its_decision() {
+    let (_root, store) = authorized_pair().await;
+    settle(&store, "worker").await;
+    settle(&store, "ghost").await;
+    let intent = crate::ConversationTurnIntent {
+        message_id: "reply",
+        agent_id: "lead",
+        launch_id: "continuation-launch",
+        profile_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        prompt_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    };
+    assert!(
+        store
+            .queue_conversation_job("reply", &profile("lead"), 6)
+            .await
+            .is_err()
+    );
+    assert!(store.reserve_conversation_turn(&intent, 6).await.is_err());
+    store
+        .open_conversation_continuation("reply", 7)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .queue_conversation_job("reply", &profile("worker"), 8)
+            .await
+            .is_ok()
+    );
+    store
+        .queue_conversation_job("reply", &profile("lead"), 8)
+        .await
+        .unwrap();
+    assert!(store.reserve_conversation_turn(&intent, 9).await.unwrap());
+    assert!(!store.reserve_conversation_turn(&intent, 10).await.unwrap());
+}
