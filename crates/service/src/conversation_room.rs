@@ -168,6 +168,16 @@ impl<C: Clock> PersistentControlService<C> {
             self.admit_recipient(&reply, &agent).await?;
             return Ok(true);
         }
+        if let Some((reply, author)) = self.store.next_unadmitted_continuation().await? {
+            self.admit_recipient(&reply, &author).await?;
+            return Ok(true);
+        }
+        if let Some((reply, _)) = self.store.next_ready_continuation().await? {
+            self.store
+                .open_conversation_continuation(&reply, now)
+                .await?;
+            return Ok(true);
+        }
         Ok(false)
     }
 }

@@ -47,6 +47,18 @@ impl Store {
         .ok_or_else(|| StoreError::Integrity("settled delegation batch required".into()))
     }
 
+    /// Finds an opened continuation whose native job was never admitted, such as
+    /// after a crash between opening and admission.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn next_unadmitted_continuation(
+        &self,
+    ) -> Result<Option<(String, String)>, StoreError> {
+        Ok(sqlx::query_as("SELECT c.source_reply_id,c.agent_id FROM conversation_continuations c JOIN conversation_messages m ON m.id=c.source_reply_id WHERE NOT EXISTS(SELECT 1 FROM conversation_jobs j WHERE j.message_id=c.source_reply_id AND j.agent_id=c.agent_id) ORDER BY m.sequence LIMIT 1")
+            .fetch_optional(&self.inner.readers)
+            .await?)
+    }
+
     /// Whether a continuation admits this agent's turn on this decision message.
     /// # Errors
     /// Returns database errors.

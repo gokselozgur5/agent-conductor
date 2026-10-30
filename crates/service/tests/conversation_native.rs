@@ -402,8 +402,8 @@ async fn delegation_proposal_requires_native_provenance_and_never_queues_work() 
     assert!(store.workflows().await.unwrap().is_empty());
 }
 
-/// Replies with a strict delegation decision unless the prompt carries a stored
-/// assignment, in which case it reports finished work. Each launch is recorded.
+/// Replies with a strict delegation decision, reports finished work for a stored
+/// assignment and consolidates for a continuation. Each launch is recorded.
 fn delegating_fixture(
     root: &std::path::Path,
     lead: &str,
@@ -415,6 +415,7 @@ printf 'launch\n' >> launches
 printf '%s\n' "$@" >> prompts
 case "$*" in
   *"assigned you this instruction"*) text='Worker finished the inspection';;
+  *"Every assignment you delegated has now reported"*) text='Consolidated: the worker finished the inspection';;
   *) text='{\"schema\":\"conductor.delegation.v1\",\"assignments\":[{\"agent_id\":\"worker\",\"instruction\":\"Inspect the parser\"}]}';;
 esac
 printf '%s\n' '{"type":"thread.started","thread_id":"fixture"}' '{"type":"turn.started"}' "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"$text\"}}" '{"type":"turn.completed","usage":{}}'
@@ -525,9 +526,9 @@ async fn delegated_room(
 async fn coordinator_delegates_to_its_subordinate_without_operator_relay() {
     let root = tempfile::tempdir().unwrap();
     let (store, _service, _receiver) = delegated_room(root.path(), true).await;
-    assert_eq!(launches(root.path()), 2);
+    assert_eq!(launches(root.path()), 3);
     let messages = store.conversation_messages("room", 0).await.unwrap();
-    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.len(), 4);
     assert_eq!(messages[1].agent_id.as_deref(), Some("lead"));
     assert!(
         messages[1]
@@ -536,6 +537,11 @@ async fn coordinator_delegates_to_its_subordinate_without_operator_relay() {
     );
     assert_eq!(messages[2].agent_id.as_deref(), Some("worker"));
     assert_eq!(messages[2].body, "Worker finished the inspection");
+    assert_eq!(messages[3].agent_id.as_deref(), Some("lead"));
+    assert_eq!(
+        messages[3].body,
+        "Consolidated: the worker finished the inspection"
+    );
     assert!(store.workflows().await.unwrap().is_empty());
 }
 
@@ -581,13 +587,13 @@ async fn delegation_outcomes_and_the_supervisor_report_are_durable() {
         .unwrap();
     assert_eq!(assignment.root_message_id, "shared-request");
     assert_eq!(assignment.author_agent_id, "lead");
+    assert_eq!(outcome(3).await, "ordinary");
+    // The continuation consumed the worker's report; nothing is left pending.
     let lead_inbox = store
         .pending_conversation_deliveries("room", "lead")
         .await
         .unwrap();
-    assert!(lead_inbox.iter().any(|d| d.message_id == messages[2].id
-        && d.kind == "information"
-        && d.reason == "report_to_supervisor"));
+    assert!(lead_inbox.iter().all(|d| d.message_id != messages[2].id));
 }
 
 #[tokio::test]
@@ -607,16 +613,17 @@ async fn restart_and_replayed_routing_do_not_relaunch_delegated_work() {
         .await
         .unwrap();
     assert_eq!(drain(&service, &receiver).await, 0);
-    assert_eq!(launches(root.path()), 2);
+    assert_eq!(launches(root.path()), 3);
 }
 
 #[tokio::test]
 async fn delegation_to_a_recipient_without_a_profile_is_blocked_visibly() {
     let root = tempfile::tempdir().unwrap();
     let (store, _service, _receiver) = delegated_room(root.path(), false).await;
-    assert_eq!(launches(root.path()), 1);
+    // The blocked worker settles the batch, so the lead still consolidates.
+    assert_eq!(launches(root.path()), 2);
     let messages = store.conversation_messages("room", 0).await.unwrap();
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
     let examination = store
         .conversation_reply_examination(&messages[1].id)
         .await
