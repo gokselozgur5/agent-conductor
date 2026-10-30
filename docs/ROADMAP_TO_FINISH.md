@@ -20,17 +20,36 @@ requirements; working chat alone does not complete the product.
 
 | Package | Slices | Depends on | Exit evidence | Current state |
 | --- | --- | --- | --- | --- |
-| P1 Delegation (estimated 8%) | D1 strict decision contract and persisted author provenance; D2 atomic assignment graph, root/parent binding and cumulative limits; D3 native prompt/output integration and authorized queue admission | Existing room topology and native reply storage | One default coordinator request creates authorized subordinate work; forged authors, peer/ancestor targets, changed replay, excessive fan-out/depth and crash duplicates are refused | D1 locally validated; D2/D3 pending |
+| P1 Delegation (estimated 8%) | D1 strict decision contract and persisted author provenance; D2 atomic assignment graph, root/parent binding and cumulative limits; D3 native prompt/output integration and authorized queue admission | Existing room topology and native reply storage | One default coordinator request creates authorized subordinate work; forged authors, peer/ancestor targets, changed replay, excessive fan-out/depth and crash duplicates are refused | D1/D2 locally validated; D3 pending |
 | P2 Reporting loop (5%) | R1 durable result/blocker correlation; R2 wait-for-children and one coordinator continuation; R3 bounded correction rounds and explicit terminal/blocked outcomes | P1 D2/D3 | One operator request produces worker results and a consolidated coordinator response; restart and duplicate receipts cannot repeat rounds; exhausted budgets surface as blocked | Pending |
-| P3 Account execution (4%) | A1 reuse account-worker transport for conversations; A2 own-HOME/auth/profile enforcement and failure handling; A3 distinct-account real-vendor acceptance | P1 contract for delegated inputs; transport audit can begin independently | Native agents demonstrably execute under intended distinct accounts without credential copying or a same-account fallback | Pending; personal account selection/login remains external prerequisite |
+| P3 Account execution (4%) | A1 reuse account-worker transport for conversations; A2 own-HOME/auth/profile enforcement and failure handling; A3 distinct-account real-vendor acceptance | P1 contract for delegated inputs; transport audit can begin independently | Native agents demonstrably execute under intended distinct accounts without credential copying or a same-account fallback | A1 reusable runtime API implemented; worker/service wiring and personal account acceptance pending |
 | P4 Operator visibility (2%) | U1 per-recipient reason/state/causality projection; U2 assignment tree, reports, blockers and final summary; U3 reconnect/layout/privacy acceptance | D2 for U1; P2 for U2 | Browser explains who received what, why and with which outcome; refresh preserves identity; text cannot execute markup | Room setup/addressing exists; delivery visibility pending |
-| P5 Combined acceptance (4%) | V1 controlled end-to-end and fault matrix; V2 real Codex/Claude and distinct-account scenarios; V3 original requirements audit, load, privacy, supported hosts and endurance | P1/P2/P3/P4; audit and harness work can proceed in parallel | Exact-source evidence for every required gate, with skips/blockers visible; no substitute of fixture results for real vendor acceptance | Earlier bounded evidence exists; final-candidate acceptance pending |
+| P5 Combined acceptance (4%) | V1 controlled end-to-end and fault matrix; V2 real Codex/Claude and distinct-account scenarios; V3 original requirements audit, load, privacy, supported hosts and endurance | P1/P2/P3/P4; audit and harness work can proceed in parallel | Exact-source evidence for every required gate, with skips/blockers visible; no substitute of fixture results for real vendor acceptance | Read-only gate matrix/verifier implemented; final-candidate acceptance pending |
 | P6 Delivery (2%) | L1 atomic commits and issue/PR metadata; L2 exact-head CI and release kit verification; L3 upgrade rehearsal, operator runbook and live activation | Validated slices for L1; P5 for final release acceptance | Verified artifact hashes, preserved state/identity, passing post-upgrade scenario and accurate handoff; no interruption of active user turns | Four baseline local commits remain separate from installed preview |
 
 Critical path: D1 → D2 → D3 → R1/R2/R3 → combined native acceptance → release.
 Account transport investigation, acceptance inventory and UI projection design may
 run in parallel. Integrate one validated slice at a time; never merge conflicting
 schema edits from independent workers without an explicit integration review.
+
+
+## Parallel execution lanes
+
+The operator approved three concurrent implementation lanes, with one integration
+owner. Lane 1 owns D2 then D3; lane 2 owns account conversation transport; lane 3
+owns the acceptance matrix and evidence tooling. The integration owner reviews
+shared contracts, schema compatibility and combined tests before atomic commits.
+Reporting, UI and delivery take the next available lanes as their dependencies
+land. Distinct file ownership prevents concurrent schema/service edits.
+
+D3 follows D2 with exact `(source_reply_id, agent_id)` authorization in queue,
+reservation and runner admission. Its prompt must use the stored assignment
+instruction. Ordinary replies remain information only. Persist examination outcomes
+for ordinary/authorized/rejected replies so malformed output cannot starve later
+work; distinguish semantic refusals from database failures. Add blocked admission
+for missing configured recipients, preserve unknown-turn exclusion, and prove
+coordinator → subordinate execution without operator relay. Supervisor follow-up
+turns and reporting-round budgets remain P2 rather than implied D3 behavior.
 
 ## First executable slice: D1
 
@@ -75,6 +94,10 @@ its admission transaction; public D1 proposal values are not authorization token
   process-group exit or timeout. Preserve existing refusals while resolving the
   remaining operator policy and host/account access prerequisites.
 
+The machine-readable gate inventory and evidence verifier are documented in
+[finish acceptance evidence](FINISH_ACCEPTANCE.md). A passing evidence-contract
+check is not independent proof that producer observations are true.
+
 ## Slice delivery discipline
 
 For each slice: pin source → implement → meaningful regressions → format/strict
@@ -93,6 +116,23 @@ state before external delivery; dated documents are not current service state.
   changed-source credential scan pass. An initial test-only Clippy warning was
   corrected without suppressions. Independent source review found no D1 blocker;
   added negative controls for state/author/room mismatches.
-- Next executable slice: D2 atomic assignment graph and cumulative root/depth/round
-  budgets with cancellation/restart/replay regressions. D1 cannot launch work and
-  is not completion of P1. No live upgrade or new real-vendor call was performed.
+- D2 adds atomic assignment batches, persisted root/parent/author, depth at most
+  four, at most eight recipients per decision and 32 assignments per root request.
+  Reporting-round limits remain P2. Queue/reservation operator filters are unchanged;
+  authorization alone does not launch work.
+- A1 adds a reusable UID-authenticated conversation channel with exact durable ACK
+  before Release, bounded frames and supervised cancellation. It is not selected
+  by the persistent worker or conversation service yet. Tests use controlled
+  executables/current UID, not distinct personal vendor accounts.
+- Lane 3 adds 24 deliberately pending finish gates and a read-only evidence-contract
+  verifier, including native-endurance sample checks. No final candidate is pinned.
+- Next: D3 exact-recipient execution and durable reply-examination outcomes; A2
+  worker/service transport integration; final native monitor and evidence producers.
+  No live upgrade or new real-vendor call was performed by this parallel batch.
+
+- Parallel batch validated: D2 eight store tests, five service tests (including
+  strict-contract parity across eleven decisions), A1 eight controlled transport
+  tests, schema upgrade and backup fixtures, and strict store/service/runtime
+  Clippy passed. Evidence-tool final suite passed sixteen tests, including a
+  reproduced and fixed hash/read race. These are local slice checks, not complete
+  P1/P3/P5 or installed-product acceptance.
