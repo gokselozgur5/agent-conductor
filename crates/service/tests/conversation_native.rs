@@ -181,26 +181,7 @@ async fn shared_room_fans_out_and_automatically_informs_the_next_agent() {
     let (_, first) = fixture_agent(root.path());
     let mut second = first.clone();
     second.id = "reviewer".into();
-    let store = Store::open(root.path().join("room.sqlite3")).await.unwrap();
-    store
-        .create_conversation("room", root.path().to_str().unwrap(), 1)
-        .await
-        .unwrap();
-    store
-        .append_conversation_message(
-            &ConversationMessage {
-                sequence: 0,
-                id: "shared-request".into(),
-                conversation_id: "room".into(),
-                sender: "operator".into(),
-                agent_id: None,
-                body: "Work together".into(),
-                created_at_ms: 0,
-            },
-            2,
-        )
-        .await
-        .unwrap();
+    let store = seeded_room(root.path(), "room.sqlite3").await;
     let service = PersistentControlService::start(store.clone(), 1)
         .await
         .unwrap();
@@ -224,25 +205,8 @@ async fn shared_room_fans_out_and_automatically_informs_the_next_agent() {
         .configure_conversation_agents(vec![first, second])
         .unwrap();
     let (_cancel, receiver) = tokio::sync::watch::channel(false);
-    let mut idle = false;
-    for _ in 0..16 {
-        if !service
-            .dispatch_next_conversation(receiver.clone())
-            .await
-            .unwrap()
-        {
-            idle = true;
-            break;
-        }
-    }
-    assert!(idle, "information delivery must not create a reply loop");
-    assert_eq!(
-        std::fs::read_to_string(root.path().join("launches"))
-            .unwrap()
-            .lines()
-            .count(),
-        2
-    );
+    drain(&service, &receiver).await;
+    assert_eq!(launches(root.path()), 2);
     let messages = store.conversation_messages("room", 0).await.unwrap();
     assert_eq!(messages.len(), 3);
     assert_ne!(messages[1].agent_id, messages[2].agent_id);
@@ -436,4 +400,51 @@ async fn delegation_proposal_requires_native_provenance_and_never_queues_work() 
     assert!(store.next_conversation_job().await.unwrap().is_none());
     assert!(store.next_room_assignment().await.unwrap().is_none());
     assert!(store.workflows().await.unwrap().is_empty());
+}
+
+async fn drain(
+    service: &PersistentControlService,
+    receiver: &tokio::sync::watch::Receiver<bool>,
+) -> usize {
+    for round in 0..24 {
+        if !service
+            .dispatch_next_conversation(receiver.clone())
+            .await
+            .unwrap()
+        {
+            return round;
+        }
+    }
+    panic!("room work did not settle: routing or delegation must not loop");
+}
+
+async fn seeded_room(root: &std::path::Path, database: &str) -> Store {
+    let store = Store::open(root.join(database)).await.unwrap();
+    store
+        .create_conversation("room", root.to_str().unwrap(), 1)
+        .await
+        .unwrap();
+    store
+        .append_conversation_message(
+            &ConversationMessage {
+                sequence: 0,
+                id: "shared-request".into(),
+                conversation_id: "room".into(),
+                sender: "operator".into(),
+                agent_id: None,
+                body: "Please inspect the parser".into(),
+                created_at_ms: 0,
+            },
+            2,
+        )
+        .await
+        .unwrap();
+    store
+}
+
+fn launches(root: &std::path::Path) -> usize {
+    std::fs::read_to_string(root.join("launches"))
+        .unwrap()
+        .lines()
+        .count()
 }
