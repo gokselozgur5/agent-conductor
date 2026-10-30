@@ -7,6 +7,7 @@ use conductor_runtime::{ResumePacket, read_pinned_instructions};
 impl<C: Clock> PersistentControlService<C> {
     pub(super) async fn invalidate_instruction_tasks(&self) -> Result<(), StoreError> {
         for candidate in self.store.tasks(None).await? {
+            tokio::task::consume_budget().await;
             let task: Task =
                 serde_json::from_str(&candidate.aggregate_json).map_err(|_| invalid())?;
             if !matches!(

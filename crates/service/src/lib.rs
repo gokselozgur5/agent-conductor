@@ -361,6 +361,7 @@ impl<C: Clock> PersistentControlService<C> {
         let rows = self.store.tasks(None).await?;
         let mut requeued = 0;
         for candidate in rows {
+            tokio::task::consume_budget().await;
             if self.reconcile_expiry_candidate(candidate).await? {
                 requeued += 1;
             }
