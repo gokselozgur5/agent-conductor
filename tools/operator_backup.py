@@ -91,6 +91,8 @@ def database(path, state):
             raise ValueError('file broker ownership unresolved; verified closure required before backup')
         if db.execute("select count(*) from executions where state != 'fenced'").fetchone()[0]:
             raise ValueError('execution without a verified write fence; reconcile before backup')
+        if db.execute('select exists(select 1 from conversation_turns)').fetchone()[0]:
+            raise ValueError('native conversation execution has no verified write fence; separate recovery required before backup')
         if db.execute('select count(*) from legacy_auxiliary_ownership').fetchone()[0]:
             raise ValueError('legacy auxiliary ownership unresolved; verified recovery required before backup')
         if db.execute("select count(*) from auxiliary_invocations where state != 'settled'").fetchone()[0]:

@@ -42,6 +42,7 @@ class BackupTests(unittest.TestCase):
               CREATE TABLE tasks(state TEXT,id TEXT);
               CREATE TABLE projects(canonical_path TEXT,filesystem_identity TEXT,git_common_dir_identity TEXT);
               CREATE TABLE executions(state TEXT,packet_json TEXT);
+              CREATE TABLE conversation_turns(state TEXT);
               CREATE TABLE auxiliary_invocations(state TEXT);
               CREATE TABLE file_brokers(state TEXT);
               CREATE TABLE file_broker_launches(state TEXT);
@@ -64,7 +65,7 @@ class BackupTests(unittest.TestCase):
     def test_snapshot_preserves_bytes_modes_and_database(self):
         before = backup.inventory(self.state, backup.SKIP)
         result = backup.backup(self.state, self.target)
-        self.assertEqual(result['schema'], 32)
+        self.assertEqual(result['schema'], 35)
         manifest = json.loads((self.target / 'manifest.json').read_text())
         self.assertEqual(manifest['entries'], backup.inventory(self.target / 'state'))
         self.assertEqual(before, backup.inventory(self.state, backup.SKIP))
@@ -79,6 +80,19 @@ class BackupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unresolved auxiliary'):
             backup.backup(self.state, self.target)
         self.assertFalse(self.target.exists())
+
+    def test_native_chat_reply_is_not_a_write_fence(self):
+        for state in ['launch_intent', 'unknown', 'failed', 'replied']:
+            with self.subTest(state=state):
+                with sqlite3.connect(self.state / 'state.sqlite3') as db:
+                    db.execute('insert into conversation_turns values(?)', (state,))
+                before = backup.inventory(self.state, backup.SKIP)
+                with self.assertRaisesRegex(ValueError, 'conversation execution has no verified write fence'):
+                    backup.backup(self.state, self.target)
+                self.assertEqual(before, backup.inventory(self.state, backup.SKIP))
+                self.assertFalse(self.target.exists())
+                with sqlite3.connect(self.state / 'state.sqlite3') as db:
+                    db.execute('delete from conversation_turns')
 
     def test_legacy_auxiliary_uncertainty_refuses_cold_backup(self):
         with sqlite3.connect(self.state / 'state.sqlite3') as db:

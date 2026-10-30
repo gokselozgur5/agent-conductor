@@ -80,3 +80,9 @@ absolute project folder and select **New conversation**. Choose the agent and
 send a message. Switching agents within the same conversation passes prior
 messages to the selected agent. Unknown execution outcomes remain retained and
 are never automatically retried.
+
+Native conversation replies do not prove that unrestricted descendants stopped
+writing. Cold backup therefore refuses state containing native conversation turn
+records, including replied turns, until a separate verified recovery procedure
+exists. This preserves the existing full-capability recovery boundary; it is not
+an automatic reconciliation mechanism.
