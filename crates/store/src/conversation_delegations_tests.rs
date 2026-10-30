@@ -801,3 +801,52 @@ async fn blocked_recipient_is_visible_and_never_enters_the_queue() {
         ]
     );
 }
+
+#[tokio::test]
+async fn reservation_admits_only_the_exact_authorized_recipient() {
+    let (_root, store) = authorized_pair().await;
+    let digest = "d".repeat(64);
+    let intent = |agent: &'static str| crate::ConversationTurnIntent {
+        message_id: "reply",
+        agent_id: agent,
+        launch_id: if agent == "worker" {
+            "worker-launch"
+        } else {
+            "lead-launch"
+        },
+        profile_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        prompt_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    };
+    assert!(
+        store
+            .reserve_conversation_turn(&intent("lead"), 6)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .reserve_conversation_turn(&intent("worker"), 6)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .reserve_conversation_turn(&intent("worker"), 7)
+            .await
+            .unwrap()
+    );
+    store
+        .publish_conversation_reply("worker-launch", "worker-reply", "Inspected", &digest, 8)
+        .await
+        .unwrap();
+    // The worker's reply inherits the authorized ancestry when it delegates further.
+    assert!(
+        store
+            .conversation_reply_origin("worker-reply")
+            .await
+            .unwrap()
+            .is_some_and(
+                |origin| origin.parent_message_id == "reply" && origin.author_agent_id == "worker"
+            )
+    );
+}
