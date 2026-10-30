@@ -1,4 +1,4 @@
-use agent_conductor_domain::{CommandKind, Task};
+use agent_conductor_domain::{Command, CommandKind, Task};
 use conductor_runtime::redact_credentials;
 
 /// Redacts free decision/blocker text, retaining identities and authority fields.
@@ -16,7 +16,15 @@ pub(crate) fn redact_task(task: &mut Task) {
 }
 
 /// Call only after validating the original command and hashing its full input.
-pub(crate) fn redact_command(kind: &mut CommandKind) -> bool {
+pub(crate) fn redact_command(command: &mut Command) -> bool {
+    let reason = redact_credentials(&command.reason);
+    let reason_changed = reason != command.reason;
+    command.reason = reason;
+    let kind_changed = redact_kind(&mut command.kind);
+    reason_changed || kind_changed
+}
+
+fn redact_kind(kind: &mut CommandKind) -> bool {
     if let CommandKind::Block { blocker } = kind {
         let detail = redact_credentials(&blocker.detail);
         let resume_when = redact_credentials(&blocker.resume_when);

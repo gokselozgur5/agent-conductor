@@ -2,7 +2,7 @@
 
 The service applies the runtime's literal credential-shape redaction policy to
 decision questions, resolution rationales, blocker details and blocker resume
-conditions. New commands validate the
+conditions, and command reasons. New commands validate the
 original input before redaction. The original request hash remains the
 idempotency identity, so two different credentials cannot turn different
 requests into an identical replay merely because their display text matches.
@@ -12,6 +12,11 @@ stored command response. Task reads, paginated/list views, replay responses and
 workflow context also sanitize legacy decision fields on output. Reading an old
 record does not rewrite that record. Source-finalization transactions use their
 authoritative task mutation, rather than rebuilding state from a display response.
+
+New command reasons are redacted before audit persistence, including reasons on
+commands without decision or blocker fields. Original request hashes still distinguish
+changed reasons, and empty original reasons remain invalid. Historical audit bytes
+are not rewritten.
 
 Only those free-text fields are transformed. Blocker kinds, decision IDs, actors, versions,
 capabilities, source identities and packet hashes retain their existing meaning.
