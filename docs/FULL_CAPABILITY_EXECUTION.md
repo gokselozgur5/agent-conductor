@@ -162,6 +162,13 @@ between those writes. `finalize_account_source`
 consumes that report, captures and fetches the exact candidate, rechecks ownership,
 and records the imported digest before binding the task's verification source.
 
+If normal account workflow staging, launch or source capture fails, the service
+blocks the matching active task with `account_workflow_failed`. Existing operator
+pause/cancel, blockers and newer attempt/epoch ownership remain unchanged. This
+error path preserves execution records as they are: staging may fail before any
+record exists, while a refused launch can leave a prepared record. It does not
+manufacture termination evidence, a write fence or permission to retry.
+
 Account executions remain `started` and unfenced with no fabricated process or
 exit code. An imported candidate is eligible for independent verification only
 while its recorded digest agrees with the task's selected source; blocked records

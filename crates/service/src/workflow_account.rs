@@ -1,5 +1,6 @@
 //! Account worker selection for the normal persistent workflow dispatcher.
 use crate::{Clock, NativeWorkflowPlan, PersistentControlService};
+use agent_conductor_domain::{ActorRole, Blocker, CommandKind, TaskState};
 use agent_conductor_store::StoreError;
 use conductor_runtime::{AccountChannelAddress, ResumePacket, SnapshotManifest, VendorPin};
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,37 @@ fn clean_absolute(path: &Path) -> bool {
 }
 
 impl<C: Clock> PersistentControlService<C> {
+    // Capture failure is not proof of termination. Preserve execution evidence
+    // and block only the still-active attempt that failed, under the lifecycle lock.
+    pub(super) async fn block_failed_account_workflow(
+        &self,
+        packet: &ResumePacket,
+    ) -> Result<(), StoreError> {
+        let _guard = self.mutations.lock().await;
+        let task = self.workflow_task(&packet.contract.task_id).await?;
+        if !matches!(
+            task.state,
+            TaskState::Claimed | TaskState::Running | TaskState::Verifying
+        ) || !task.attempt.as_ref().is_some_and(|attempt| {
+            attempt.id.0 == packet.contract.attempt_id
+                && attempt.lease.epoch == packet.contract.lease_epoch
+        }) {
+            return Ok(());
+        }
+        self.workflow_command_locked(
+            &task.id.0,
+            "conductor-account-workflow",
+            ActorRole::System,
+            CommandKind::Block { blocker: Blocker {
+                kind: "account_workflow_failed".into(),
+                detail: "account workspace staging, launch or capture failed".into(),
+                resume_when: "inspect retained task and execution evidence before authorizing another attempt".into(),
+            }},
+            "account workflow failed without an accepted source",
+        ).await?;
+        Ok(())
+    }
+
     pub(super) async fn stage_workflow_account(
         &self,
         plan: &NativeWorkflowPlan,

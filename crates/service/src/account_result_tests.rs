@@ -367,3 +367,39 @@ async fn account_result_failure_does_not_block_a_newer_attempt() {
     worker.kill().await.unwrap();
     worker.wait().await.unwrap();
 }
+
+#[tokio::test]
+async fn account_workflow_failure_blocks_once_without_rewriting_execution() {
+    let f = account_service_fixture().await;
+    f.service.prepare_account_execution(&f.packet, &f.token, "runner").await.unwrap();
+    let execution = f.store.execution(&f.token).await.unwrap();
+    f.service.block_failed_account_workflow(&f.packet).await.unwrap();
+    let task = f.service.workflow_task("task").await.unwrap();
+    assert_eq!(task.state, TaskState::Blocked);
+    assert_eq!(task.blocker.unwrap().kind, "account_workflow_failed");
+    let before = f.store.task("task").await.unwrap().unwrap().aggregate_json;
+    f.service.block_failed_account_workflow(&f.packet).await.unwrap();
+    assert_eq!(f.store.task("task").await.unwrap().unwrap().aggregate_json, before);
+    assert_eq!(f.store.execution(&f.token).await.unwrap(), execution);
+}
+
+#[tokio::test]
+async fn account_workflow_failure_preserves_operator_stop_and_newer_attempt() {
+    for command in [CommandKind::Pause, CommandKind::Cancel] {
+        let f = account_service_fixture().await;
+        f.service.workflow_command_locked("task", "operator", ActorRole::Operator, command, "operator stop").await.unwrap();
+        let before = f.store.task("task").await.unwrap().unwrap().aggregate_json;
+        f.service.block_failed_account_workflow(&f.packet).await.unwrap();
+        assert_eq!(f.store.task("task").await.unwrap().unwrap().aggregate_json, before);
+    }
+    let f = account_service_fixture().await;
+    let mut packet = f.packet.clone();
+    packet.contract.attempt_id = "older-attempt".into();
+    let before = f.store.task("task").await.unwrap().unwrap().aggregate_json;
+    f.service.block_failed_account_workflow(&packet).await.unwrap();
+    assert_eq!(f.store.task("task").await.unwrap().unwrap().aggregate_json, before);
+    packet = f.packet.clone();
+    packet.contract.lease_epoch += 1;
+    f.service.block_failed_account_workflow(&packet).await.unwrap();
+    assert_eq!(f.store.task("task").await.unwrap().unwrap().aggregate_json, before);
+}
