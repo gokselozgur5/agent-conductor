@@ -6,8 +6,21 @@ use conductor_runtime::{ResumePacket, read_pinned_instructions};
 
 impl<C: Clock> PersistentControlService<C> {
     pub(super) async fn invalidate_instruction_tasks(&self) -> Result<(), StoreError> {
-        let _guard = self.mutations.lock().await;
-        for row in self.store.tasks(None).await? {
+        for candidate in self.store.tasks(None).await? {
+            let task: Task =
+                serde_json::from_str(&candidate.aggregate_json).map_err(|_| invalid())?;
+            if !matches!(
+                task.state,
+                TaskState::Claimed | TaskState::Running | TaskState::Verifying
+            ) || task.attempt.is_none()
+            {
+                continue;
+            }
+            // Revalidate the current task after acquiring exclusive mutation access.
+            let _guard = self.mutations.lock().await;
+            let Some(row) = self.store.task(&candidate.id).await? else {
+                continue;
+            };
             let task: Task = serde_json::from_str(&row.aggregate_json).map_err(|_| invalid())?;
             if !matches!(
                 task.state,

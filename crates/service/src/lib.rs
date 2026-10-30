@@ -358,70 +358,90 @@ impl<C: Clock> PersistentControlService<C> {
     /// Returns an integrity error if persisted aggregates cannot be decoded or
     /// an eligible requeue cannot be committed.
     pub async fn reconcile_expired(&self) -> Result<usize, StoreError> {
-        let _guard = self.mutations.lock().await;
-        let clock = self.clock.read(self.boot_generation);
         let rows = self.store.tasks(None).await?;
         let mut requeued = 0;
-        for row in rows {
-            let task: Task = serde_json::from_str(&row.aggregate_json)
-                .map_err(|error| StoreError::Integrity(format!("invalid aggregate: {error}")))?;
-            let Some(attempt) = task.attempt.as_ref() else {
-                continue;
-            };
-            if attempt.lease.status == LeaseStatus::Ended
-                || attempt.lease.boot_generation != clock.boot_generation
-            {
-                continue;
-            }
-            let Some(requeue_at) = attempt
-                .lease
-                .deadline_monotonic_ms
-                .checked_add(attempt.lease.recovery_grace_ms)
-            else {
-                return Err(StoreError::Integrity(format!(
-                    "lease deadline overflow for task {}",
-                    task.id.0
-                )));
-            };
-            if clock.monotonic_ms < requeue_at {
-                continue;
-            }
-            let unfenced = self.store.has_unfenced_execution(&task.id.0).await?;
-            let command = Command {
-                actor: Actor {
-                    id: ActorId("conductor-reconciler".into()),
-                    role: ActorRole::System,
-                },
-                expected_version: task.version,
-                correlation_id: CorrelationId(format!(
-                    "reconcile:{}:{}:{}",
-                    self.boot_generation, task.id.0, attempt.lease.epoch
-                )),
-                idempotency_key: IdempotencyKey(format!(
-                    "requeue:{}:{}:{}",
-                    self.boot_generation, task.id.0, attempt.lease.epoch
-                )),
-                reason: "lease deadline and recovery grace elapsed".into(),
-                kind: if unfenced {
-                    CommandKind::Block {
-                        blocker: agent_conductor_domain::Blocker {
-                            kind: "runtime_fence_unconfirmed".into(),
-                            detail: "expired execution has no confirmed write fence".into(),
-                            resume_when: "reconcile and fence every prior execution".into(),
-                        },
-                    }
-                } else {
-                    CommandKind::RequeueExpired
-                },
-            };
-            self.apply_row(row, command)
-                .await
-                .map_err(|error| StoreError::Integrity(error.message))?;
-            if !unfenced {
+        for candidate in rows {
+            if self.reconcile_expiry_candidate(candidate).await? {
                 requeued += 1;
             }
         }
         Ok(requeued)
+    }
+
+    async fn reconcile_expiry_candidate(
+        &self,
+        candidate: PersistedTask,
+    ) -> Result<bool, StoreError> {
+        let task: Task = serde_json::from_str(&candidate.aggregate_json)
+            .map_err(|error| StoreError::Integrity(format!("invalid aggregate: {error}")))?;
+        if task
+            .attempt
+            .as_ref()
+            .is_none_or(|a| a.lease.status == LeaseStatus::Ended)
+        {
+            return Ok(false);
+        }
+        // Discovery is advisory; read ownership again under the mutation lock.
+        let _guard = self.mutations.lock().await;
+        let Some(row) = self.store.task(&candidate.id).await? else {
+            return Ok(false);
+        };
+        let task: Task = serde_json::from_str(&row.aggregate_json)
+            .map_err(|error| StoreError::Integrity(format!("invalid aggregate: {error}")))?;
+        let clock = self.clock.read(self.boot_generation);
+        let Some(attempt) = task.attempt.as_ref() else {
+            return Ok(false);
+        };
+        if attempt.lease.status == LeaseStatus::Ended
+            || attempt.lease.boot_generation != clock.boot_generation
+        {
+            return Ok(false);
+        }
+        let Some(requeue_at) = attempt
+            .lease
+            .deadline_monotonic_ms
+            .checked_add(attempt.lease.recovery_grace_ms)
+        else {
+            return Err(StoreError::Integrity(format!(
+                "lease deadline overflow for task {}",
+                task.id.0
+            )));
+        };
+        if clock.monotonic_ms < requeue_at {
+            return Ok(false);
+        }
+        let unfenced = self.store.has_unfenced_execution(&task.id.0).await?;
+        let command = Command {
+            actor: Actor {
+                id: ActorId("conductor-reconciler".into()),
+                role: ActorRole::System,
+            },
+            expected_version: task.version,
+            correlation_id: CorrelationId(format!(
+                "reconcile:{}:{}:{}",
+                self.boot_generation, task.id.0, attempt.lease.epoch
+            )),
+            idempotency_key: IdempotencyKey(format!(
+                "requeue:{}:{}:{}",
+                self.boot_generation, task.id.0, attempt.lease.epoch
+            )),
+            reason: "lease deadline and recovery grace elapsed".into(),
+            kind: if unfenced {
+                CommandKind::Block {
+                    blocker: agent_conductor_domain::Blocker {
+                        kind: "runtime_fence_unconfirmed".into(),
+                        detail: "expired execution has no confirmed write fence".into(),
+                        resume_when: "reconcile and fence every prior execution".into(),
+                    },
+                }
+            } else {
+                CommandKind::RequeueExpired
+            },
+        };
+        self.apply_row(row, command)
+            .await
+            .map_err(|error| StoreError::Integrity(error.message))?;
+        Ok(!unfenced)
     }
 
     /// Applies a fake-effect reconciliation contradiction through the normal
@@ -1905,6 +1925,68 @@ mod effect_tests {
             .expect("claim");
         let token = response.effect_tokens.first().expect("spawn token").clone();
         (response.task.aggregate.as_ref().clone(), token)
+    }
+
+    #[tokio::test]
+    async fn stale_expiry_candidate_rechecks_renewed_lease() {
+        let (_directory, store) = lifecycle_store().await;
+        let clock = FixedClock::new(0);
+        let service = PersistentControlService::start_with_clock(store.clone(), 100, clock.clone())
+            .await
+            .expect("service");
+        let (claimed, _) = claim_task(&service).await;
+        let stale = store.task("task").await.unwrap().unwrap();
+        clock.set(1);
+        let renewed = service
+            .apply_row(
+                stale.clone(),
+                lifecycle_command(
+                    &claimed,
+                    Actor {
+                        id: ActorId("worker".into()),
+                        role: ActorRole::Worker,
+                    },
+                    CommandKind::Heartbeat {
+                        attempt_id: AttemptId("attempt".into()),
+                        lease_epoch: claimed.attempt.as_ref().unwrap().lease.epoch,
+                        lease_duration_ms: 100,
+                        worker_margin_ms: 1,
+                    },
+                    "renew-between-discovery-and-use",
+                ),
+            )
+            .await
+            .expect("renew");
+        clock.set(15);
+        assert!(
+            !service
+                .reconcile_expiry_candidate(stale)
+                .await
+                .expect("fresh lease")
+        );
+        let current = store.task("task").await.unwrap().unwrap();
+        let task: Task = serde_json::from_str(&current.aggregate_json).unwrap();
+        assert_eq!(task.version, renewed.task.aggregate.version);
+        assert_eq!(task.state, renewed.task.aggregate.state);
+        assert_eq!(task.attempt.unwrap().lease.deadline_monotonic_ms, 101);
+    }
+
+    #[tokio::test]
+    async fn inactive_maintenance_scan_does_not_wait_for_mutation_lock() {
+        let (_directory, store) = lifecycle_store().await;
+        let service = PersistentControlService::start_with_clock(store, 100, FixedClock::new(0))
+            .await
+            .expect("service");
+        let _held = service.mutations.lock().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            assert_eq!(service.reconcile_expired().await.expect("expiry"), 0);
+            service
+                .invalidate_instruction_tasks()
+                .await
+                .expect("instructions");
+        })
+        .await
+        .expect("inactive discovery must not wait for unrelated mutations");
     }
 
     #[tokio::test]

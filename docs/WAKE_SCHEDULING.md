@@ -45,3 +45,25 @@ respectively (maximum 52.89 ms and 47.12 ms). Each run acknowledged all 80 disti
 events exactly once, with no model execution. All 10,000 background task aggregates
 remained byte-identical to the copied source fixture. These are local observations
 on the tested release, not universal latency bounds.
+
+## Maintenance lock contention
+
+Instruction invalidation and lease expiry discovery must not retain the shared
+mutation mutex while loading and decoding inactive tasks. Candidate discovery is
+advisory. Each active candidate is reloaded under mutation ownership before its
+current state, lease, execution fence or instruction binding can authorize a
+lifecycle action. A task activated after discovery is handled by a later sweep;
+normal launch-time instruction and ownership checks remain in force.
+
+Regression coverage checks that inactive discovery can finish while another
+mutation holds the mutex, and that a discovered expired lease cannot override a
+renewal committed before candidate reconciliation. Existing recovery and
+instruction invalidation tests remain required.
+
+A local 10,000-task diagnostic found multi-second maintenance lock holds and
+publication waits. With narrower lock scope, an 80-event combined-load comparison
+observed median wake time decrease from 805.6 to 34.6 ms and p95 from 3013.8 to
+1518.7 ms. Both measurements include client overhead on the same busy host and
+are observations, not isolated cross-host performance guarantees. The 500 ms wake
+and 100 ms board p95 targets still failed; this change does not close performance
+acceptance. No durability or timing threshold was relaxed.
