@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-26.04-arm, macos-14]
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-15]
 
     steps:
       - name: Select short temporary paths for Unix sockets
@@ -105,6 +105,7 @@ jobs:
         env:
           KIT_NAME: conductor-${{ runner.os }}-${{ runner.arch }}
         run: |
+          rm -rf target/dist target/kit-verification
           python3 tools/package_runtime.py --bin-dir target/release --destination "target/dist/$KIT_NAME" > target/runtime-kit-receipt.json
           mkdir target/kit-verification
           tar -xzf "target/dist/$KIT_NAME.tar.gz" -C target/kit-verification
