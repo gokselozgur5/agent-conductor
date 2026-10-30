@@ -79,15 +79,40 @@ impl<C: Clock> PersistentControlService<C> {
             .await
     }
 
+    /// Loads the stored operator-owned topology. Membership was checked against
+    /// configured profiles when the room was created; a member whose profile is
+    /// missing now is blocked at admission instead of disabling the whole room.
     async fn load_room(&self, conversation_id: &str) -> Result<ConversationRoom, StoreError> {
         let encoded = self
             .store
             .conversation_room(conversation_id)
             .await?
             .ok_or_else(|| StoreError::Integrity("conversation room is not configured".into()))?;
-        let config = serde_json::from_str(&encoded)
+        let config: RoomConfiguration = serde_json::from_str(&encoded)
             .map_err(|_| StoreError::Integrity("stored room configuration invalid".into()))?;
-        self.validate_room(config)
+        let members = config.members.iter().map(|m| m.agent_id.clone()).collect();
+        ConversationRoom::new(config.coordinator, config.members, &members)
+    }
+
+    /// Admits one durable assignment recipient: a configured profile is queued,
+    /// a missing profile becomes a visible blocked job. Neither launches here.
+    async fn admit_recipient(&self, message_id: &str, agent_id: &str) -> Result<(), StoreError> {
+        let configured = self
+            .conversation_agents
+            .read()
+            .map_err(|_| StoreError::Integrity("conversation configuration unavailable".into()))?
+            .contains_key(agent_id);
+        if configured {
+            self.queue_conversation_turn(message_id, agent_id).await
+        } else {
+            self.store
+                .block_conversation_recipient(
+                    message_id,
+                    agent_id,
+                    self.clock.read(self.boot_generation).wall_unix_ms,
+                )
+                .await
+        }
     }
 
     /// Routes an operator message once; the durable dispatcher admits recipients.
@@ -116,24 +141,31 @@ impl<C: Clock> PersistentControlService<C> {
             .await
     }
 
-    /// Reconciles persisted room work before native dispatch. A crash between
-    /// routing and admission is recovered by the same idempotent queue binding.
+    /// Reconciles persisted room work before native dispatch: routes settled
+    /// replies, examines each once for a delegation decision, then admits
+    /// operator and delegated assignments for their exact recipients. A crash
+    /// between any two steps is recovered by the same idempotent durable state.
     /// # Errors
     /// Returns configuration or persistence errors without inventing delivery.
     pub(crate) async fn reconcile_room_delivery(&self) -> Result<bool, StoreError> {
+        let now = self.clock.read(self.boot_generation).wall_unix_ms;
         if let Some((message, conversation)) = self.store.next_unrouted_room_reply().await? {
             self.load_room(&conversation)
                 .await?
-                .route_agent_update(
-                    &self.store,
-                    &message,
-                    self.clock.read(self.boot_generation).wall_unix_ms,
-                )
+                .route_agent_update(&self.store, &message, now)
                 .await?;
             return Ok(true);
         }
+        if let Some(reply) = self.store.next_unexamined_room_reply().await? {
+            self.store.examine_conversation_reply(&reply, now).await?;
+            return Ok(true);
+        }
         if let Some((message, agent)) = self.store.next_room_assignment().await? {
-            self.queue_conversation_turn(&message, &agent).await?;
+            self.admit_recipient(&message, &agent).await?;
+            return Ok(true);
+        }
+        if let Some((reply, agent)) = self.store.next_unadmitted_conversation_assignment().await? {
+            self.admit_recipient(&reply, &agent).await?;
             return Ok(true);
         }
         Ok(false)
