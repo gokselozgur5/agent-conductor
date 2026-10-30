@@ -2,7 +2,7 @@
 use super::*;
 use std::path::Path;
 
-const OWNERS: [Owner; 14] = [
+const OWNERS: [Owner; 16] = [
     Owner::Project,
     Owner::Task,
     Owner::Persist,
@@ -17,6 +17,8 @@ const OWNERS: [Owner; 14] = [
     Owner::Dispatch,
     Owner::Prepare,
     Owner::Update,
+    Owner::Reassign,
+    Owner::Reconcile,
 ];
 const CASE: &str = "CONDUCTOR_TRANSACTION_CRASH_CASE";
 const CONTROL: &str = "CONDUCTOR_TRANSACTION_CRASH_CONTROL";

@@ -26,6 +26,8 @@ enum Owner {
     Dispatch,
     Prepare,
     Update,
+    Reassign,
+    Reconcile,
 }
 impl Owner {
     fn barrier(self) -> (&'static str, usize) {
@@ -41,6 +43,8 @@ impl Owner {
             Self::Enqueue => ("workflow_wakes", 1),
             Self::Dispatch => ("workflow_dispatch", 1),
             Self::Prepare | Self::Update => ("executions", 1),
+            Self::Reassign => ("workflow_assignments", 1),
+            Self::Reconcile => ("workflow_dispatch", 1),
         }
     }
 }
@@ -181,6 +185,15 @@ async fn fixture(owner: Owner) -> (tempfile::TempDir, Store, Option<EventDeliver
         }
         Owner::Dispatch => store.enqueue_workflow("job", "{}", 100).await.unwrap(),
         Owner::Prepare | Owner::Update => seed_execution(&store, owner).await,
+        Owner::Reassign => {
+            let mut db = store.inner.writer.lock().await;
+            db.execute("INSERT INTO tasks(id,project_id,objective,state,authority_json,created_at_ms,updated_at_ms,aggregate_json) VALUES('task','seed','fixture','paused','{}',0,0,'{}')").await.unwrap();
+            db.execute("INSERT INTO workflow_dispatch(task_id,plan_json,status,created_at_ms,updated_at_ms) VALUES('task','{}','finished',0,0)").await.unwrap();
+        }
+        Owner::Reconcile => {
+            store.start_runtime(1).await.unwrap();
+            seed_completed_dispatch(&store, "task").await;
+        }
         _ => {}
     }
     (root, store, delivery)
@@ -192,6 +205,19 @@ async fn run(store: &Store, owner: Owner, delivery: Option<&EventDelivery>) -> R
         };
     }
     match owner {
+        Owner::Reassign => done!(
+            store
+                .reassign_workflow("task", 0, "job:worker", "{}", "old", 100)
+                .await
+        ),
+        Owner::Reconcile => {
+            let changed = store
+                .reconcile_completed_dispatch(2, 100)
+                .await
+                .map_err(|e| e.to_string())?;
+            assert_eq!(changed, 1);
+            Ok(())
+        }
         Owner::Project => done!(store.create_project(project("new")).await),
         Owner::Task => done!(
             store
@@ -846,4 +872,19 @@ async fn crash_auxiliary_admission(mode: &str, control: &std::path::Path) -> ! {
     );
     assert!(mode.ends_with("after_commit"));
     std::process::exit(77);
+}
+
+async fn seed_completed_dispatch(store: &Store, id: &str) -> String {
+    let source = format!("snapshot:{}", "b".repeat(64));
+    let attempt = format!("attempt:{id}");
+    let aggregate=serde_json::json!({"id":id,"version":7,"state":"completed","attempt":{"id":attempt,"worker":"job:worker","lease":{"status":"ended"}},"decisions":[],"required_checks":[{"id":"test"}],"verification":{"source":source,"checks":[{"check_id":"test","passed":true,"source":source,"recorded_by":"checker"}],"verdict":{"accepted":true,"source":source,"verifier":"reviewer"}}}).to_string();
+    let mut db = store.inner.writer.lock().await;
+    sqlx::query("INSERT INTO tasks(id,project_id,objective,state,priority,version,authority_json,aggregate_json,created_at_ms,updated_at_ms) VALUES(?,'seed','fixture','completed',0,7,'{}',?,0,0)").bind(id).bind(&aggregate).execute(&mut *db).await.unwrap();
+    sqlx::query("INSERT INTO attempts(id,task_id,worker_id,lease_epoch,instruction_hashes_json,required_checks_json,capability_hash,started_at_ms,ended_at_ms) VALUES(?,?,'job:worker',1,'[]','[]','hash',0,1)").bind(attempt).bind(id).execute(&mut *db).await.unwrap();
+    sqlx::query("INSERT INTO workflow_dispatch(task_id,plan_json,status,boot_generation,created_at_ms,updated_at_ms,auto_recovery_count) VALUES(?,'{}','needs_recovery',1,0,0,1)").bind(id).execute(&mut *db).await.unwrap();
+    let payload =
+            serde_json::json!([id,{"expected_version":6,"kind":{"type":"complete","observed_source":source}}])
+                .to_string();
+    sqlx::query("INSERT INTO audit_events(id,task_id,actor_id,kind,correlation_id,payload_json,occurred_at_ms) VALUES(?,?,'system','complete',?,?,0)").bind(format!("complete:{id}")).bind(id).bind(id).bind(payload).execute(&mut *db).await.unwrap();
+    aggregate
 }
