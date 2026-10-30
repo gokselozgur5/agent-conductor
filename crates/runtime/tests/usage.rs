@@ -96,3 +96,22 @@ fn nested_prose_duplicate_truncated_and_oversize_reports_do_not_count() {
         "invalid"
     );
 }
+
+#[test]
+fn model_reports_exclude_credential_shapes_inside_qualified_names() {
+    for model in [
+        ["vendor/sk", "-ant-", "syntheticUsageCanary12345"].concat(),
+        ["AKIA", "ABCDEFGHIJKLMNOP"].concat(),
+        ["vendor/ghp_", "syntheticUsageCanary12345"].concat(),
+    ] {
+        let report = reported_usage(
+            AdapterKind::Claude,
+            &stream(&[
+                json!({"type":"system","subtype":"init","model":model}),
+                json!({"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":2}}),
+            ]),
+        );
+        assert_eq!(report.reported_model, None);
+        assert_eq!(report.tokens["input_tokens"], "1");
+    }
+}
