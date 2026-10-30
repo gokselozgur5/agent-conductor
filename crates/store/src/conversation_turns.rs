@@ -92,7 +92,7 @@ impl Store {
         Ok(())
     }
 
-    /// Reserves an operator message for exactly one native launch attempt.
+    /// Reserves a message-recipient pair for exactly one native launch attempt.
     /// Only a fresh `true` result permits the caller to initiate execution.
     /// A crash after reservation leaves uncertainty; replay must not launch again.
     /// # Errors
@@ -119,12 +119,12 @@ impl Store {
             ));
         }
         let mut writer = self.inner.writer.lock().await;
-        let inserted = sqlx::query("INSERT INTO conversation_turns(message_id,conversation_id,agent_id,launch_id,profile_sha256,prompt_sha256,state,created_at_ms) SELECT id,conversation_id,?,?,?,?,'launch_intent',? FROM conversation_messages WHERE id=? AND sender='operator' ON CONFLICT(message_id) DO NOTHING")
+        let inserted = sqlx::query("INSERT INTO conversation_turns(message_id,conversation_id,agent_id,launch_id,profile_sha256,prompt_sha256,state,created_at_ms) SELECT id,conversation_id,?,?,?,?,'launch_intent',? FROM conversation_messages WHERE id=? AND sender='operator' ON CONFLICT(message_id,agent_id) DO NOTHING")
             .bind(intent.agent_id).bind(intent.launch_id).bind(intent.profile_sha256)
             .bind(intent.prompt_sha256).bind(now_ms).bind(intent.message_id)
             .execute(&mut *writer).await?.rows_affected();
-        let saved: Option<(String, String, String, String)> = sqlx::query_as("SELECT agent_id,launch_id,profile_sha256,prompt_sha256 FROM conversation_turns WHERE message_id=?")
-            .bind(intent.message_id).fetch_optional(&mut *writer).await?;
+        let saved: Option<(String, String, String, String)> = sqlx::query_as("SELECT agent_id,launch_id,profile_sha256,prompt_sha256 FROM conversation_turns WHERE message_id=? AND agent_id=?")
+            .bind(intent.message_id).bind(intent.agent_id).fetch_optional(&mut *writer).await?;
         let expected = (
             intent.agent_id.into(),
             intent.launch_id.into(),

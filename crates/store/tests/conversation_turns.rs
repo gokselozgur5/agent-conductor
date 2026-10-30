@@ -49,7 +49,7 @@ async fn durable_launch_intent_is_not_reissued_after_restart() {
             .unwrap()
     );
     let changed = ConversationTurnIntent {
-        agent_id: "claude",
+        profile_sha256: &prompt,
         ..intent
     };
     assert!(matches!(

@@ -134,3 +134,12 @@ both writer and reader connections. Each post-commit control must change state.
 These four paths map to three transaction owners. Fixture process identities and
 shutdown proofs are synthetic; this verifies database atomicity, not receipt
 provenance, native process fencing, physical reboot or every transaction branch.
+
+## Conversation route transaction owner (schema 36)
+
+`route_conversation_message` owns a SQLx transaction spanning the immutable
+recipient snapshot and every inbox row. `cancel_conversation_route` aborts the
+caller at the first actual inbox insert, after the route insert. The test compares
+all tables through both writer and reader connections, then reruns the operation
+as a positive control. This selected cancellation boundary covers partial fan-out;
+it does not establish native worker fencing or every crash boundary.

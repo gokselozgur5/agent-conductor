@@ -28,6 +28,7 @@ enum Owner {
     Update,
     Reassign,
     Reconcile,
+    ConversationRoute,
 }
 impl Owner {
     fn barrier(self) -> (&'static str, usize) {
@@ -45,6 +46,7 @@ impl Owner {
             Self::Prepare | Self::Update => ("executions", 1),
             Self::Reassign => ("workflow_assignments", 1),
             Self::Reconcile => ("workflow_dispatch", 1),
+            Self::ConversationRoute => ("conversation_deliveries", 1),
         }
     }
 }
@@ -153,6 +155,27 @@ async fn fixture(owner: Owner) -> (tempfile::TempDir, Store, Option<EventDeliver
         .unwrap();
     let mut delivery = None;
     match owner {
+        Owner::ConversationRoute => {
+            store
+                .create_conversation("room", "/project", 1)
+                .await
+                .unwrap();
+            store
+                .append_conversation_message(
+                    &ConversationMessage {
+                        sequence: 0,
+                        id: "request".into(),
+                        conversation_id: "room".into(),
+                        sender: "operator".into(),
+                        agent_id: None,
+                        body: "Coordinate".into(),
+                        created_at_ms: 2,
+                    },
+                    2,
+                )
+                .await
+                .unwrap();
+        }
         Owner::Effect => {
             let mut seed = batch("effect-seed");
             seed.effects.push(EffectIntentAppend {
@@ -205,6 +228,26 @@ async fn run(store: &Store, owner: Owner, delivery: Option<&EventDelivery>) -> R
         };
     }
     match owner {
+        Owner::ConversationRoute => done!(
+            store
+                .route_conversation_message(
+                    "request",
+                    &[
+                        ConversationRecipient {
+                            agent_id: "lead".into(),
+                            kind: "assignment".into(),
+                            reason: "operator_request".into()
+                        },
+                        ConversationRecipient {
+                            agent_id: "reviewer".into(),
+                            kind: "information".into(),
+                            reason: "dependency_update".into()
+                        },
+                    ],
+                    3
+                )
+                .await
+        ),
         Owner::Reassign => done!(
             store
                 .reassign_workflow("task", 0, "job:worker", "{}", "old", 100)
@@ -408,6 +451,7 @@ macro_rules! owner_test {
         }
     };
 }
+owner_test!(cancel_conversation_route, ConversationRoute);
 owner_test!(cancel_create_project, Project);
 owner_test!(cancel_create_task, Task);
 owner_test!(cancel_persist, Persist);

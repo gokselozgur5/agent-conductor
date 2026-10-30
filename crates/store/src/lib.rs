@@ -27,6 +27,9 @@ pub use auxiliary_launch::{
     AuxiliaryInvocation, AuxiliaryLaunchBinding, AuxiliaryRecoveryCandidate,
 };
 mod conversation_jobs;
+mod conversation_rooms;
+mod conversation_routes;
+pub use conversation_routes::{ConversationDelivery, ConversationRecipient};
 mod conversation_turns;
 mod conversations;
 pub use conversation_turns::ConversationTurnIntent;
