@@ -44,8 +44,8 @@ use agent_conductor_store::{
     AgentRegistration, AttemptLeaseMutation, AuditAppend, CommitBatch, CommitResult,
     ConsumerStateEffect, EffectIntentAppend, EventDelivery, EventLimits, EventSourceIdentity,
     EventStoreError, EventSubscription, PersistedTask, ProjectRegistration, PublishResult,
-    RuntimeInvariantViolation, SemanticEvent, Store, StoreError, TaskMutation, TaskRegistration,
-    TaskTransitionAppend,
+    RuntimeInvariantViolation, SemanticEvent, Store, StoreError, TaskCandidate, TaskMutation,
+    TaskRegistration, TaskTransitionAppend,
 };
 use conductor_protocol::{
     CommandAppliedResponse, ErrorBody, ErrorCode, EventDeliveryResponse, EventPublishedResponse,
@@ -358,7 +358,7 @@ impl<C: Clock> PersistentControlService<C> {
     /// Returns an integrity error if persisted aggregates cannot be decoded or
     /// an eligible requeue cannot be committed.
     pub async fn reconcile_expired(&self) -> Result<usize, StoreError> {
-        let rows = self.store.tasks(None).await?;
+        let rows = self.store.task_candidates().await?;
         let mut requeued = 0;
         for candidate in rows {
             tokio::task::consume_budget().await;
@@ -371,7 +371,7 @@ impl<C: Clock> PersistentControlService<C> {
 
     async fn reconcile_expiry_candidate(
         &self,
-        candidate: PersistedTask,
+        candidate: TaskCandidate,
     ) -> Result<bool, StoreError> {
         let task: Task = serde_json::from_str(&candidate.aggregate_json)
             .map_err(|error| StoreError::Integrity(format!("invalid aggregate: {error}")))?;
@@ -1961,7 +1961,10 @@ mod effect_tests {
         clock.set(15);
         assert!(
             !service
-                .reconcile_expiry_candidate(stale)
+                .reconcile_expiry_candidate(TaskCandidate {
+                    id: stale.id,
+                    aggregate_json: stale.aggregate_json
+                })
                 .await
                 .expect("fresh lease")
         );
