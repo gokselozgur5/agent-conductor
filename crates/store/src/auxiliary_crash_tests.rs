@@ -271,3 +271,125 @@ async fn publication_survives_abrupt_exit_and_replay() {
         }
     }
 }
+
+async fn crash_host_reconciliation(mode: &str, control: &Path) -> ! {
+    let (operation, boundary) = mode.split_once(':').unwrap();
+    let (root, store, input, host) = auxiliary_origin_fixture(operation).await;
+    let before = snapshot(&mut *store.inner.writer.lock().await).await;
+    std::fs::write(
+        control.join("database"),
+        root.path().join("state.sqlite3").to_str().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        control.join("before.json"),
+        serde_json::to_vec(&before).unwrap(),
+    )
+    .unwrap();
+    if boundary == "before" {
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_update_hook(|update| {
+                if update.table == "audit_events" {
+                    std::process::exit(81);
+                }
+            });
+    }
+    store
+        .reconcile_auxiliary_host(&input, &host, audit("crash-host-reconciliation"))
+        .await
+        .unwrap();
+    assert_eq!(
+        boundary, "after",
+        "selected pre-commit write was not reached"
+    );
+    let after = snapshot(&mut *store.inner.writer.lock().await).await;
+    assert_ne!(before, after, "positive control did not change state");
+    std::fs::write(
+        control.join("after.json"),
+        serde_json::to_vec(&after).unwrap(),
+    )
+    .unwrap();
+    std::process::exit(82);
+}
+
+#[tokio::test]
+async fn host_reconciliation_survives_abrupt_exit_on_both_sides() {
+    const MODE: &str = "CONDUCTOR_HOST_RECONCILIATION_CRASH_MODE";
+    const CONTROL: &str = "CONDUCTOR_HOST_RECONCILIATION_CRASH_CONTROL";
+    if let Ok(mode) = std::env::var(MODE) {
+        crash_host_reconciliation(
+            &mode,
+            &std::path::PathBuf::from(std::env::var(CONTROL).unwrap()),
+        )
+        .await;
+    }
+    for operation in ["observe", "settle"] {
+        for boundary in ["before", "after"] {
+            let mode = format!("{operation}:{boundary}");
+            let control = tempfile::tempdir().unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "auxiliary_crash_tests::host_reconciliation_survives_abrupt_exit_on_both_sides",
+                    "--nocapture",
+                ])
+                .env(MODE, &mode)
+                .env(CONTROL, control.path())
+                .env("TMPDIR", control.path())
+                .spawn()
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("host reconciliation crash deadline: {mode}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
+            assert_eq!(
+                status.code(),
+                Some(if boundary == "before" { 81 } else { 82 }),
+                "{mode}"
+            );
+            let store =
+                Store::open(std::fs::read_to_string(control.path().join("database")).unwrap())
+                    .await
+                    .unwrap();
+            let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+                .fetch_one(store.readers())
+                .await
+                .unwrap();
+            assert_eq!(integrity, "ok");
+            let expected: Vec<(String, String)> = serde_json::from_slice(
+                &std::fs::read(control.path().join(if boundary == "before" {
+                    "before.json"
+                } else {
+                    "after.json"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                snapshot(&mut *store.inner.writer.lock().await).await,
+                expected,
+                "{mode}"
+            );
+            assert_eq!(
+                snapshot(&mut store.readers().acquire().await.unwrap()).await,
+                expected,
+                "{mode}"
+            );
+        }
+    }
+}
