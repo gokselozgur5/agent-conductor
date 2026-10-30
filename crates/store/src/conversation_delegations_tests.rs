@@ -748,3 +748,56 @@ async fn queue_admits_only_the_exact_authorized_recipient() {
         Some(("reply".into(), profile("worker")))
     );
 }
+
+#[tokio::test]
+async fn blocked_recipient_is_visible_and_never_enters_the_queue() {
+    let (_root, store) = authorized_pair().await;
+    for refused in ["lead", "outsider"] {
+        assert!(
+            store
+                .block_conversation_recipient("reply", refused, 4)
+                .await
+                .is_err()
+        );
+    }
+    store
+        .queue_conversation_job("reply", &profile("worker"), 4)
+        .await
+        .unwrap();
+    store
+        .block_conversation_recipient("reply", "ghost", 4)
+        .await
+        .unwrap();
+    store
+        .block_conversation_recipient("reply", "ghost", 5)
+        .await
+        .unwrap();
+    // A blocked recipient never replaces a queued one.
+    store
+        .block_conversation_recipient("reply", "worker", 5)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .next_unadmitted_conversation_assignment()
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.next_conversation_job().await.unwrap(),
+        Some(("reply".into(), profile("worker")))
+    );
+    let states: Vec<(String, String)> =
+        sqlx::query_as("SELECT agent_id,state FROM conversation_jobs ORDER BY agent_id")
+            .fetch_all(&store.inner.readers)
+            .await
+            .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            ("ghost".into(), "blocked".into()),
+            ("worker".into(), "queued".into())
+        ]
+    );
+}

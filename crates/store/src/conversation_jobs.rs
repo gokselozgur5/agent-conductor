@@ -43,6 +43,41 @@ impl Store {
         }
     }
 
+    /// Records a visible blocked job for a recipient that cannot be admitted,
+    /// such as an authorized assignment to an agent with no configured profile.
+    /// Existing jobs are retained unchanged; nothing is launched.
+    /// # Errors
+    /// Rejects unauthorized message/recipient pairs and returns database errors.
+    pub async fn block_conversation_recipient(
+        &self,
+        message_id: &str,
+        agent_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        if !super::conversations::valid_id(agent_id) {
+            return Err(StoreError::Integrity(
+                "invalid conversation recipient".into(),
+            ));
+        }
+        let mut writer = self.inner.writer.lock().await;
+        sqlx::query("INSERT INTO conversation_jobs(message_id,agent_id,agent_profile_json,state,created_at_ms) SELECT id,?,json_object('id',?),'blocked',? FROM conversation_messages WHERE id=? AND (sender='operator' OR EXISTS(SELECT 1 FROM conversation_assignments a WHERE a.source_reply_id=conversation_messages.id AND a.agent_id=?)) ON CONFLICT(message_id,agent_id) DO NOTHING")
+            .bind(agent_id).bind(agent_id).bind(now_ms).bind(message_id).bind(agent_id).execute(&mut *writer).await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM conversation_jobs WHERE message_id=? AND agent_id=?)",
+        )
+        .bind(message_id)
+        .bind(agent_id)
+        .fetch_one(&mut *writer)
+        .await?;
+        if exists {
+            Ok(())
+        } else {
+            Err(StoreError::Integrity(
+                "operator message or authorized assignment required".into(),
+            ))
+        }
+    }
+
     /// Selects unreserved work; reservation remains authoritative before launch.
     /// # Errors
     /// Returns database errors.
