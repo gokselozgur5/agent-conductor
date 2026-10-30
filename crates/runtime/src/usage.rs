@@ -68,6 +68,7 @@ pub fn reported_usage(kind: AdapterKind, stdout: &[u8]) -> ReportedUsage {
                         && !s.starts_with("sk-")
                         && s.bytes()
                             .all(|b| b.is_ascii_alphanumeric() || b"-._/:".contains(&b))
+                        && crate::redact_credentials(s) == *s
                 })
                 .map(str::to_owned);
         }
