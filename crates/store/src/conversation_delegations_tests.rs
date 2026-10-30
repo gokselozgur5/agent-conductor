@@ -850,3 +850,57 @@ async fn reservation_admits_only_the_exact_authorized_recipient() {
             )
     );
 }
+
+/// Settles one recipient of the authorized pair with an ordinary reply.
+async fn settle(store: &Store, agent: &str) {
+    reply(store, &format!("{agent}-reply"), "reply", agent, "Done").await;
+    store
+        .examine_conversation_reply(&format!("{agent}-reply"), 5)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn continuation_waits_for_every_recipient_and_opens_once() {
+    let (_root, store) = authorized_pair().await;
+    assert!(store.next_ready_continuation().await.unwrap().is_none());
+    assert!(
+        store
+            .open_conversation_continuation("reply", 4)
+            .await
+            .is_err()
+    );
+    settle(&store, "worker").await;
+    assert!(store.next_ready_continuation().await.unwrap().is_none());
+    store
+        .block_conversation_recipient("reply", "ghost", 6)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.next_ready_continuation().await.unwrap(),
+        Some(("reply".into(), "lead".into()))
+    );
+    assert!(
+        !store
+            .conversation_continuation("reply", "lead")
+            .await
+            .unwrap()
+    );
+    for now in [7, 8] {
+        let author = store.open_conversation_continuation("reply", now).await;
+        assert_eq!(author.unwrap(), "lead");
+    }
+    assert!(store.next_ready_continuation().await.unwrap().is_none());
+    assert!(
+        store
+            .conversation_continuation("reply", "lead")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .conversation_continuation("reply", "worker")
+            .await
+            .unwrap()
+    );
+}
