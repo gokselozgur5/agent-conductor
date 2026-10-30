@@ -347,3 +347,93 @@ async fn room_rpc_retains_topology_and_refuses_authority_changes() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn delegation_proposal_requires_native_provenance_and_never_queues_work() {
+    use agent_conductor_store::ConversationTurnIntent;
+    let root = tempfile::tempdir().unwrap();
+    let (_, lead) = fixture_agent(root.path());
+    let mut worker = lead.clone();
+    worker.id = "worker".into();
+    let store = Store::open(root.path().join("delegation.sqlite3"))
+        .await
+        .unwrap();
+    store
+        .create_conversation("room", "/project", 1)
+        .await
+        .unwrap();
+    let body = r#"{"schema":"conductor.delegation.v1","assignments":[{"agent_id":"worker","instruction":"Inspect the parser"}]}"#;
+    for (id, sender, agent_id) in [
+        ("request", "operator", None),
+        ("unbound", "agent", Some(lead.id.clone())),
+    ] {
+        store
+            .append_conversation_message(
+                &ConversationMessage {
+                    sequence: 0,
+                    id: id.into(),
+                    conversation_id: "room".into(),
+                    sender: sender.into(),
+                    agent_id,
+                    body: body.into(),
+                    created_at_ms: 2,
+                },
+                2,
+            )
+            .await
+            .unwrap();
+    }
+    let service = PersistentControlService::start(store.clone(), 1)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![lead.clone(), worker.clone()])
+        .unwrap();
+    service
+        .configure_room("room", shared_configuration(&lead.id, &worker.id))
+        .await
+        .unwrap();
+    for id in ["missing", "request", "unbound"] {
+        assert!(service.inspect_native_delegation(id).await.is_err());
+    }
+    let digest = "a".repeat(64);
+    assert!(
+        store
+            .reserve_conversation_turn(
+                &ConversationTurnIntent {
+                    message_id: "request",
+                    agent_id: &lead.id,
+                    launch_id: "source-launch",
+                    profile_sha256: &digest,
+                    prompt_sha256: &digest,
+                },
+                3
+            )
+            .await
+            .unwrap()
+    );
+    store
+        .publish_conversation_reply("source-launch", "reply", body, &digest, 4)
+        .await
+        .unwrap();
+    drop(service);
+    let service = PersistentControlService::start(store.clone(), 2)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![lead.clone(), worker])
+        .unwrap();
+    let proposal = service.inspect_native_delegation("reply").await.unwrap();
+    assert_eq!(proposal.source_reply_id, "reply");
+    assert_eq!(proposal.origin.parent_message_id, "request");
+    assert_eq!(proposal.origin.author_agent_id, lead.id);
+    assert_eq!(proposal.plan.assignments.len(), 1);
+    assert_eq!(proposal.plan.assignments[0].agent_id, "worker");
+    assert_eq!(
+        proposal.plan.assignments[0].instruction,
+        "Inspect the parser"
+    );
+    assert!(store.next_conversation_job().await.unwrap().is_none());
+    assert!(store.next_room_assignment().await.unwrap().is_none());
+    assert!(store.workflows().await.unwrap().is_empty());
+}

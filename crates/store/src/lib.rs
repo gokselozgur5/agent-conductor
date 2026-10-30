@@ -32,7 +32,7 @@ mod conversation_routes;
 pub use conversation_routes::{ConversationDelivery, ConversationRecipient};
 mod conversation_turns;
 mod conversations;
-pub use conversation_turns::ConversationTurnIntent;
+pub use conversation_turns::{ConversationReplyOrigin, ConversationTurnIntent};
 mod inventory;
 pub use conversations::{ConversationHeader, ConversationMessage};
 mod usage;

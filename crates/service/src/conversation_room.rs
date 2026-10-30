@@ -1,7 +1,38 @@
 use crate::{Clock, ConversationRoom, PersistentControlService, RoomConfiguration};
-use agent_conductor_store::StoreError;
+use agent_conductor_store::{ConversationReplyOrigin, StoreError};
+
+/// Validated proposal only: no durable assignment or native launch is granted.
+pub struct NativeDelegationProposal {
+    pub source_reply_id: String,
+    pub origin: ConversationReplyOrigin,
+    pub plan: crate::DelegationPlan,
+}
 
 impl<C: Clock> PersistentControlService<C> {
+    /// Parses delegation from an actual native reply under the stored room topology.
+    /// The proposal is read-only; durable assignment/budget admission is separate.
+    /// # Errors
+    /// Rejects unbound replies, invalid decisions and unauthorized targets.
+    pub async fn inspect_native_delegation(
+        &self,
+        reply_id: &str,
+    ) -> Result<NativeDelegationProposal, StoreError> {
+        let origin = self
+            .store
+            .conversation_reply_origin(reply_id)
+            .await?
+            .ok_or_else(|| {
+                StoreError::Integrity("settled native reply required for delegation".into())
+            })?;
+        let room = self.load_room(&origin.conversation_id).await?;
+        let plan = crate::parse_delegation(&origin.body, &room, &origin.author_agent_id)?;
+        Ok(NativeDelegationProposal {
+            source_reply_id: reply_id.into(),
+            origin,
+            plan,
+        })
+    }
+
     fn validate_room(&self, config: RoomConfiguration) -> Result<ConversationRoom, StoreError> {
         let agents = self
             .conversation_agents

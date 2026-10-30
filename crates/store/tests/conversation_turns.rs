@@ -120,3 +120,86 @@ async fn durable_launch_intent_is_not_reissued_after_restart() {
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn reply_origin_rejects_inconsistent_native_bindings() {
+    use sqlx::Connection;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("origin.sqlite3");
+    let store = Store::open(&path).await.unwrap();
+    for room in ["room", "other"] {
+        store
+            .create_conversation(room, "/project", 1)
+            .await
+            .unwrap();
+    }
+    store
+        .append_conversation_message(
+            &ConversationMessage {
+                sequence: 0,
+                id: "request".into(),
+                conversation_id: "room".into(),
+                sender: "operator".into(),
+                agent_id: None,
+                body: "Work".into(),
+                created_at_ms: 1,
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let digest = "a".repeat(64);
+    store
+        .reserve_conversation_turn(
+            &ConversationTurnIntent {
+                message_id: "request",
+                agent_id: "lead",
+                launch_id: "launch",
+                profile_sha256: &digest,
+                prompt_sha256: &digest,
+            },
+            2,
+        )
+        .await
+        .unwrap();
+    store
+        .publish_conversation_reply("launch", "reply", "Report", &digest, 3)
+        .await
+        .unwrap();
+    let mut db = sqlx::SqliteConnection::connect(path.to_str().unwrap())
+        .await
+        .unwrap();
+    // Corrupt each binding independently to discriminate the provenance predicates.
+    for (corrupt, restore) in [
+        (
+            "UPDATE conversation_turns SET state='unknown'",
+            "UPDATE conversation_turns SET state='replied'",
+        ),
+        (
+            "UPDATE conversation_messages SET agent_id='other-agent' WHERE id='reply'",
+            "UPDATE conversation_messages SET agent_id='lead' WHERE id='reply'",
+        ),
+        (
+            "UPDATE conversation_messages SET conversation_id='other' WHERE id='reply'",
+            "UPDATE conversation_messages SET conversation_id='room' WHERE id='reply'",
+        ),
+    ] {
+        sqlx::query(corrupt).execute(&mut db).await.unwrap();
+        assert!(
+            store
+                .conversation_reply_origin("reply")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sqlx::query(restore).execute(&mut db).await.unwrap();
+        let origin = store
+            .conversation_reply_origin("reply")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(origin.author_agent_id, "lead");
+        assert_eq!(origin.parent_message_id, "request");
+        assert_eq!(origin.conversation_id, "room");
+    }
+}

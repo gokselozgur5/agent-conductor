@@ -19,7 +19,28 @@ pub struct ConversationTurnIntent<'a> {
     pub prompt_sha256: &'a str,
 }
 
+/// Native reply provenance, read from the settled turn rather than model fields.
+#[derive(Debug, sqlx::FromRow)]
+pub struct ConversationReplyOrigin {
+    pub conversation_id: String,
+    pub parent_message_id: String,
+    pub author_agent_id: String,
+    pub body: String,
+}
+
 impl Store {
+    /// Resolves an actual settled native reply and its immutable author binding.
+    /// Agent-looking text without a corresponding turn is not execution authority.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn conversation_reply_origin(
+        &self,
+        reply_id: &str,
+    ) -> Result<Option<ConversationReplyOrigin>, StoreError> {
+        Ok(sqlx::query_as("SELECT m.conversation_id,t.message_id AS parent_message_id,t.agent_id AS author_agent_id,m.body FROM conversation_turns t JOIN conversation_messages m ON m.id=t.reply_message_id WHERE m.id=? AND t.state='replied' AND m.sender='agent' AND m.agent_id=t.agent_id AND m.conversation_id=t.conversation_id")
+            .bind(reply_id).fetch_optional(&self.inner.readers).await?)
+    }
+
     /// Retains an uncertain execution without granting another launch.
     /// # Errors
     /// Returns database errors.

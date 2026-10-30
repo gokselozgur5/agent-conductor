@@ -1,6 +1,9 @@
 mod broker_candidate_failure;
 mod conversation;
+mod conversation_delegation;
 mod conversation_room;
+pub use conversation_delegation::{DelegationPlan, parse_delegation};
+pub use conversation_room::NativeDelegationProposal;
 mod conversation_routing;
 pub use broker_candidate_failure::BrokerCandidateFailure;
 pub use conversation::ConversationAgent;
