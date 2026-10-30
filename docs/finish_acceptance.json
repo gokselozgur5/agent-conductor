@@ -1,0 +1,368 @@
+{
+  "schema": "conductor.finish-acceptance.v1",
+  "candidate": null,
+  "note": "Intentionally incomplete. Historical and fixture evidence is not final-candidate acceptance. Source and artifact bindings are populated only after actual validation.",
+  "gates": [
+    {
+      "id": "P1",
+      "title": "Authorized delegation",
+      "required_scope": "native",
+      "required_checks": [
+        "default_coordinator_delegates",
+        "persisted_native_author",
+        "direct_reporting_authority",
+        "root_parent_binding",
+        "cumulative_depth_fanout_limits",
+        "immutable_replay",
+        "crash_no_duplicate_launch"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "P2",
+      "title": "Bounded reporting loop",
+      "required_scope": "native",
+      "required_checks": [
+        "result_blocker_correlation",
+        "wait_for_children",
+        "single_coordinator_continuation",
+        "bounded_correction_rounds",
+        "restart_no_duplicate_round",
+        "visible_terminal_or_blocked"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "P3",
+      "title": "Separate account execution",
+      "required_scope": "native",
+      "required_checks": [
+        "own_home_and_auth",
+        "frozen_profile_identity",
+        "no_credential_copy",
+        "no_same_account_fallback",
+        "codex_and_claude_distinct_account_acceptance"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "P4",
+      "title": "Operator visibility",
+      "required_scope": "native",
+      "required_checks": [
+        "recipient_reason_and_state",
+        "assignment_tree_and_causality",
+        "reports_blockers_summary",
+        "reconnect_preserves_identity",
+        "text_only_rendering",
+        "populated_layout",
+        "credential_privacy"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "P5",
+      "title": "Combined product acceptance",
+      "required_scope": "full",
+      "required_checks": [
+        "single_request_coordinated_result",
+        "controlled_fault_matrix",
+        "real_codex_claude",
+        "independent_task_acceptance",
+        "full_requirements_audit",
+        "final_candidate_evidence"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "P6",
+      "title": "Release and installation",
+      "required_scope": "full",
+      "required_checks": [
+        "atomic_validated_commits",
+        "issue_pr_metadata_verified",
+        "exact_head_ci_all_hosts",
+        "release_manifest_verified",
+        "upgrade_rehearsal",
+        "runtime_state_identity_preserved",
+        "post_upgrade_acceptance",
+        "operator_runbook"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-1",
+      "title": "Project intake",
+      "required_scope": "native",
+      "required_checks": [
+        "canonical_identity_dedup",
+        "applicable_instruction_order",
+        "operator_pinned_authority",
+        "continuity_discovery",
+        "readonly_git_inventory",
+        "missing_source_reported"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-2",
+      "title": "Bounded resume context",
+      "required_scope": "native",
+      "required_checks": [
+        "versioned_bounded_packet",
+        "mandatory_instruction_ack",
+        "frozen_instruction_hashes",
+        "untrusted_retrieval_no_authority",
+        "context_after_restart"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-3",
+      "title": "Shared Kanban",
+      "required_scope": "native",
+      "required_checks": [
+        "authoritative_projection",
+        "all_state_controls",
+        "transition_actor_reason_time",
+        "task_scope_dependencies_owner",
+        "blocker_and_resumption_condition"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-4",
+      "title": "Ownership and isolation",
+      "required_scope": "native",
+      "required_checks": [
+        "single_owner",
+        "stale_epoch_refusal",
+        "lease_boundary_suspend_partition",
+        "isolated_worktree",
+        "overlap_visible",
+        "dirty_state_preserved",
+        "branch_head_change_refusal",
+        "cross_host_fencing_refusal"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-5",
+      "title": "Progress and checkpoints",
+      "required_scope": "native",
+      "required_checks": [
+        "heartbeat_renewal",
+        "meaningful_checkpoint",
+        "running_process_artifact_context",
+        "interruption_retains_state",
+        "no_completion_from_silence"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-6",
+      "title": "Continuation and recovery",
+      "required_scope": "native",
+      "required_checks": [
+        "expired_dead_orphan_reconciliation",
+        "bounded_classified_retry",
+        "tagged_live_inventory",
+        "durable_intent_before_effect",
+        "crash_both_sides_effect_inventory",
+        "unknown_ownership_blocks_retry",
+        "native_midchange_restart_resume"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-7",
+      "title": "Events and updates",
+      "required_scope": "native",
+      "required_checks": [
+        "versioned_causal_events",
+        "filtered_subscriptions",
+        "no_source_echo",
+        "bounded_fanout_age_retry",
+        "debounced_bursts",
+        "durable_delivery",
+        "atomic_ack_effect",
+        "owned_write_attribution"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-8",
+      "title": "Controlled wake",
+      "required_scope": "native",
+      "required_checks": [
+        "eligibility_and_concurrency_policy",
+        "bounded_resume_context",
+        "no_duplicate_lease_launch",
+        "idempotent_wake_claim",
+        "no_recursive_self_wake"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-9",
+      "title": "Independent completion",
+      "required_scope": "native",
+      "required_checks": [
+        "worker_cannot_self_verify",
+        "declared_checks_immutable_to_worker",
+        "decisions_closed_by_authority",
+        "checks_and_verdict_same_tree",
+        "isolated_verifier",
+        "uncertain_execution_preserved",
+        "exactly_once_terminal_completion"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-10",
+      "title": "Operator authority",
+      "required_scope": "native",
+      "required_checks": [
+        "pause_resume_cancel_reassign",
+        "sensitive_action_authority",
+        "unauthorized_effect_proven_absent",
+        "adapter_envelope_fail_closed",
+        "current_operator_scope_preserved"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-11",
+      "title": "Native adapters",
+      "required_scope": "native",
+      "required_checks": [
+        "codex_and_claude_own_login",
+        "versioned_conformance",
+        "changed_vendor_refused",
+        "malformed_truncated_delayed_output",
+        "checkpoint_based_recovery",
+        "no_prose_completion_authority"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-12",
+      "title": "Operator interface",
+      "required_scope": "native",
+      "required_checks": [
+        "cli_ui_same_versioned_api",
+        "tasks_agents_events_checkpoints_evidence",
+        "leases_decisions_blockers_usage",
+        "fact_claim_stale_decision_distinction"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "FR-13",
+      "title": "Audit and observability",
+      "required_scope": "native",
+      "required_checks": [
+        "atomic_lifecycle_audit",
+        "append_only_causal_record",
+        "structured_correlation",
+        "no_secret_logging",
+        "transition_reconstruction",
+        "reported_usage_not_invented"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "NFR-1",
+      "title": "Reliability and endurance",
+      "required_scope": "full",
+      "required_checks": [
+        "transaction_rollback",
+        "duplicate_command_event_safety",
+        "all_lifecycle_effect_fault_boundaries",
+        "seven_continuous_days",
+        "native_orphan_monitor",
+        "unfenced_surface_monitor",
+        "lease_projection_epoch_invariants",
+        "bounded_memory_queue_growth"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "NFR-2",
+      "title": "Final artifact performance",
+      "required_scope": "native",
+      "required_checks": [
+        "declared_load",
+        "board_p95_target",
+        "wake_p95_target",
+        "idle_cpu_measured",
+        "conditions_and_failures_retained"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "NFR-3",
+      "title": "Supported hosts",
+      "required_scope": "native",
+      "required_checks": [
+        "macos_arm64_native_release",
+        "linux_arm64_native_release",
+        "linux_amd64_native_release",
+        "portable_identity_worktree_aliases"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "NFR-4",
+      "title": "Security and privacy",
+      "required_scope": "native",
+      "required_checks": [
+        "local_default_binding",
+        "remote_authenticated_encryption",
+        "authorized_root_boundary",
+        "hostile_content_no_authority",
+        "logs_events_ui_resume_source_canaries",
+        "no_unauthorized_publication"
+      ],
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "id": "NFR-5",
+      "title": "Upgrade and recovery compatibility",
+      "required_scope": "native",
+      "required_checks": [
+        "versioned_migrations_and_protocols",
+        "unknown_required_fields_refused",
+        "replaceable_adapters",
+        "upgrade_rollback_or_refusal_rehearsal",
+        "same_host_reboot_recovery",
+        "native_chat_backup_fence_boundary"
+      ],
+      "status": "pending",
+      "evidence": []
+    }
+  ]
+}
