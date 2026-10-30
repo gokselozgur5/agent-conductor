@@ -75,30 +75,8 @@ impl Store {
     ) -> Result<Vec<ConversationAssignment>, StoreError> {
         let mut writer = self.inner.writer.lock().await;
         let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
-        let source: NativeSource = sqlx::query_as("SELECT m.conversation_id,t.message_id AS parent_message_id,t.agent_id AS author_agent_id,m.body,r.configuration_json AS configuration FROM conversation_turns t JOIN conversation_messages m ON m.id=t.reply_message_id JOIN conversation_rooms r ON r.conversation_id=m.conversation_id WHERE m.id=? AND t.state='replied' AND m.sender='agent' AND m.agent_id=t.agent_id AND m.conversation_id=t.conversation_id")
-            .bind(reply_id).fetch_optional(&mut *tx).await?
-            .ok_or_else(|| invalid("settled native room reply required"))?;
-        let decision = validate_decision(&source)?;
-        let (root_message_id, depth) = ancestry(&mut tx, &source).await?;
-        let expected = Batch {
-            conversation_id: source.conversation_id,
-            root_message_id,
-            parent_message_id: source.parent_message_id,
-            author_agent_id: source.author_agent_id,
-            depth,
-            decision_json: source.body,
-            room_configuration_json: source.configuration,
-        };
-        let saved: Option<Batch> = sqlx::query_as("SELECT conversation_id,root_message_id,parent_message_id,author_agent_id,depth,decision_json,room_configuration_json FROM conversation_delegation_batches WHERE source_reply_id=?")
-            .bind(reply_id).fetch_optional(&mut *tx).await?;
-        let assignments = expected_assignments(reply_id, &expected, decision);
-        if let Some(saved) = saved {
-            if saved != expected || read_assignments(&mut tx, reply_id).await? != assignments {
-                return Err(StoreError::IdempotencyCollision);
-            }
-        } else {
-            insert_batch(&mut tx, reply_id, &expected, &assignments, now_ms).await?;
-        }
+        let source = native_source(&mut tx, reply_id).await?;
+        let assignments = authorize_in(&mut tx, reply_id, source, now_ms).await?;
         tx.commit().await?;
         Ok(assignments)
     }
@@ -113,6 +91,45 @@ impl Store {
         let mut connection = self.inner.readers.acquire().await?;
         read_assignments(&mut connection, reply_id).await
     }
+}
+
+async fn native_source(
+    connection: &mut SqliteConnection,
+    reply_id: &str,
+) -> Result<NativeSource, StoreError> {
+    sqlx::query_as("SELECT m.conversation_id,t.message_id AS parent_message_id,t.agent_id AS author_agent_id,m.body,r.configuration_json AS configuration FROM conversation_turns t JOIN conversation_messages m ON m.id=t.reply_message_id JOIN conversation_rooms r ON r.conversation_id=m.conversation_id WHERE m.id=? AND t.state='replied' AND m.sender='agent' AND m.agent_id=t.agent_id AND m.conversation_id=t.conversation_id")
+        .bind(reply_id).fetch_optional(connection).await?
+        .ok_or_else(|| invalid("settled native room reply required"))
+}
+
+async fn authorize_in(
+    tx: &mut SqliteConnection,
+    reply_id: &str,
+    source: NativeSource,
+    now_ms: i64,
+) -> Result<Vec<ConversationAssignment>, StoreError> {
+    let decision = validate_decision(&source)?;
+    let (root_message_id, depth) = ancestry(tx, &source).await?;
+    let expected = Batch {
+        conversation_id: source.conversation_id,
+        root_message_id,
+        parent_message_id: source.parent_message_id,
+        author_agent_id: source.author_agent_id,
+        depth,
+        decision_json: source.body,
+        room_configuration_json: source.configuration,
+    };
+    let saved: Option<Batch> = sqlx::query_as("SELECT conversation_id,root_message_id,parent_message_id,author_agent_id,depth,decision_json,room_configuration_json FROM conversation_delegation_batches WHERE source_reply_id=?")
+        .bind(reply_id).fetch_optional(&mut *tx).await?;
+    let assignments = expected_assignments(reply_id, &expected, decision);
+    if let Some(saved) = saved {
+        if saved != expected || read_assignments(tx, reply_id).await? != assignments {
+            return Err(StoreError::IdempotencyCollision);
+        }
+    } else {
+        insert_batch(tx, reply_id, &expected, &assignments, now_ms).await?;
+    }
+    Ok(assignments)
 }
 
 fn validate_decision(source: &NativeSource) -> Result<Decision, StoreError> {
