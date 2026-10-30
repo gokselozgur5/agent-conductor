@@ -225,12 +225,44 @@ impl<C: Clock> PersistentControlService<C> {
         Ok((format!("{instructions}{encoded}"), informed))
     }
 
-    /// Runs a recorded operator message using a trusted, configured agent.
+    /// Resolves what admits this agent's turn: the operator's message, or a native
+    /// reply whose stored delegation batch names exactly this agent.
+    async fn turn_source(
+        &self,
+        message_id: &str,
+        agent_id: &str,
+    ) -> Result<
+        (
+            agent_conductor_store::ConversationMessage,
+            Option<ConversationAssignment>,
+        ),
+        StoreError,
+    > {
+        let input = self
+            .store
+            .conversation_message(message_id)
+            .await?
+            .ok_or_else(|| invalid("conversation message missing"))?;
+        let assignment = if input.sender == "operator" {
+            None
+        } else {
+            Some(
+                self.store
+                    .conversation_assignment(message_id, agent_id)
+                    .await?
+                    .ok_or_else(|| invalid("operator message or authorized assignment required"))?,
+            )
+        };
+        Ok((input, assignment))
+    }
+
+    /// Runs a recorded operator message, or a native reply whose stored delegation
+    /// batch authorizes exactly this agent, using a trusted configured profile.
     /// `false` means an existing launch was retained, never permission to retry.
     /// The caller owns supervision and must retain this future until terminal.
     /// # Errors
-    /// Refuses invalid context/profile, foreign OS identity, overlapping turns,
-    /// unsuccessful native output and persistence failures.
+    /// Refuses unauthorized sources, invalid context/profile, foreign OS identity,
+    /// overlapping turns, unsuccessful native output and persistence failures.
     pub async fn run_conversation_message(
         &self,
         message_id: &str,
@@ -240,18 +272,18 @@ impl<C: Clock> PersistentControlService<C> {
         if agent.timeout_ms == 0 || agent.timeout_ms > 300_000 {
             return Err(invalid("invalid conversation timeout"));
         }
-        let input = self
-            .store
-            .conversation_message(message_id)
-            .await?
-            .filter(|row| row.sender == "operator")
-            .ok_or_else(|| invalid("operator message required"))?;
+        let (input, assignment) = self.turn_source(message_id, &agent.id).await?;
         let project = self
             .store
             .conversation_project(&input.conversation_id)
             .await?;
         let (prompt, informed) = self
-            .conversation_prompt(&input.conversation_id, input.sequence, &agent.id, None)
+            .conversation_prompt(
+                &input.conversation_id,
+                input.sequence,
+                &agent.id,
+                assignment.as_ref(),
+            )
             .await?;
         let spec = conductor_runtime::full_capability_command(
             &agent.account,
