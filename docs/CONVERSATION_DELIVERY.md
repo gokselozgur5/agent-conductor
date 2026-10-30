@@ -1,13 +1,38 @@
 # Operator conversation delivery
 
-Status: current-account candidate validated in Chrome with real Codex and Claude;
-not installed in the operator's active runtime yet. Foreign-account conversation
-transport remains open.
+Status: a current-account manual chat preview is installed at localhost:8801.
+It is a locally built debug preview, not a completed command center. Real Codex
+and Claude replies work; foreign-account conversation transport remains open.
 
-The operator currently has to upload a prepared workflow plan. There is no
-conversation entry point on the installed board. Delivery requires entering a
-request in the browser, seeing actual native agent replies, retaining context
-after refresh/restart, and handing work between configured agents.
+## Required command and communication room
+
+The operator clarified the product requirement on 2026-10-30: one conversation
+must include all agents, with a command hierarchy and a separate communication
+chain. Selecting an agent manually for each turn does not satisfy this requirement.
+
+- The operator is the top-level authority. Conductor coordinates assignments,
+  delegation and reporting using configured agent roles; vendor names do not
+  imply a fixed hierarchy.
+- One shared conversation shows operator requests, agent replies, assignments,
+  handoffs and coordination updates with their actual authors and recipients.
+- The operator can address an individual agent or all participants within that
+  conversation. Sending a normal request must not require selecting each worker.
+- The communication center routes relevant decisions, results, blockers and
+  dependency changes to affected agents automatically. Informing an agent is
+  distinct from assigning it work or changing command authority.
+- Persist message causality, recipients, delivery state and acknowledgements.
+  Reconnection must not duplicate assignments or lose pending notifications.
+- Agents can report to their assigned coordinator and exchange relevant context
+  across reporting lines. The operator can inspect why a message was routed.
+- Do not blindly broadcast every event or create reply loops. A notification
+  alone must not trigger unlimited native invocations.
+
+Acceptance requires a single operator request to produce coordinated native
+agent work, an automatically routed result or blocker that changes the relevant
+agent's context, and visible responses in the same room without manual relay.
+Direct and room-wide addressing, restart delivery, duplicate prevention and
+unchanged task acceptance authority also require verification. These behaviors
+are requirements, not implemented capabilities of the current manual preview.
 
 ## Implementation boundaries
 
@@ -63,8 +88,9 @@ agent doubled a randomly selected integer from the first agent's reply, history
 survived reload, and no duplicate launches or browser credential storage were
 observed. The tested daemon SHA-256 is
 `6469cbd62b35a2d80515cf3040fe5bd9bf03b165ae2687959bc972084fd696c8`.
-These are same-account observations, not foreign-account or installed release
-acceptance.
+These are same-account observations, not foreign-account or release acceptance.
+The subsequent live preview check verified native replies and credential
+boundaries, but found horizontal overflow in the populated workflow queue.
 
 ## Operator startup
 
@@ -86,3 +112,31 @@ writing. Cold backup therefore refuses state containing native conversation turn
 records, including replied turns, until a separate verified recovery procedure
 exists. This preserves the existing full-capability recovery boundary; it is not
 an automatic reconciliation mechanism.
+
+## Shared-room candidate (not installed)
+
+The candidate persists operator-configured membership, reporting relationships,
+recipient snapshots and pending information deliveries. The browser can configure
+a room with a selected coordinator and all configured agents, address the
+coordinator, an individual member or everyone, and reload the stored topology.
+Retries preserve message identity, recipients and configuration. The topology is
+immutable after creation; editing an existing room is not implemented.
+
+The dispatcher recovers unadmitted assignments after restart, reserves one native
+turn per message and recipient, and automatically routes recorded replies to
+supervisors and subscribers. Relevant information enters a recipient's next turn
+without launching a reply loop. An uncertain native outcome still blocks further
+launches in that room. Routed requests report queued before job admission.
+
+A rendered Chrome fixture passed with one operator request, two actual controlled
+child processes, automatic prior-result context, reload, text-only rendering,
+authentication and credential checks. This is not a real-model shared-room proof.
+Service regressions cover restart delivery, immutable topology and no duplicate
+launches; migration tests preserve schema-35 launch identities and unknown-state
+exclusion. Deterministic cancellation verifies atomic route/inbox rollback.
+
+Remaining: structured native-agent delegation and bounded reporting rounds,
+visible per-recipient delivery reasons/status, real-model shared-room acceptance,
+foreign-account conversation transport, complete delivery checks and installation.
+The default coordinator route currently runs only the coordinator; it does not
+yet automatically delegate the operator's request to subordinate agents.
