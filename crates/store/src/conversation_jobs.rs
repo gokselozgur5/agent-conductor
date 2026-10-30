@@ -25,8 +25,8 @@ impl Store {
             ));
         }
         let mut writer = self.inner.writer.lock().await;
-        sqlx::query("INSERT INTO conversation_jobs(message_id,agent_id,agent_profile_json,state,created_at_ms) SELECT id,?,?,'queued',? FROM conversation_messages WHERE id=? AND (sender='operator' OR EXISTS(SELECT 1 FROM conversation_assignments a WHERE a.source_reply_id=conversation_messages.id AND a.agent_id=?)) ON CONFLICT(message_id,agent_id) DO NOTHING")
-            .bind(agent_id).bind(profile_json).bind(now_ms).bind(message_id).bind(agent_id).execute(&mut *writer).await?;
+        sqlx::query("INSERT INTO conversation_jobs(message_id,agent_id,agent_profile_json,state,created_at_ms) SELECT id,?,?,'queued',? FROM conversation_messages WHERE id=? AND (sender='operator' OR EXISTS(SELECT 1 FROM conversation_assignments a WHERE a.source_reply_id=conversation_messages.id AND a.agent_id=?) OR EXISTS(SELECT 1 FROM conversation_continuations c WHERE c.source_reply_id=conversation_messages.id AND c.agent_id=?)) ON CONFLICT(message_id,agent_id) DO NOTHING")
+            .bind(agent_id).bind(profile_json).bind(now_ms).bind(message_id).bind(agent_id).bind(agent_id).execute(&mut *writer).await?;
         let saved: Option<String> = sqlx::query_scalar(
             "SELECT agent_profile_json FROM conversation_jobs WHERE message_id=? AND agent_id=?",
         )
@@ -38,7 +38,7 @@ impl Store {
             Some(value) if value == profile_json => Ok(()),
             Some(_) => Err(StoreError::IdempotencyCollision),
             None => Err(StoreError::Integrity(
-                "operator message or authorized assignment required".into(),
+                "operator message, authorized assignment or continuation required".into(),
             )),
         }
     }
@@ -60,8 +60,8 @@ impl Store {
             ));
         }
         let mut writer = self.inner.writer.lock().await;
-        sqlx::query("INSERT INTO conversation_jobs(message_id,agent_id,agent_profile_json,state,created_at_ms) SELECT id,?,json_object('id',?),'blocked',? FROM conversation_messages WHERE id=? AND (sender='operator' OR EXISTS(SELECT 1 FROM conversation_assignments a WHERE a.source_reply_id=conversation_messages.id AND a.agent_id=?)) ON CONFLICT(message_id,agent_id) DO NOTHING")
-            .bind(agent_id).bind(agent_id).bind(now_ms).bind(message_id).bind(agent_id).execute(&mut *writer).await?;
+        sqlx::query("INSERT INTO conversation_jobs(message_id,agent_id,agent_profile_json,state,created_at_ms) SELECT id,?,json_object('id',?),'blocked',? FROM conversation_messages WHERE id=? AND (sender='operator' OR EXISTS(SELECT 1 FROM conversation_assignments a WHERE a.source_reply_id=conversation_messages.id AND a.agent_id=?) OR EXISTS(SELECT 1 FROM conversation_continuations c WHERE c.source_reply_id=conversation_messages.id AND c.agent_id=?)) ON CONFLICT(message_id,agent_id) DO NOTHING")
+            .bind(agent_id).bind(agent_id).bind(now_ms).bind(message_id).bind(agent_id).bind(agent_id).execute(&mut *writer).await?;
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM conversation_jobs WHERE message_id=? AND agent_id=?)",
         )
@@ -73,7 +73,7 @@ impl Store {
             Ok(())
         } else {
             Err(StoreError::Integrity(
-                "operator message or authorized assignment required".into(),
+                "operator message, authorized assignment or continuation required".into(),
             ))
         }
     }
