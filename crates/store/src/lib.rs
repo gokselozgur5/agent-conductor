@@ -26,7 +26,9 @@ pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
 pub use auxiliary_launch::{
     AuxiliaryInvocation, AuxiliaryLaunchBinding, AuxiliaryRecoveryCandidate,
 };
+mod conversations;
 mod inventory;
+pub use conversations::ConversationMessage;
 mod usage;
 pub use inventory::{InventoryKind, InventoryRow};
 mod evidence;
