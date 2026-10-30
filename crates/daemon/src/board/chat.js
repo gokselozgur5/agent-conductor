@@ -8,6 +8,10 @@ let chatGeneration = 0;
 let chatPending = null;
 let chatCreation = null;
 let chatListAfter = '';
+let chatAgents = [];
+let chatRoom = null;
+let chatRoomFor = '';
+let chatRoomPending = null;
 
 async function chatRpc(payload, credential = token) {
   const response = await fetch('/api/rpc', {
@@ -27,6 +31,8 @@ function clearChat() {
   chatGeneration++;
   chatId = ''; chatAfter = 0; chatNext = null; chatReady = false; chatBusy = false;
   chatPending = null; chatCreation = null; chatListAfter = '';
+  chatAgents = []; chatRoom = null; chatRoomFor = ''; chatRoomPending = null;
+  el('chat-room-summary').textContent = '';
   el('chat').hidden = true;
   el('chat-messages').replaceChildren();
   el('chat-conversations').replaceChildren();
@@ -59,6 +65,7 @@ async function refreshChat(credential) {
       const data = await chatRpc({type: 'conversation_agents'}, credential);
       if (generation !== chatGeneration) return;
       if (data.type !== 'conversation_agents' || !Array.isArray(data.agents)) throw new Error('Unexpected agent list.');
+      chatAgents = data.agents;
       el('chat-agent').replaceChildren(...data.agents.map(agent => {
         const option = text('option', `${agent.id} · ${agent.vendor} · ${agent.account}`);
         option.value = agent.id; return option;
@@ -72,6 +79,13 @@ async function refreshChat(credential) {
     }
     if (!chatId) return;
     const selected = chatId;
+    if (chatRoomFor !== selected) {
+      const room = await chatRpc({type: 'conversation_room', conversation_id: selected}, credential);
+      if (generation !== chatGeneration || selected !== chatId) return;
+      if (room.type !== 'conversation_room') throw new Error('Unexpected shared room configuration.');
+      chatRoom = room.configuration; chatRoomFor = selected;
+      renderChatRoom();
+    }
     const data = await chatRpc({type: 'conversation_messages', conversation_id: selected, after: chatAfter}, credential);
     if (generation !== chatGeneration || selected !== chatId) return;
     if (data.type !== 'conversation_messages' || !Array.isArray(data.messages)) throw new Error('Unexpected message history.');
@@ -92,12 +106,12 @@ function renderChatMessage(message) {
   row.append(text('p', message.body, 'chat-body'));
   row.append(text('small', states[message.status] || message.status || 'Recorded'));
   if (message.sender === 'operator' && message.status === 'saved') {
-    const button = text('button', 'Send saved message to selected agent');
+    const button = text('button', 'Send saved message to selected recipient');
     button.addEventListener('click', async () => {
       if (!token || !el('chat-agent').value) return;
       button.disabled = true;
       try {
-        await chatRpc({type: 'queue_conversation_turn', message_id: message.id, agent_id: el('chat-agent').value});
+        await chatRpc(chatAddress(message.id, el('chat-agent').value));
         await refreshChat(token);
       } catch (error) { el('chat-status').textContent = error.message; }
       finally { button.disabled = false; }
@@ -107,7 +121,7 @@ function renderChatMessage(message) {
   return row;
 }
 async function createChat() {
-  if (chatBusy || chatPending || !token) return;
+  if (chatBusy || chatPending || chatRoomPending || !token) return;
   if (!chatCreation && !el('chat-project').value.trim().startsWith('/')) {
     el('chat-status').textContent = 'Enter an absolute project folder path.'; return;
   }
@@ -118,7 +132,7 @@ async function createChat() {
   try {
     await chatRpc({type: 'create_conversation', ...chatCreation}, credential);
     if (generation !== chatGeneration) return;
-    chatId = chatCreation.id; chatAfter = 0;
+    chatId = chatCreation.id; chatAfter = 0; chatRoomFor = '';
     const option = text('option', `${chatCreation.project_path} · ${chatId}`);
     option.value = chatId; el('chat-conversations').append(option);
     el('chat-conversations').value = chatId;
@@ -128,34 +142,80 @@ async function createChat() {
   await refreshChat(credential);
 }
 async function sendChat() {
-  if (chatBusy || !token || !chatId || !el('chat-agent').value) return;
+  if (chatBusy || chatRoomPending || !token || !chatId || !el('chat-agent').value || chatRoomFor !== chatId) return;
   if (!chatPending && !el('chat-input').value.trim()) return;
   const credential = token;
   const generation = chatGeneration;
   chatPending ||= {message_id: crypto.randomUUID(), conversation_id: chatId,
-    body: el('chat-input').value, agent_id: el('chat-agent').value};
+    body: el('chat-input').value, address: chatAddress('', el('chat-agent').value)};
   const pending = chatPending;
   chatBusy = true; el('chat-input').disabled = true; el('chat-send').disabled = true;
   try {
     await chatRpc({type: 'send_conversation_message', message_id: pending.message_id,
       conversation_id: pending.conversation_id, body: pending.body}, credential);
     if (generation !== chatGeneration) return;
-    await chatRpc({type: 'queue_conversation_turn', message_id: pending.message_id, agent_id: pending.agent_id}, credential);
+    await chatRpc({...pending.address, message_id: pending.message_id}, credential);
     if (generation !== chatGeneration) return;
     chatPending = null; el('chat-input').value = ''; el('chat-input').disabled = false;
-    el('chat-send').textContent = 'Send'; el('chat-status').textContent = 'Queued for the selected agent.';
+    el('chat-send').textContent = 'Send'; el('chat-status').textContent = 'Queued for the selected recipients.';
   } catch (error) {
-    if (credential === token && generation === chatGeneration) { el('chat-status').textContent = `${error.message} Retry uses the same message and agent.`; el('chat-send').textContent = 'Retry message'; }
+    if (credential === token && generation === chatGeneration) { el('chat-status').textContent = `${error.message} Retry uses the same message and recipients.`; el('chat-send').textContent = 'Retry message'; }
   } finally { if (credential === token && generation === chatGeneration) { chatBusy = false; el('chat-send').disabled = false; } }
   await refreshChat(credential);
 }
 el('chat-create').addEventListener('click', createChat);
 el('chat-send').addEventListener('click', sendChat);
 el('chat-conversations').addEventListener('change', () => {
-  if (chatPending || chatBusy) { el('chat-conversations').value = chatId; return; }
+  if (chatPending || chatRoomPending || chatBusy) { el('chat-conversations').value = chatId; return; }
   chatId = el('chat-conversations').value; chatAfter = 0; chatGeneration++;
   refreshChat(token);
 });
 el('chat-first').addEventListener('click', () => { chatAfter = 0; chatGeneration++; refreshChat(token); });
 el('chat-more').addEventListener('click', () => { if (chatNext != null) { chatAfter = chatNext; chatGeneration++; refreshChat(token); } });
 el('chat-list-more').addEventListener('click', () => loadChatList(token, chatListAfter).catch(error => { el('chat-status').textContent = error.message; }));
+
+function chatAddress(message_id, selected) {
+  if (!chatRoom) return {type: 'queue_conversation_turn', message_id, agent_id: selected};
+  return {type: 'route_conversation_message', message_id,
+    recipients: selected === '@coordinator' || selected === '@everyone' ? [] : [selected],
+    everyone: selected === '@everyone'};
+}
+function renderChatRoom() {
+  const options = [];
+  if (chatRoom) {
+    for (const [value, label] of [['@coordinator', 'Coordinator (default)'], ['@everyone', 'Everyone in this room']]) {
+      const option = text('option', label); option.value = value; options.push(option);
+    }
+  }
+  for (const agent of chatAgents.filter(a => !chatRoom || chatRoom.members.some(m => m.agent_id === a.id))) {
+    const option = text('option', `${agent.id} · ${agent.vendor} · ${agent.account}`);
+    option.value = agent.id; options.push(option);
+  }
+  el('chat-agent').replaceChildren(...options);
+  el('chat-agent').value = chatRoom ? '@coordinator' : (chatAgents[0]?.id || '');
+  el('chat-room-create').hidden = !!chatRoom;
+  el('chat-room-hint').hidden = !!chatRoom;
+  el('chat-room-summary').textContent = chatRoom
+    ? `Coordinator: ${chatRoom.coordinator}. ` + chatRoom.members.map(m => `${m.agent_id} reports to ${m.reports_to || 'you'}`).join('; ')
+    : 'Individual chat. Set up a shared room to coordinate these agents.';
+}
+async function configureChatRoom() {
+  if (!token || !chatId || chatRoom || chatPending || chatBusy || !chatAgents.length) return;
+  const credential = token, generation = chatGeneration, selected = chatId;
+  const coordinator = el('chat-agent').value;
+  if (!chatAgents.some(a => a.id === coordinator)) return;
+  chatRoomPending ||= {coordinator, members: chatAgents.map(a => ({agent_id: a.id,
+    reports_to: a.id === coordinator ? null : coordinator,
+    observes: a.id === coordinator ? [] : [coordinator]}))};
+  chatBusy = true;
+  try {
+    await chatRpc({type: 'configure_conversation_room', conversation_id: selected, configuration: chatRoomPending}, credential);
+    if (generation !== chatGeneration || selected !== chatId) return;
+    chatRoomPending = null; chatRoomFor = '';
+    el('chat-status').textContent = 'Shared room configured.';
+  } catch (error) {
+    if (credential === token && generation === chatGeneration) el('chat-status').textContent = `${error.message} Retry preserves the same room configuration.`;
+  } finally { if (credential === token && generation === chatGeneration) chatBusy = false; }
+  await refreshChat(credential);
+}
+el('chat-room-create').addEventListener('click', configureChatRoom);

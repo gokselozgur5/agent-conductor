@@ -27,7 +27,7 @@ test('native reply text is never interpreted as markup or task completion',()=>{
 });
 test('retry after queue transport loss preserves message identity and selected agent',async()=>{
   const f=fixture();const calls=[];let fail=true;
-  f.run("token='credential';chatId='conversation';chatReady=true");
+  f.run("token='credential';chatId='conversation';chatRoomFor='conversation';chatReady=true");
   f.get('chat-agent').value='codex';f.get('chat-input').value='Please work';
   f.context.fetch=async(_,options)=>{
     const p=JSON.parse(options.body).payload;calls.push(p);
@@ -47,11 +47,46 @@ test('retry after queue transport loss preserves message identity and selected a
 });
 test('disconnect discards a late history response and clears displayed conversation',async()=>{
   const f=fixture();let resolve;
-  f.run("token='credential';chatId='conversation';chatReady=true");
+  f.run("token='credential';chatId='conversation';chatRoomFor='conversation';chatReady=true");
   f.context.fetch=()=>new Promise(r=>{resolve=r;});
   const pending=f.run("refreshChat('credential')");
   f.run('disconnect()');
   resolve(ok({type:'conversation_messages',messages:[{sender:'agent',body:'late private reply'}],next_after:null}));
   await pending;
   assert.equal(f.get('chat').hidden,true);assert.equal(f.get('chat-messages').children.length,0);
+});
+test('shared-room retry preserves all recipients after a lost routing response', async()=>{
+  const f=fixture(), calls=[];let fail=true;
+  f.run("token='credential';chatId='conversation';chatRoomFor='conversation';chatReady=true;chatRoom={coordinator:'codex',members:[{agent_id:'codex'},{agent_id:'claude'}]}");
+  f.get('chat-agent').value='@everyone';f.get('chat-input').value='Coordinate';
+  f.context.fetch=async(_,options)=>{
+    const p=JSON.parse(options.body).payload;calls.push(p);
+    if(p.type==='route_conversation_message'&&fail){fail=false;throw new Error('response lost');}
+    if(p.type==='conversation_messages')return ok({type:'conversation_messages',messages:[],next_after:null});
+    return ok({type:'accepted'});
+  };
+  await f.run('sendChat()');f.get('chat-agent').value='claude';await f.run('sendChat()');
+  const routes=calls.filter(p=>p.type==='route_conversation_message');
+  assert.equal(routes.length,2);assert.deepEqual(routes[0],routes[1]);
+  assert.equal(routes[0].everyone,true);assert.deepEqual(routes[0].recipients,[]);
+  assert.equal(calls.some(p=>p.type==='queue_conversation_turn'),false);
+});
+test('room setup transport retry cannot silently change coordinator',async()=>{
+  const f=fixture(),configs=[];let fail=true;
+  f.run("token='credential';chatId='conversation';chatRoomFor='conversation';chatReady=true;chatAgents=[{id:'codex'},{id:'claude'}]");
+  f.get('chat-agent').value='codex';
+  f.context.fetch=async(_,options)=>{
+    const p=JSON.parse(options.body).payload;
+    if(p.type==='configure_conversation_room'){
+      configs.push(p.configuration);if(fail){fail=false;throw new Error('response lost');}
+    }
+    if(p.type==='conversation_room')return ok({type:'conversation_room',configuration:configs[0]});
+    if(p.type==='conversation_messages')return ok({type:'conversation_messages',messages:[],next_after:null});
+    return ok({type:'accepted'});
+  };
+  await f.run('configureChatRoom()');f.get('chat-agent').value='claude';
+  await f.run('configureChatRoom()');
+  assert.equal(configs.length,2);assert.deepEqual(configs[0],configs[1]);
+  assert.equal(f.get('chat-agent').value,'@coordinator');
+  assert.match(f.get('chat-room-summary').textContent,/claude reports to codex/);
 });
