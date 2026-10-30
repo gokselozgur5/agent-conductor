@@ -680,6 +680,10 @@ async fn corrections_stop_at_the_round_budget() {
     assert!(messages[7].body.contains("\"instruction\":\"Again\""));
     assert_eq!(examination.outcome, "rejected");
     assert_eq!(examination.detail, "correction round budget exhausted");
+    let prompts = std::fs::read_to_string(root.path().join("prompts")).unwrap();
+    let last = &prompts[prompts.rfind("Every assignment you delegated").unwrap()..];
+    assert!(last.contains("The correction budget is exhausted"));
+    assert!(!last.contains("<one of"));
     assert!(
         store
             .conversation_assignments(&messages[7].id)
