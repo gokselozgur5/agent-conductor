@@ -17,6 +17,10 @@ mod contract;
 #[cfg(unix)]
 pub use account_channel::*;
 #[cfg(unix)]
+mod account_conversation;
+#[cfg(unix)]
+pub use account_conversation::*;
+#[cfg(unix)]
 mod account_client;
 #[cfg(unix)]
 pub use account_client::*;
