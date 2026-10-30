@@ -591,3 +591,70 @@ async fn examination_returns_database_failures_instead_of_recording_them() {
         "authorized"
     );
 }
+
+#[tokio::test]
+async fn examination_rolls_back_authorization_when_cancelled_at_the_record_write() {
+    let (_root, store) = fixture(&[("lead", None), ("a", Some("lead")), ("b", Some("lead"))]).await;
+    reply(&store, "reply", "operator", "lead", &decision(&["a", "b"])).await;
+    let before =
+        crate::transaction_cancellation::snapshot(&mut *store.inner.writer.lock().await).await;
+    let written = Arc::new(AtomicBool::new(false));
+    let (release, wait) = mpsc::channel();
+    {
+        let observed = written.clone();
+        store
+            .inner
+            .writer
+            .lock()
+            .await
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_update_hook(move |update| {
+                if update.table == "conversation_reply_examinations"
+                    && !observed.swap(true, Ordering::SeqCst)
+                {
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+            });
+    }
+    let owned = store.clone();
+    let task = tokio::spawn(async move { owned.examine_conversation_reply("reply", 3).await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !written.load(Ordering::SeqCst) {
+            assert!(!task.is_finished());
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    release.send(()).unwrap();
+    {
+        let mut writer = store.inner.writer.lock().await;
+        writer.lock_handle().await.unwrap().remove_update_hook();
+        assert_eq!(
+            crate::transaction_cancellation::snapshot(&mut writer).await,
+            before
+        );
+    }
+    let mut reader = store.inner.readers.acquire().await.unwrap();
+    assert_eq!(
+        crate::transaction_cancellation::snapshot(&mut reader).await,
+        before
+    );
+    drop(reader);
+    assert_eq!(
+        store
+            .examine_conversation_reply("reply", 4)
+            .await
+            .unwrap()
+            .outcome,
+        "authorized"
+    );
+    assert_eq!(
+        store.conversation_assignments("reply").await.unwrap().len(),
+        2
+    );
+}
