@@ -137,7 +137,7 @@ state before external delivery; dated documents are not current service state.
   reproduced and fixed hash/read race. These are local slice checks, not complete
   P1/P3/P5 or installed-product acceptance.
 
-- D3 locally validated (`d1f9135`, three atomic commits on `04acd4b`..`d1f9135`):
+- D3 locally validated (`bada6c2`..`9ee0704`, twenty commits of at most 90 lines):
   schema 39 records one examination outcome per settled room reply (ordinary,
   authorized, rejected with reason; database failures are returned, not
   recorded); queue admission and launch reservation accept a native reply only
@@ -147,8 +147,8 @@ state before external delivery; dated documents are not current service state.
   configured profile is a visible blocked job and no longer disables the room.
   Controlled regression: one default coordinator request → coordinator decision
   → one worker launch with the stored instruction → supervisor information
-  delivery; restart and replayed routing add no launch. Store 171 tests,
-  conversation_native 6 tests, strict workspace Clippy and formatting pass.
+  delivery; restart and replayed routing add no launch. Store 173 tests,
+  conversation_native 9 tests; strict Clippy and formatting pass at every commit.
   Four store and three service mutations each turned a new test red. This is a
   controlled-process proof; real Codex/Claude delegation remains P5 V2, and
   supervisor follow-up turns on reported results remain P2.
