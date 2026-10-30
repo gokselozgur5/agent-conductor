@@ -3,3 +3,7 @@
 #history{border:1px solid #2c394b;border-radius:12px;padding:22px;margin:18px 0}#history-entries{padding-left:24px;overflow-wrap:anywhere}#history-entries li{border-bottom:1px solid #2c394b;padding:12px 0}#history-entries p{margin:6px 0}
 
 #evidence .details{grid-template-columns:210px minmax(0,1fr)}#evidence-entries>li{margin-bottom:26px}#evidence-entries{padding-left:24px}@media(max-width:600px){#evidence .details{grid-template-columns:minmax(110px,35%) minmax(0,1fr)}}
+
+#chat{background:#19212d;border:1px solid #2c394b;border-radius:12px;padding:22px;margin:18px 0}#chat-input{display:block;width:100%;margin:12px 0;padding:12px;background:#10151d;color:inherit;border:1px solid #52627a;border-radius:6px;font:inherit}#chat select{max-width:100%;padding:8px}#chat-messages{max-height:55vh;overflow:auto;margin:18px 0}.chat-message{padding:14px;margin:8px 0;border:1px solid #2c394b;border-radius:8px}.chat-body{white-space:pre-wrap;overflow-wrap:anywhere}.chat-message small{color:#98a5b8}#chat-status{overflow-wrap:anywhere}
+
+#chat .controls{flex-wrap:wrap}#chat-conversations{min-width:0;flex:1;width:0}#chat-agent{min-width:0;max-width:100%}#chat .controls label{flex-shrink:0}
