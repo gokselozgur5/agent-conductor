@@ -658,3 +658,93 @@ async fn examination_rolls_back_authorization_when_cancelled_at_the_record_write
         2
     );
 }
+
+/// A settled coordinator decision naming worker and ghost, already authorized.
+async fn authorized_pair() -> (tempfile::TempDir, Store) {
+    let (root, store) = fixture(&[
+        ("lead", None),
+        ("worker", Some("lead")),
+        ("ghost", Some("lead")),
+    ])
+    .await;
+    reply(
+        &store,
+        "reply",
+        "operator",
+        "lead",
+        &decision(&["worker", "ghost"]),
+    )
+    .await;
+    assert!(
+        store
+            .next_unadmitted_conversation_assignment()
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .conversation_assignment("reply", "worker")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store
+        .authorize_conversation_delegation("reply", 3)
+        .await
+        .unwrap();
+    (root, store)
+}
+
+fn profile(id: &str) -> String {
+    json!({"id": id}).to_string()
+}
+
+#[tokio::test]
+async fn queue_admits_only_the_exact_authorized_recipient() {
+    let (_root, store) = authorized_pair().await;
+    assert_eq!(
+        store
+            .next_unadmitted_conversation_assignment()
+            .await
+            .unwrap(),
+        Some(("reply".into(), "ghost".into()))
+    );
+    let worker = store
+        .conversation_assignment("reply", "worker")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(worker.instruction, "Inspect and report");
+    assert_eq!(worker.author_agent_id, "lead");
+    assert!(
+        store
+            .conversation_assignment("reply", "lead")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for refused in ["lead", "outsider"] {
+        assert!(
+            store
+                .queue_conversation_job("reply", &profile(refused), 4)
+                .await
+                .is_err()
+        );
+    }
+    store
+        .queue_conversation_job("reply", &profile("worker"), 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .next_unadmitted_conversation_assignment()
+            .await
+            .unwrap(),
+        Some(("reply".into(), "ghost".into()))
+    );
+    assert_eq!(
+        store.next_conversation_job().await.unwrap(),
+        Some(("reply".into(), profile("worker")))
+    );
+}
