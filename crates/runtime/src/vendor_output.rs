@@ -52,6 +52,47 @@ pub fn interpret_vendor_output(
     output: &ProcessOutput,
 ) -> Result<VendorCandidate, VendorOutputError> {
     packet.validate().map_err(|_| VendorOutputError::Protocol)?;
+    let state = parse_native_stream(packet.contract.adapter.kind, output)?;
+    Ok(VendorCandidate {
+        attempt_id: packet.contract.attempt_id.clone(),
+        packet_sha256: packet.sha256().map_err(|_| VendorOutputError::Protocol)?,
+        output_sha256: format!("{:x}", Sha256::digest(&output.stdout)),
+        text: state.text,
+        event_count: state.events,
+        failed_tools: state.failed_tools,
+        preflight_diagnostics: state.preflight_diagnostics,
+        file_only_tools: state.tool_init == Some(true) && !state.non_file_tool,
+    })
+}
+
+/// A native conversation reply, with no task verdict or permission semantics.
+/// Deliberately excludes Debug to avoid logging model text accidentally.
+pub struct NativeConversationReply {
+    pub text: String,
+    pub output_sha256: String,
+    pub failed_tools: usize,
+}
+
+/// Interprets a completed native conversation turn using the same event checks
+/// as task execution. The caller must separately bind it to its durable launch.
+/// # Errors
+/// Rejects failed, malformed, oversized and incomplete vendor responses.
+pub fn interpret_conversation_output(
+    kind: AdapterKind,
+    output: &ProcessOutput,
+) -> Result<NativeConversationReply, VendorOutputError> {
+    let state = parse_native_stream(kind, output)?;
+    Ok(NativeConversationReply {
+        text: state.text,
+        output_sha256: format!("{:x}", Sha256::digest(&output.stdout)),
+        failed_tools: state.failed_tools,
+    })
+}
+
+fn parse_native_stream(
+    kind: AdapterKind,
+    output: &ProcessOutput,
+) -> Result<StreamState, VendorOutputError> {
     if output.exit_code != Some(0) {
         return Err(VendorOutputError::Process);
     }
@@ -78,7 +119,7 @@ pub fn interpret_vendor_output(
             return Err(VendorOutputError::Protocol);
         }
         state.events += 1;
-        match packet.contract.adapter.kind {
+        match kind {
             AdapterKind::Claude => state.claude(&event)?,
             AdapterKind::Codex => state.codex(&event)?,
             AdapterKind::Fake => return Err(VendorOutputError::Protocol),
@@ -90,16 +131,7 @@ pub fn interpret_vendor_output(
     if state.text.len() > 256 * 1024 {
         return Err(VendorOutputError::Bounds);
     }
-    Ok(VendorCandidate {
-        attempt_id: packet.contract.attempt_id.clone(),
-        packet_sha256: packet.sha256().map_err(|_| VendorOutputError::Protocol)?,
-        output_sha256: format!("{:x}", Sha256::digest(&output.stdout)),
-        text: state.text,
-        event_count: state.events,
-        failed_tools: state.failed_tools,
-        preflight_diagnostics: state.preflight_diagnostics,
-        file_only_tools: state.tool_init == Some(true) && !state.non_file_tool,
-    })
+    Ok(state)
 }
 #[derive(Default)]
 struct StreamState {

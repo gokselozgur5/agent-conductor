@@ -31,6 +31,37 @@ fn codex() -> Vec<serde_json::Value> {
     ]
 }
 #[test]
+fn conversation_reply_requires_a_complete_successful_native_turn() {
+    use conductor_runtime::interpret_conversation_output;
+    let complete = output(&codex());
+    let reply = interpret_conversation_output(AdapterKind::Codex, &complete).unwrap();
+    assert_eq!(reply.text, "candidate change");
+    assert_eq!(reply.output_sha256.len(), 64);
+    let mut truncated = codex();
+    truncated.pop();
+    assert!(matches!(
+        interpret_conversation_output(AdapterKind::Codex, &output(&truncated)),
+        Err(VendorOutputError::Incomplete)
+    ));
+    let failed = ProcessOutput {
+        exit_code: Some(1),
+        ..complete
+    };
+    assert!(matches!(
+        interpret_conversation_output(AdapterKind::Codex, &failed),
+        Err(VendorOutputError::Process)
+    ));
+    let claude = output(&[
+        serde_json::json!({"type":"result","subtype":"success","is_error":false,"result":"Claude reply"}),
+    ]);
+    assert_eq!(
+        interpret_conversation_output(AdapterKind::Claude, &claude)
+            .unwrap()
+            .text,
+        "Claude reply"
+    );
+}
+#[test]
 fn complete_response_is_only_an_attempt_bound_candidate() {
     for (kind, events) in [
         (AdapterKind::Codex, codex()),
