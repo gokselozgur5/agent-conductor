@@ -589,3 +589,23 @@ async fn delegation_outcomes_and_the_supervisor_report_are_durable() {
         && d.kind == "information"
         && d.reason == "report_to_supervisor"));
 }
+
+#[tokio::test]
+async fn restart_and_replayed_routing_do_not_relaunch_delegated_work() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, service, receiver) = delegated_room(root.path(), true).await;
+    drop(service);
+    let (lead, worker) = delegating_fixture(root.path(), "lead");
+    let service = PersistentControlService::start(store.clone(), 3)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![lead, worker])
+        .unwrap();
+    service
+        .route_room_request("shared-request", &[], false)
+        .await
+        .unwrap();
+    assert_eq!(drain(&service, &receiver).await, 0);
+    assert_eq!(launches(root.path()), 2);
+}
