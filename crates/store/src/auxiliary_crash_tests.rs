@@ -274,7 +274,27 @@ async fn publication_survives_abrupt_exit_and_replay() {
 
 async fn crash_host_reconciliation(mode: &str, control: &Path) -> ! {
     let (operation, boundary) = mode.split_once(':').unwrap();
-    let (root, store, input, host) = auxiliary_origin_fixture(operation).await;
+    let legacy = operation.starts_with("legacy_");
+    let (root, store, input, mut host) =
+        auxiliary_origin_fixture(if legacy { "admit" } else { operation }).await;
+    if legacy {
+        sqlx::query("INSERT INTO tasks(id,project_id,objective,state,priority,version,authority_json,created_at_ms,updated_at_ms,aggregate_json) VALUES('legacy','seed','fixture','paused',0,1,'{}',0,0,'{}')")
+            .execute(&mut *store.inner.writer.lock().await).await.unwrap();
+        sqlx::query("INSERT INTO legacy_auxiliary_ownership VALUES('legacy','verification_without_invocation',1)")
+            .execute(&mut *store.inner.writer.lock().await).await.unwrap();
+        if operation == "legacy_settle" {
+            store
+                .reconcile_legacy_auxiliary_host(&host, 0)
+                .await
+                .unwrap();
+            store
+                .start_reserved_runtime(0, &host.authority_id, 3)
+                .await
+                .unwrap();
+            host.generation = 3;
+            host.boot_id = "f".repeat(64);
+        }
+    }
     let before = snapshot(&mut *store.inner.writer.lock().await).await;
     std::fs::write(
         control.join("database"),
@@ -301,10 +321,17 @@ async fn crash_host_reconciliation(mode: &str, control: &Path) -> ! {
                 }
             });
     }
-    store
-        .reconcile_auxiliary_host(&input, &host, audit("crash-host-reconciliation"))
-        .await
-        .unwrap();
+    if legacy {
+        store
+            .reconcile_legacy_auxiliary_host(&host, 0)
+            .await
+            .unwrap();
+    } else {
+        store
+            .reconcile_auxiliary_host(&input, &host, audit("crash-host-reconciliation"))
+            .await
+            .unwrap();
+    }
     assert_eq!(
         boundary, "after",
         "selected pre-commit write was not reached"
@@ -330,7 +357,7 @@ async fn host_reconciliation_survives_abrupt_exit_on_both_sides() {
         )
         .await;
     }
-    for operation in ["observe", "settle"] {
+    for operation in ["observe", "settle", "legacy_observe", "legacy_settle"] {
         for boundary in ["before", "after"] {
             let mode = format!("{operation}:{boundary}");
             let control = tempfile::tempdir().unwrap();
