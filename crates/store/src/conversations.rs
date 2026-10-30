@@ -13,7 +13,63 @@ pub struct ConversationMessage {
     pub created_at_ms: i64,
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ConversationHeader {
+    pub id: String,
+    pub project_path: String,
+    pub created_at_ms: i64,
+}
+
 impl Store {
+    /// Lists a bounded page of durable conversations.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn list_conversations(
+        &self,
+        after: &str,
+    ) -> Result<Vec<ConversationHeader>, StoreError> {
+        Ok(sqlx::query_as("SELECT id,project_path,created_at_ms FROM conversations WHERE id>? ORDER BY id LIMIT 20")
+            .bind(after).fetch_all(&self.inner.readers).await?)
+    }
+
+    /// Observes durable message execution state without claiming process liveness.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn conversation_message_status(&self, id: &str) -> Result<String, StoreError> {
+        Ok(sqlx::query_scalar("SELECT CASE WHEN m.sender='agent' THEN 'replied' ELSE COALESCE(t.state,j.state,'saved') END FROM conversation_messages m LEFT JOIN conversation_jobs j ON j.message_id=m.id LEFT JOIN conversation_turns t ON t.message_id=m.id WHERE m.id=?")
+            .bind(id).fetch_one(&self.inner.readers).await?)
+    }
+
+    /// Checks whether another message page exists.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn conversation_has_more(&self, id: &str, after: i64) -> Result<bool, StoreError> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE conversation_id=? AND sequence>?)")
+            .bind(id).bind(after).fetch_one(&self.inner.readers).await?)
+    }
+    /// Looks up an immutable message for native turn admission.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn conversation_message(
+        &self,
+        id: &str,
+    ) -> Result<Option<ConversationMessage>, StoreError> {
+        Ok(sqlx::query_as("SELECT sequence,id,conversation_id,sender,agent_id,body,created_at_ms FROM conversation_messages WHERE id=?")
+            .bind(id).fetch_optional(&self.inner.readers).await?)
+    }
+
+    /// Returns the conversation's immutable project binding.
+    /// # Errors
+    /// Returns database errors or a missing conversation error.
+    pub async fn conversation_project(&self, id: &str) -> Result<String, StoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT project_path FROM conversations WHERE id=?")
+                .bind(id)
+                .fetch_one(&self.inner.readers)
+                .await?,
+        )
+    }
+
     /// Creates a conversation, or verifies an identical project binding on replay.
     /// # Errors
     /// Rejects invalid identifiers, relative project paths and conflicting replay.
@@ -23,7 +79,10 @@ impl Store {
         project_path: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        if !valid_id(id) || !std::path::Path::new(project_path).is_absolute() {
+        if !valid_id(id)
+            || project_path.len() > 4096
+            || !std::path::Path::new(project_path).is_absolute()
+        {
             return Err(StoreError::Integrity("invalid conversation binding".into()));
         }
         let mut writer = self.inner.writer.lock().await;

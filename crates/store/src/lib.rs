@@ -26,11 +26,12 @@ pub use auxiliary::{AuxiliaryKind, AuxiliaryPreparation};
 pub use auxiliary_launch::{
     AuxiliaryInvocation, AuxiliaryLaunchBinding, AuxiliaryRecoveryCandidate,
 };
+mod conversation_jobs;
 mod conversation_turns;
-pub use conversation_turns::ConversationTurnIntent;
 mod conversations;
+pub use conversation_turns::ConversationTurnIntent;
 mod inventory;
-pub use conversations::ConversationMessage;
+pub use conversations::{ConversationHeader, ConversationMessage};
 mod usage;
 pub use inventory::{InventoryKind, InventoryRow};
 mod evidence;
