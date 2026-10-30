@@ -143,7 +143,10 @@ is ordinary information for the operator and supervisor; a rejected decision is
 recorded with its reason and launches nothing. A recipient without a configured
 profile is a visible blocked job. This is proven with controlled processes only.
 
-Remaining: bounded reporting rounds and supervisor follow-up turns on reported
-results, visible per-recipient delivery reasons/status and examination outcomes
+When every delegated recipient has settled, the delegating agent receives one
+continuation turn with the reports and writes a consolidated response; a new
+delegation in that reply is refused. Controlled processes prove this round.
+
+Remaining: bounded correction rounds after a consolidated response, visible per-recipient delivery reasons/status and examination outcomes
 in the browser, real-model shared-room acceptance, foreign-account conversation
 transport, complete delivery checks and installation.
