@@ -43,12 +43,13 @@ cancellation into every domain branch, and single-statement autocommit writes
 are outside this inventory.
 
 The `transaction_owners_survive_abrupt_process_exit` test in `transaction_crash.rs` reuses the
-fourteen base-owner fixtures above for 28 process-death cuts: one at the selected
+fourteen base-owner fixtures plus reassignment and completed-dispatch
+reconciliation for 32 process-death cuts: one at the selected
 SQLite write before commit, and one after the owner's successful return. Each
 child exits without Rust unwinding. The parent reopens SQLite, checks integrity,
 and compares every application table through both writer and reader connections
 against the pre-operation or committed snapshot. The committed control must
-actually change state. This covers the selected write for each base owner, not
+actually change state. This covers the selected write for each selected owner, not
 every statement, domain branch, later-added owner or external filesystem/process
 effect. It does not simulate power loss or establish retry authority.
 
