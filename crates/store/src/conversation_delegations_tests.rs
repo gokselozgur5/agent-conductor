@@ -550,3 +550,44 @@ async fn examination_records_each_settled_reply_once_without_launching_work() {
         .unwrap();
     assert_eq!(batches, 1);
 }
+
+#[tokio::test]
+async fn examination_returns_database_failures_instead_of_recording_them() {
+    let (_root, store) = fixture(&[("lead", None), ("worker", Some("lead"))]).await;
+    reply(&store, "reply", "operator", "lead", &decision(&["worker"])).await;
+    {
+        let mut writer = store.inner.writer.lock().await;
+        sqlx::query("CREATE TRIGGER refuse_batch BEFORE INSERT ON conversation_delegation_batches BEGIN SELECT RAISE(ABORT,'fixture failure'); END")
+            .execute(&mut *writer).await.unwrap();
+    }
+    assert!(matches!(
+        store.examine_conversation_reply("reply", 3).await,
+        Err(StoreError::Database(_))
+    ));
+    assert!(
+        store
+            .conversation_reply_examination("reply")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.next_unexamined_room_reply().await.unwrap().as_deref(),
+        Some("reply")
+    );
+    {
+        let mut writer = store.inner.writer.lock().await;
+        sqlx::query("DROP TRIGGER refuse_batch")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .examine_conversation_reply("reply", 4)
+            .await
+            .unwrap()
+            .outcome,
+        "authorized"
+    );
+}
