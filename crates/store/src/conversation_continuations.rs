@@ -74,6 +74,18 @@ impl Store {
             .await?)
     }
 
+    /// The correction round of a stored delegation batch, if the reply is one.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn delegation_round(&self, reply_id: &str) -> Result<Option<i64>, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT round FROM conversation_delegation_batches WHERE source_reply_id=?",
+        )
+        .bind(reply_id)
+        .fetch_optional(&self.inner.readers)
+        .await?)
+    }
+
     /// Whether a continuation admits this agent's turn on this decision message.
     /// # Errors
     /// Returns database errors.
