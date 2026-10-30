@@ -135,8 +135,15 @@ Service regressions cover restart delivery, immutable topology and no duplicate
 launches; migration tests preserve schema-35 launch identities and unknown-state
 exclusion. Deterministic cancellation verifies atomic route/inbox rollback.
 
-Remaining: structured native-agent delegation and bounded reporting rounds,
-visible per-recipient delivery reasons/status, real-model shared-room acceptance,
-foreign-account conversation transport, complete delivery checks and installation.
-The default coordinator route currently runs only the coordinator; it does not
-yet automatically delegate the operator's request to subordinate agents.
+The candidate now delegates without operator relay: a coordinator reply that is
+exactly one strict `conductor.delegation.v1` JSON object is examined once,
+authorized against the stored topology and ancestry, and each named recipient
+is admitted for one native turn carrying the stored instruction. Any other reply
+is ordinary information for the operator and supervisor; a rejected decision is
+recorded with its reason and launches nothing. A recipient without a configured
+profile is a visible blocked job. This is proven with controlled processes only.
+
+Remaining: bounded reporting rounds and supervisor follow-up turns on reported
+results, visible per-recipient delivery reasons/status and examination outcomes
+in the browser, real-model shared-room acceptance, foreign-account conversation
+transport, complete delivery checks and installation.

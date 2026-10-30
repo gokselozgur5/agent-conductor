@@ -20,7 +20,7 @@ requirements; working chat alone does not complete the product.
 
 | Package | Slices | Depends on | Exit evidence | Current state |
 | --- | --- | --- | --- | --- |
-| P1 Delegation (estimated 8%) | D1 strict decision contract and persisted author provenance; D2 atomic assignment graph, root/parent binding and cumulative limits; D3 native prompt/output integration and authorized queue admission | Existing room topology and native reply storage | One default coordinator request creates authorized subordinate work; forged authors, peer/ancestor targets, changed replay, excessive fan-out/depth and crash duplicates are refused | D1/D2 locally validated; D3 pending |
+| P1 Delegation (estimated 8%) | D1 strict decision contract and persisted author provenance; D2 atomic assignment graph, root/parent binding and cumulative limits; D3 native prompt/output integration and authorized queue admission | Existing room topology and native reply storage | One default coordinator request creates authorized subordinate work; forged authors, peer/ancestor targets, changed replay, excessive fan-out/depth and crash duplicates are refused | D1/D2/D3 locally validated with controlled processes; real-model shared-room proof pending (P5 V2) |
 | P2 Reporting loop (5%) | R1 durable result/blocker correlation; R2 wait-for-children and one coordinator continuation; R3 bounded correction rounds and explicit terminal/blocked outcomes | P1 D2/D3 | One operator request produces worker results and a consolidated coordinator response; restart and duplicate receipts cannot repeat rounds; exhausted budgets surface as blocked | Pending |
 | P3 Account execution (4%) | A1 reuse account-worker transport for conversations; A2 own-HOME/auth/profile enforcement and failure handling; A3 distinct-account real-vendor acceptance | P1 contract for delegated inputs; transport audit can begin independently | Native agents demonstrably execute under intended distinct accounts without credential copying or a same-account fallback | A1 reusable runtime API implemented; worker/service wiring and personal account acceptance pending |
 | P4 Operator visibility (2%) | U1 per-recipient reason/state/causality projection; U2 assignment tree, reports, blockers and final summary; U3 reconnect/layout/privacy acceptance | D2 for U1; P2 for U2 | Browser explains who received what, why and with which outcome; refresh preserves identity; text cannot execute markup | Room setup/addressing exists; delivery visibility pending |
@@ -136,3 +136,19 @@ state before external delivery; dated documents are not current service state.
   Clippy passed. Evidence-tool final suite passed sixteen tests, including a
   reproduced and fixed hash/read race. These are local slice checks, not complete
   P1/P3/P5 or installed-product acceptance.
+
+- D3 locally validated (`d1f9135`, three atomic commits on `04acd4b`..`d1f9135`):
+  schema 39 records one examination outcome per settled room reply (ordinary,
+  authorized, rejected with reason; database failures are returned, not
+  recorded); queue admission and launch reservation accept a native reply only
+  for its exact authorized recipient; the runner prompt carries the stored
+  instruction with supervisor, root request and depth; agents with direct
+  reports receive the strict JSON delegation contract; a recipient without a
+  configured profile is a visible blocked job and no longer disables the room.
+  Controlled regression: one default coordinator request → coordinator decision
+  → one worker launch with the stored instruction → supervisor information
+  delivery; restart and replayed routing add no launch. Store 171 tests,
+  conversation_native 6 tests, strict workspace Clippy and formatting pass.
+  Four store and three service mutations each turned a new test red. This is a
+  controlled-process proof; real Codex/Claude delegation remains P5 V2, and
+  supervisor follow-up turns on reported results remain P2.
