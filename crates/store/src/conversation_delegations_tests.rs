@@ -936,3 +936,52 @@ async fn unknown_outcomes_never_settle_a_recipient_but_failures_do() {
         Some(("reply".into(), "lead".into()))
     );
 }
+
+#[tokio::test]
+async fn a_recipient_that_delegated_settles_after_its_own_continuation() {
+    let (_root, store) = fixture(&[
+        ("lead", None),
+        ("worker", Some("lead")),
+        ("child", Some("worker")),
+    ])
+    .await;
+    reply(&store, "reply", "operator", "lead", &decision(&["worker"])).await;
+    store.examine_conversation_reply("reply", 3).await.unwrap();
+    reply(
+        &store,
+        "worker-reply",
+        "reply",
+        "worker",
+        &decision(&["child"]),
+    )
+    .await;
+    let nested = store.examine_conversation_reply("worker-reply", 4).await;
+    assert_eq!(nested.unwrap().outcome, "authorized");
+    reply(&store, "child-reply", "worker-reply", "child", "Done").await;
+    store
+        .examine_conversation_reply("child-reply", 5)
+        .await
+        .unwrap();
+    // Only the inner batch is ready; the lead waits for the worker's summary.
+    assert_eq!(
+        store.next_ready_continuation().await.unwrap(),
+        Some(("worker-reply".into(), "worker".into()))
+    );
+    store
+        .open_conversation_continuation("worker-reply", 6)
+        .await
+        .unwrap();
+    assert!(store.next_ready_continuation().await.unwrap().is_none());
+    reply(
+        &store,
+        "worker-summary",
+        "worker-reply",
+        "worker",
+        "Summary",
+    )
+    .await;
+    assert_eq!(
+        store.next_ready_continuation().await.unwrap(),
+        Some(("reply".into(), "lead".into()))
+    );
+}
