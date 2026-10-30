@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
@@ -196,11 +197,74 @@ async fn page(
     }
 }
 
+/// Recipients that were given work, with their per-recipient state.
+fn recipients(message: &Value) -> String {
+    let routes = message["routing"].as_array().map_or(&[][..], Vec::as_slice);
+    let given: Vec<String> = routes
+        .iter()
+        .filter(|r| r["kind"] != "information")
+        .map(|r| {
+            format!(
+                "{} ({})",
+                r["agent_id"].as_str().unwrap_or("?"),
+                r["state"].as_str().unwrap_or("?")
+            )
+        })
+        .collect();
+    if given.is_empty() {
+        String::new()
+    } else {
+        format!(" → {}", given.join(", "))
+    }
+}
+
+/// An authorized decision reads as its assignments; anything else as its text.
+fn body(message: &Value) -> String {
+    let text = message["body"].as_str().unwrap_or_default();
+    if message["examination"]["outcome"] == "authorized"
+        && let Ok(plan) = serde_json::from_str::<Value>(text)
+        && let Some(assignments) = plan["assignments"].as_array()
+    {
+        return assignments
+            .iter()
+            .map(|a| {
+                format!(
+                    "[task for {}] {}",
+                    a["agent_id"].as_str().unwrap_or("?"),
+                    a["instruction"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    text.to_owned()
+}
+
+fn render(message: &Value) -> String {
+    let author = message["agent_id"].as_str().unwrap_or("you");
+    let mut out = format!("#{} {author}{}\n", message["sequence"], recipients(message));
+    for line in body(message).lines() {
+        out.push_str("    ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    if message["examination"]["outcome"] == "rejected" {
+        let _ = writeln!(
+            out,
+            "    ! delegation refused: {}",
+            message["examination"]["detail"].as_str().unwrap_or("?")
+        );
+    }
+    out
+}
+
 async fn history(socket: &Path, conversation_id: &str, json: bool) -> Result<i32, String> {
     let (messages, _) = page(socket, conversation_id, 0).await?;
     for message in messages {
         if json {
             println!("{message}");
+        } else {
+            println!("{}", render(&message));
         }
     }
     Ok(0)
