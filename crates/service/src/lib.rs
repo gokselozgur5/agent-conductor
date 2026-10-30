@@ -860,8 +860,20 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                         .conversation_message_status(&row.id)
                         .await
                         .map_err(store_error)?;
+                    let routing = self
+                        .store
+                        .conversation_message_routing(&row.id)
+                        .await
+                        .map_err(store_error)?;
+                    let examination = self
+                        .store
+                        .conversation_reply_examination(&row.id)
+                        .await
+                        .map_err(store_error)?;
                     let mut value = serde_json::to_value(row).map_err(json_error)?;
                     value["status"] = serde_json::Value::String(status);
+                    value["routing"] = serde_json::to_value(routing).map_err(json_error)?;
+                    value["examination"] = serde_json::to_value(examination).map_err(json_error)?;
                     messages.push(value);
                 }
                 if let Some(cursor) = next_after
