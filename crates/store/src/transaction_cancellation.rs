@@ -7,6 +7,9 @@ use std::sync::{
     mpsc,
 };
 
+#[path = "transaction_crash.rs"]
+mod abrupt_process;
+
 #[derive(Clone, Copy, Debug)]
 enum Owner {
     Project,
