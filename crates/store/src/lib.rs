@@ -35,6 +35,8 @@ pub use evidence::EvidenceRow;
 #[cfg(test)]
 mod auxiliary_crash_tests;
 #[cfg(test)]
+mod auxiliary_launch_crash_tests;
+#[cfg(test)]
 mod transaction_cancellation;
 pub use history::AuditMetadata;
 mod workflow_dependencies;
