@@ -123,3 +123,14 @@ through writer and reader connections. Post-commit controls must change state.
 Synthetic receipt data establishes database atomicity only; it does not validate
 external receipt provenance, stop a native worker, or prove physical power-loss
 recovery. Existing ownership/refusal tests remain separate.
+
+## Broker launch transaction crash boundaries
+
+`broker_launch_crash_tests` covers launch preparation, release authorization and
+pre-owner recovery with and without a registered broker. Eight selected child
+exits occur at the pre-commit audit write or after successful return. The parent
+requires SQLite integrity and exact full-table rollback or durability through
+both writer and reader connections. Each post-commit control must change state.
+These four paths map to three transaction owners. Fixture process identities and
+shutdown proofs are synthetic; this verifies database atomicity, not receipt
+provenance, native process fencing, physical reboot or every transaction branch.
