@@ -904,3 +904,35 @@ async fn continuation_waits_for_every_recipient_and_opens_once() {
             .unwrap()
     );
 }
+
+async fn settle_turn(store: &Store, agent: &str, state: &str) {
+    let mut writer = store.inner.writer.lock().await;
+    sqlx::query("INSERT INTO conversation_turns(message_id,conversation_id,agent_id,launch_id,profile_sha256,prompt_sha256,state,created_at_ms) VALUES ('reply','room',?,?,?,?,?,5)")
+        .bind(agent).bind(format!("launch-{agent}")).bind("a".repeat(64))
+        .bind("b".repeat(64)).bind(state).execute(&mut *writer).await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_outcomes_never_settle_a_recipient_but_failures_do() {
+    let (_root, store) = authorized_pair().await;
+    settle(&store, "worker").await;
+    settle_turn(&store, "ghost", "unknown").await;
+    assert!(store.next_ready_continuation().await.unwrap().is_none());
+    assert!(
+        store
+            .open_conversation_continuation("reply", 6)
+            .await
+            .is_err()
+    );
+    {
+        let mut writer = store.inner.writer.lock().await;
+        sqlx::query("UPDATE conversation_turns SET state='failed' WHERE agent_id='ghost'")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.next_ready_continuation().await.unwrap(),
+        Some(("reply".into(), "lead".into()))
+    );
+}
