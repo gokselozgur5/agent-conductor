@@ -33,6 +33,24 @@ impl<C: Clock> PersistentControlService<C> {
         })
     }
 
+    /// Persists a delegation from its native source ID after checking current profiles.
+    /// The store revalidates provenance, topology and budgets transactionally;
+    /// caller-built proposals are never accepted as authority. This does not launch.
+    /// # Errors
+    /// Rejects invalid authority, changed replay and exhausted assignment budgets.
+    pub async fn authorize_native_delegation(
+        &self,
+        reply_id: &str,
+    ) -> Result<Vec<agent_conductor_store::ConversationAssignment>, StoreError> {
+        self.inspect_native_delegation(reply_id).await?;
+        self.store
+            .authorize_conversation_delegation(
+                reply_id,
+                self.clock.read(self.boot_generation).wall_unix_ms,
+            )
+            .await
+    }
+
     fn validate_room(&self, config: RoomConfiguration) -> Result<ConversationRoom, StoreError> {
         let agents = self
             .conversation_agents

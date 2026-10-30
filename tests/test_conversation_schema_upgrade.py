@@ -18,7 +18,7 @@ class ConversationSchemaUpgrade(unittest.TestCase):
             profile = json.dumps({'id': 'codex'})
             db.execute("INSERT INTO conversation_jobs VALUES ('request',?,'queued',2)", (profile,))
             before = db.execute('SELECT * FROM conversation_turns').fetchall()
-            for number in (36, 37):
+            for number in (36, 37, 38):
                 db.executescript(next(migrations.glob(f'{number:04d}_*.sql')).read_text())
             self.assertEqual(db.execute('SELECT * FROM conversation_turns').fetchall(), before)
             self.assertEqual(db.execute('SELECT agent_id,agent_profile_json FROM conversation_jobs').fetchall(), [('codex', profile)])

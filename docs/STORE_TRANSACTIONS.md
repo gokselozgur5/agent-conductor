@@ -143,3 +143,15 @@ caller at the first actual inbox insert, after the route insert. The test compar
 all tables through both writer and reader connections, then reruns the operation
 as a positive control. This selected cancellation boundary covers partial fan-out;
 it does not establish native worker fencing or every crash boundary.
+
+## Conversation delegation authorization owner (schema 38)
+
+`authorize_conversation_delegation` re-reads native reply provenance, room topology,
+causal ancestry and cumulative assignment usage while owning a SQLx transaction.
+The immutable batch and every recipient assignment commit together. The selected
+cancellation regression pauses at the first actual assignment insert and compares
+all tables through writer and reader connections after abort. A separate trigger
+refuses the second insert and requires complete rollback before a successful retry.
+Concurrent admissions at the root budget cannot exceed 32 assignments. These tests
+prove the selected database boundaries, not native execution, reporting-round
+limits, unrestricted descendant fencing or physical reboot recovery.
