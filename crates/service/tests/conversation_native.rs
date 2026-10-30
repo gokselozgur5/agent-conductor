@@ -646,3 +646,18 @@ async fn delegation_to_a_recipient_without_a_profile_is_blocked_visibly() {
     let pending = store.next_unadmitted_conversation_assignment().await;
     assert!(pending.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn continuation_prompt_carries_reports_without_the_delegation_contract() {
+    let root = tempfile::tempdir().unwrap();
+    delegated_room(root.path(), true).await;
+    let prompts = std::fs::read_to_string(root.path().join("prompts")).unwrap();
+    let start = prompts
+        .find("Every assignment you delegated has now reported")
+        .unwrap();
+    let continuation = &prompts[start..];
+    assert!(continuation.contains("Worker finished the inspection"));
+    assert!(continuation.contains("report_to_supervisor"));
+    assert!(continuation.contains("Do not delegate again"));
+    assert!(!continuation.contains("<one of"));
+}
