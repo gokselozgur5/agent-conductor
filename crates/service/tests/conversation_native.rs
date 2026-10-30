@@ -415,7 +415,7 @@ printf 'launch\n' >> launches
 printf '%s\n' "$@" >> prompts
 case "$*" in
   *"assigned you this instruction"*) text='Worker finished the inspection';;
-  *"Every assignment you delegated has now reported"*) text='Consolidated: the worker finished the inspection';;
+  *"Every assignment you delegated has now reported"*) text=$(cat continuation-text 2>/dev/null || echo 'Consolidated: the worker finished the inspection');;
   *) text='{\"schema\":\"conductor.delegation.v1\",\"assignments\":[{\"agent_id\":\"worker\",\"instruction\":\"Inspect the parser\"}]}';;
 esac
 printf '%s\n' '{"type":"thread.started","thread_id":"fixture"}' '{"type":"turn.started"}' "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"$text\"}}" '{"type":"turn.completed","usage":{}}'
@@ -660,4 +660,30 @@ async fn continuation_prompt_carries_reports_without_the_delegation_contract() {
     assert!(continuation.contains("report_to_supervisor"));
     assert!(continuation.contains("Do not delegate again"));
     assert!(!continuation.contains("<one of"));
+}
+
+#[tokio::test]
+async fn a_delegation_in_a_continuation_is_refused_and_launches_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let again = r#"{\"schema\":\"conductor.delegation.v1\",\"assignments\":[{\"agent_id\":\"worker\",\"instruction\":\"Again\"}]}"#;
+    std::fs::write(root.path().join("continuation-text"), again).unwrap();
+    let (store, _service, _receiver) = delegated_room(root.path(), true).await;
+    assert_eq!(launches(root.path()), 3);
+    let messages = store.conversation_messages("room", 0).await.unwrap();
+    assert_eq!(messages.len(), 4);
+    let examination = store
+        .conversation_reply_examination(&messages[3].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(messages[3].body.contains("\"instruction\":\"Again\""));
+    assert_eq!(examination.outcome, "rejected");
+    assert_eq!(examination.detail, "authorized parent assignment required");
+    assert!(
+        store
+            .conversation_assignments(&messages[3].id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
