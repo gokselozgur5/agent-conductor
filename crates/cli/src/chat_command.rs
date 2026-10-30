@@ -6,6 +6,8 @@ use conductor_cli::send;
 use conductor_protocol::{Request, RequestEnvelope, Response, ResponseResult};
 use serde_json::{Value, json};
 
+const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Debug, Subcommand)]
 pub enum ChatCommand {
     /// List conversations.
@@ -63,8 +65,10 @@ pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
 }
 
 async fn rpc(socket: &Path, request: Request) -> Result<Response, String> {
-    let response = send(socket, &RequestEnvelope::new(request))
+    let envelope = RequestEnvelope::new(request);
+    let response = tokio::time::timeout(RPC_TIMEOUT, send(socket, &envelope))
         .await
+        .map_err(|_| format!("daemon did not answer within 10 s: {}", socket.display()))?
         .map_err(|error| error.to_string())?;
     match response.result {
         ResponseResult::Ok(response) => Ok(response),
