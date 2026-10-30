@@ -27,7 +27,7 @@ pub use auxiliary_launch::{
     AuxiliaryInvocation, AuxiliaryLaunchBinding, AuxiliaryRecoveryCandidate,
 };
 mod conversation_delegations;
-pub use conversation_delegations::ConversationAssignment;
+pub use conversation_delegations::{ConversationAssignment, ConversationReplyExamination};
 mod conversation_jobs;
 mod conversation_rooms;
 mod conversation_routes;

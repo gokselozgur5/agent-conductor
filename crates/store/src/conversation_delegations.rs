@@ -61,6 +61,14 @@ struct Batch {
     room_configuration_json: String,
 }
 
+/// The durable outcome of examining one settled native reply exactly once.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, sqlx::FromRow)]
+pub struct ConversationReplyExamination {
+    pub reply_message_id: String,
+    pub outcome: String,
+    pub detail: String,
+}
+
 impl Store {
     /// Re-reads native provenance, the room and the complete decision while owning
     /// the write transaction. Immutable replay returns the same authorization.
@@ -81,6 +89,53 @@ impl Store {
         Ok(assignments)
     }
 
+    /// Examines one settled native room reply exactly once. A reply that is not a
+    /// delegation decision is `ordinary` information. A decision is authorized in
+    /// the same transaction as its examination record, or recorded as `rejected`
+    /// with the semantic reason. Database failures are returned, never recorded.
+    /// The outcome never launches work.
+    /// # Errors
+    /// Rejects replies without settled room provenance and database failures.
+    pub async fn examine_conversation_reply(
+        &self,
+        reply_id: &str,
+        now_ms: i64,
+    ) -> Result<ConversationReplyExamination, StoreError> {
+        let mut writer = self.inner.writer.lock().await;
+        if let Some(saved) = read_examination(&mut writer, reply_id).await? {
+            return Ok(saved);
+        }
+        let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
+        let source = native_source(&mut tx, reply_id).await?;
+        let (outcome, detail) = if looks_like_delegation(&source.body) {
+            match authorize_in(&mut tx, reply_id, source, now_ms).await {
+                Ok(assignments) => ("authorized", format!("{} assignments", assignments.len())),
+                Err(StoreError::Integrity(reason)) => {
+                    tx.rollback().await?;
+                    tx = writer.begin_with("BEGIN IMMEDIATE").await?;
+                    ("rejected", reason)
+                }
+                Err(StoreError::IdempotencyCollision) => {
+                    tx.rollback().await?;
+                    tx = writer.begin_with("BEGIN IMMEDIATE").await?;
+                    ("rejected", "delegation authorization replay changed".into())
+                }
+                Err(other) => return Err(other),
+            }
+        } else {
+            ("ordinary", "information only".into())
+        };
+        sqlx::query("INSERT INTO conversation_reply_examinations(reply_message_id,outcome,detail,created_at_ms) VALUES (?,?,?,?)")
+            .bind(reply_id).bind(outcome).bind(&detail).bind(now_ms)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(ConversationReplyExamination {
+            reply_message_id: reply_id.into(),
+            outcome: outcome.into(),
+            detail,
+        })
+    }
+
     /// Reads a bounded immutable authorization batch, without granting execution.
     /// # Errors
     /// Returns database errors.
@@ -91,6 +146,20 @@ impl Store {
         let mut connection = self.inner.readers.acquire().await?;
         read_assignments(&mut connection, reply_id).await
     }
+}
+
+/// A delegation attempt is a JSON object declaring a Conductor delegation schema.
+/// Anything else, including prose that mentions JSON, is ordinary information.
+fn looks_like_delegation(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("schema")
+                .and_then(serde_json::Value::as_str)
+                .map(|schema| schema.starts_with("conductor.delegation."))
+        })
+        .unwrap_or(false)
 }
 
 async fn native_source(
@@ -130,6 +199,14 @@ async fn authorize_in(
         insert_batch(tx, reply_id, &expected, &assignments, now_ms).await?;
     }
     Ok(assignments)
+}
+
+async fn read_examination(
+    connection: &mut SqliteConnection,
+    reply_id: &str,
+) -> Result<Option<ConversationReplyExamination>, StoreError> {
+    Ok(sqlx::query_as("SELECT reply_message_id,outcome,detail FROM conversation_reply_examinations WHERE reply_message_id=?")
+        .bind(reply_id).fetch_optional(connection).await?)
 }
 
 fn validate_decision(source: &NativeSource) -> Result<Decision, StoreError> {
