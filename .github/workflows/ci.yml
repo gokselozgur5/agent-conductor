@@ -92,7 +92,7 @@ jobs:
           python3 -m unittest discover -s tests -p test_verification_surface.py -v
 
       - name: Check board diagnostic rendering
-        run: node --test tests/board_diagnostics.cjs
+        run: node --test tests/board_diagnostics.cjs tests/board_chat.cjs
 
       - name: Build and test release runtime
         env:

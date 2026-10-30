@@ -25,6 +25,19 @@ test('native reply text is never interpreted as markup or task completion',()=>{
   assert.equal(unknown.children.length,3);
   assert.match(unknown.children[2].textContent,/no automatic retry/);
 });
+test('each message explains its recipients and decision outcome as text',()=>{
+  const f=fixture();
+  const row=f.run(`renderChatMessage({sender:'agent',agent_id:'lead',body:'{}',status:'replied',
+    routing:[{agent_id:'<b>w</b>',kind:'delegated',reason:'delegated_by_supervisor',state:'blocked'},
+             {agent_id:'lead',kind:'information',reason:'report_to_supervisor',state:'received'}],
+    examination:{outcome:'rejected',detail:'correction round budget exhausted'}})`);
+  const list=row.children[3];
+  assert.equal(list.children[0].textContent,'Delegated <b>w</b> · delegated by supervisor · blocked');
+  assert.equal(list.children[1].textContent,'Informed lead · report to supervisor · received');
+  assert.equal(row.children[4].textContent,'Delegation decision refused: correction round budget exhausted');
+  const plain=f.run(`renderChatMessage({sender:'operator',body:'work',status:'queued',routing:[]})`);
+  assert.equal(plain.children.length,3);
+});
 test('retry after queue transport loss preserves message identity and selected agent',async()=>{
   const f=fixture();const calls=[];let fail=true;
   f.run("token='credential';chatId='conversation';chatRoomFor='conversation';chatReady=true");

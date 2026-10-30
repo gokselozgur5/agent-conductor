@@ -1103,3 +1103,45 @@ async fn continuations_may_correct_twice_and_the_third_round_is_refused() {
     let expected = |round| ("operator".to_string(), 1, round);
     assert_eq!(rows, vec![expected(0), expected(1), expected(2)]);
 }
+
+#[tokio::test]
+async fn routing_shows_each_recipient_with_its_reason_and_state() {
+    let (_root, store) = authorized_pair().await;
+    let notice = crate::ConversationRecipient {
+        agent_id: "lead".into(),
+        kind: "information".into(),
+        reason: "report_to_supervisor".into(),
+    };
+    store
+        .route_conversation_message("reply", &[notice], 4)
+        .await
+        .unwrap();
+    store
+        .queue_conversation_job("reply", &profile("worker"), 4)
+        .await
+        .unwrap();
+    store
+        .block_conversation_recipient("reply", "ghost", 4)
+        .await
+        .unwrap();
+    let row = |agent: &str, kind: &str, reason: &str, state: &str| crate::ConversationRouting {
+        agent_id: agent.into(),
+        kind: kind.into(),
+        reason: reason.into(),
+        state: state.into(),
+    };
+    assert_eq!(
+        store.conversation_message_routing("reply").await.unwrap(),
+        vec![
+            row("ghost", "delegated", "delegated_by_supervisor", "blocked"),
+            row("worker", "delegated", "delegated_by_supervisor", "queued"),
+            row("lead", "information", "report_to_supervisor", "pending"),
+        ]
+    );
+    store
+        .acknowledge_conversation_delivery("reply", "lead", 5)
+        .await
+        .unwrap();
+    let routing = store.conversation_message_routing("reply").await.unwrap();
+    assert_eq!(routing[2].state, "received");
+}

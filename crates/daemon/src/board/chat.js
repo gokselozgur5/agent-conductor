@@ -99,12 +99,29 @@ async function refreshChat(credential) {
     if (credential === token && generation === chatGeneration) el('chat-status').textContent = error.message;
   }
 }
+const chatKinds = {assignment: 'Assigned', delegated: 'Delegated', information: 'Informed'};
+const chatReasons = {operator_request: 'your request', delegated_by_supervisor: 'delegated by supervisor', report_to_supervisor: 'report to supervisor', dependency_update: 'observes the author'};
+const chatRecipientStates = {pending: 'pending', received: 'received', queued: 'queued', blocked: 'blocked', launch_intent: 'running', replied: 'replied', failed: 'failed', unknown: 'outcome unknown'};
+function renderChatRouting(routing) {
+  if (!routing.length) return null;
+  const list = text('ul', '', 'chat-routing');
+  for (const r of routing) {
+    const kind = chatKinds[r.kind] || r.kind, reason = chatReasons[r.reason] || r.reason;
+    list.append(text('li', `${kind} ${r.agent_id} · ${reason} · ${chatRecipientStates[r.state] || r.state}`));
+  }
+  return list;
+}
 function renderChatMessage(message) {
   const row = text('article', '', 'chat-message');
   const states = {saved: 'Saved, not queued', queued: 'Queued', launch_intent: 'Started or outcome pending', replied: 'Replied', blocked: 'Blocked', unknown: 'Outcome unknown · no automatic retry'};
   row.append(text('strong', message.sender === 'agent' ? message.agent_id : 'You'));
   row.append(text('p', message.body, 'chat-body'));
   row.append(text('small', states[message.status] || message.status || 'Recorded'));
+  const routing = renderChatRouting(message.routing || []);
+  if (routing) row.append(routing);
+  const decision = message.examination;
+  if (decision?.outcome === 'authorized') row.append(text('small', 'Delegation decision authorized'));
+  if (decision?.outcome === 'rejected') row.append(text('small', `Delegation decision refused: ${decision.detail}`));
   if (message.sender === 'operator' && message.status === 'saved') {
     const button = text('button', 'Send saved message to selected recipient');
     button.addEventListener('click', async () => {

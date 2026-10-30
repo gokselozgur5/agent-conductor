@@ -32,7 +32,7 @@ pub use conversation_delegations::{ConversationAssignment, ConversationReplyExam
 mod conversation_jobs;
 mod conversation_rooms;
 mod conversation_routes;
-pub use conversation_routes::{ConversationDelivery, ConversationRecipient};
+pub use conversation_routes::{ConversationDelivery, ConversationRecipient, ConversationRouting};
 mod conversation_turns;
 mod conversations;
 pub use conversation_turns::{ConversationReplyOrigin, ConversationTurnIntent};

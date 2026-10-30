@@ -736,3 +736,28 @@ async fn continuation_reads_reports_even_after_their_delivery_was_consumed() {
     let start = prompts.find("Every assignment you delegated").unwrap();
     assert!(prompts[start..].contains("Worker finished the inspection"));
 }
+
+#[tokio::test]
+async fn message_history_explains_who_received_each_message_and_why() {
+    use conductor_protocol::{Request, Response};
+    use conductor_service::ControlService;
+    let root = tempfile::tempdir().unwrap();
+    let (_store, service, _receiver) = delegated_room(root.path(), true).await;
+    let request = Request::ConversationMessages {
+        conversation_id: "room".into(),
+        after: 0,
+    };
+    let Response::ConversationMessages { messages, .. } = service.handle(request).await.unwrap()
+    else {
+        panic!("conversation history expected");
+    };
+    let routing = |index: usize| messages[index]["routing"].to_string();
+    assert!(routing(0).contains(
+        r#""agent_id":"lead","kind":"assignment","reason":"operator_request","state":"replied""#
+    ));
+    assert!(routing(1).contains(r#""agent_id":"worker","kind":"delegated","reason":"delegated_by_supervisor","state":"replied""#));
+    assert!(routing(2).contains(r#""agent_id":"lead","kind":"information","reason":"report_to_supervisor","state":"received""#));
+    assert_eq!(messages[1]["examination"]["outcome"], "authorized");
+    assert_eq!(messages[2]["examination"]["outcome"], "ordinary");
+    assert!(messages[0]["examination"].is_null());
+}

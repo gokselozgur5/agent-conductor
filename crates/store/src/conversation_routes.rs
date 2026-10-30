@@ -19,7 +19,36 @@ pub struct ConversationDelivery {
     pub reason: String,
 }
 
+/// Why one recipient received a message and what became of it, for display.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, sqlx::FromRow)]
+pub struct ConversationRouting {
+    pub agent_id: String,
+    pub kind: String,
+    pub reason: String,
+    pub state: String,
+}
+
+/// Execution state of a recipient's turn on a message, or its job if no turn.
+const RECIPIENT_STATE: &str = "COALESCE((SELECT t.state FROM conversation_turns t WHERE t.message_id=?1 AND t.agent_id=r.agent_id),(SELECT j.state FROM conversation_jobs j WHERE j.message_id=?1 AND j.agent_id=r.agent_id),'pending')";
+
 impl Store {
+    /// Lists every recipient of a message: routed deliveries and delegated
+    /// assignments, with the reason and the current delivery or execution state.
+    /// # Errors
+    /// Returns database errors.
+    pub async fn conversation_message_routing(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<ConversationRouting>, StoreError> {
+        let query = format!(
+            "SELECT r.agent_id,r.kind,r.reason,CASE WHEN r.kind='information' THEN CASE WHEN r.acknowledged_at_ms IS NULL THEN 'pending' ELSE 'received' END ELSE {RECIPIENT_STATE} END AS state FROM (SELECT agent_id,kind,reason,acknowledged_at_ms FROM conversation_deliveries WHERE message_id=?1 UNION ALL SELECT agent_id,'delegated','delegated_by_supervisor',NULL FROM conversation_assignments WHERE source_reply_id=?1) r ORDER BY r.kind,r.agent_id LIMIT 64"
+        );
+        Ok(sqlx::query_as(&query)
+            .bind(message_id)
+            .fetch_all(&self.inner.readers)
+            .await?)
+    }
+
     /// Stores a complete, immutable route and all inbox entries atomically.
     /// # Errors
     /// Rejects unknown source messages, invalid recipients and changed replay.
