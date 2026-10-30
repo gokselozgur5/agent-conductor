@@ -38,6 +38,20 @@ test('each message explains its recipients and decision outcome as text',()=>{
   const plain=f.run(`renderChatMessage({sender:'operator',body:'work',status:'queued',routing:[]})`);
   assert.equal(plain.children.length,3);
 });
+test('an authorized decision shows its assignments and a refused one keeps its body',()=>{
+  const f=fixture();
+  const body=JSON.stringify({schema:'conductor.delegation.v1',assignments:[
+    {agent_id:'worker',instruction:'Write <b>fib.py</b>'},{agent_id:'reviewer',instruction:'Check it'}]});
+  const row=f.run(`renderChatMessage({sender:'agent',agent_id:'lead',body:${JSON.stringify(body)},status:'replied',
+    examination:{outcome:'authorized'}})`);
+  const list=row.children[1];
+  assert.equal(list.children.length,2);
+  assert.equal(list.children[0].textContent,'worker: Write <b>fib.py</b>');
+  assert.equal(list.children[1].textContent,'reviewer: Check it');
+  const refused=f.run(`renderChatMessage({sender:'agent',agent_id:'lead',body:${JSON.stringify(body)},status:'replied',
+    examination:{outcome:'rejected',detail:'not a direct report'}})`);
+  assert.equal(refused.children[1].textContent,body);
+});
 test('retry after queue transport loss preserves message identity and selected agent',async()=>{
   const f=fixture();const calls=[];let fail=true;
   f.run("token='credential';chatId='conversation';chatRoomFor='conversation';chatReady=true");

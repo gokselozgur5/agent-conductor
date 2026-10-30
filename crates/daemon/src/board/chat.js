@@ -111,15 +111,24 @@ function renderChatRouting(routing) {
   }
   return list;
 }
+function renderChatAssignments(body) {
+  let plan;
+  try { plan = JSON.parse(body); } catch { return null; }
+  if (!Array.isArray(plan?.assignments)) return null;
+  const list = text('ul', '', 'chat-assignments');
+  for (const a of plan.assignments) list.append(text('li', `${a.agent_id}: ${a.instruction}`));
+  return list;
+}
 function renderChatMessage(message) {
   const row = text('article', '', 'chat-message');
   const states = {saved: 'Saved, not queued', queued: 'Queued', launch_intent: 'Started or outcome pending', replied: 'Replied', blocked: 'Blocked', unknown: 'Outcome unknown · no automatic retry'};
   row.append(text('strong', message.sender === 'agent' ? message.agent_id : 'You'));
-  row.append(text('p', message.body, 'chat-body'));
+  const decision = message.examination;
+  const assignments = decision?.outcome === 'authorized' ? renderChatAssignments(message.body) : null;
+  row.append(assignments || text('p', message.body, 'chat-body'));
   row.append(text('small', states[message.status] || message.status || 'Recorded'));
   const routing = renderChatRouting(message.routing || []);
   if (routing) row.append(routing);
-  const decision = message.examination;
   if (decision?.outcome === 'authorized') row.append(text('small', 'Delegation decision authorized'));
   if (decision?.outcome === 'rejected') row.append(text('small', `Delegation decision refused: ${decision.detail}`));
   if (message.sender === 'operator' && message.status === 'saved') {
