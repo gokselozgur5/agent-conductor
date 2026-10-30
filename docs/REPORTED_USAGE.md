@@ -19,6 +19,10 @@ counts and `total_cost_usd`; its bounded `system/init` model field is retained w
 valid. Codex `turn.completed` or `turn.failed` can provide input/output/cached-input
 counts. Codex cost and model remain unknown when not reported by these envelopes.
 No model/effort value is inferred from an adapter binary version or user defaults.
+Model names containing any credential shape recognized by the shared runtime
+redactor are omitted, including tokens embedded in qualified names. Counts and
+other valid accounting fields remain available. This does not detect arbitrary
+secrets or rewrite existing usage observations.
 
 Counts are nonnegative integers rendered as decimal strings to avoid JavaScript
 rounding. Reported USD cost is a normalized nonnegative JSON number, bounded to
