@@ -449,4 +449,22 @@ mod tests {
             "#2 lead\n    {\"x\":1}\n    ! delegation refused: agent not in room\n"
         );
     }
+
+    #[test]
+    fn tree_shows_tasks_reports_blockers_and_summary() {
+        let plan = r#"{"assignments":[{"agent_id":"worker","instruction":"write fib.py"},{"agent_id":"tester","instruction":"test it"}]}"#;
+        let messages = [
+            json!({"id": "op", "agent_id": null, "parent": null, "body": "fib please",
+                "routing": [{"agent_id": "lead", "kind": "assignment", "state": "replied"}]}),
+            json!({"id": "d", "agent_id": "lead", "parent": "op", "body": plan, "examination": {"outcome": "authorized"},
+                "routing": [{"agent_id": "worker", "kind": "delegated", "state": "replied"},
+                    {"agent_id": "tester", "kind": "delegated", "state": "blocked"}]}),
+            json!({"id": "w", "agent_id": "worker", "parent": "d", "body": "done\n0 1 1 2"}),
+            json!({"id": "s", "agent_id": "lead", "parent": "d", "body": "worker finished, tester blocked"}),
+        ];
+        assert_eq!(
+            tree(&messages),
+            "you: fib please\n   lead: [task for worker] write fib.py…\n      tester: ! blocked\n      worker: done…\n      lead (summary): worker finished, tester blocked\n\n"
+        );
+    }
 }
