@@ -39,6 +39,8 @@ pub enum ChatCommand {
         #[arg(long)]
         follow: bool,
     },
+    /// Chat in the room: live history, `@agent text`, `@all text`, `/tree`, `/quit`.
+    Open { conversation: String },
 }
 
 pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
@@ -70,6 +72,7 @@ pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
             conversation,
             follow,
         } => history(socket, &conversation, json, follow).await,
+        ChatCommand::Open { conversation } => history(socket, &conversation, false, true).await,
     };
     result.unwrap_or_else(|message| {
         eprintln!("{message}");
