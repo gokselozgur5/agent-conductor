@@ -120,10 +120,57 @@ async fn quit_as_first_input_still_shows_history() {
 
 #[tokio::test]
 async fn a_failed_poll_keeps_the_window_open() {
-    let daemon = fake_daemon(Box::new(|_| Err("database busy".into())));
-    let (result, _) = run(&daemon, typed(&["/unknown", "/quit"])).await;
-    assert_eq!(result, Ok(0));
-    assert!(!daemon.seen.lock().expect("lock").is_empty());
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&fetches);
+    let daemon = fake_daemon(Box::new(move |request| match request {
+        Request::ConversationMessages { .. } if count.fetch_add(1, SeqCst) == 0 => {
+            Err("database busy".into())
+        }
+        Request::ConversationMessages { .. } => {
+            let mut served = operator_message();
+            served["body"] = json!("served on a later request");
+            Ok(Response::ConversationMessages {
+                messages: vec![served],
+                next_after: None,
+            })
+        }
+        Request::SendConversationMessage { .. } => {
+            Ok(Response::ConversationMessageSaved { message: json!({}) })
+        }
+        Request::RouteConversationMessage { .. } => Ok(Response::ConversationTurnQueued {
+            message_id: "m".into(),
+        }),
+        other => with_history(other),
+    }));
+    let (sender, lines) = tokio::sync::mpsc::channel(16);
+    let (seen, watched) = (Arc::clone(&daemon.seen), Arc::clone(&fetches));
+    tokio::spawn(async move {
+        let wait = std::time::Duration::from_millis(10);
+        while watched.load(SeqCst) < 2 {
+            tokio::time::sleep(wait).await;
+        }
+        let _ = sender.send(Ok("typed after the failure".to_owned())).await;
+        while !seen
+            .lock()
+            .expect("lock")
+            .iter()
+            .any(|r| matches!(r, Request::SendConversationMessage { .. }))
+        {
+            tokio::time::sleep(wait).await;
+        }
+        let _ = sender.send(Ok("/quit".to_owned())).await;
+    });
+    let mut out = Vec::new();
+    let every = std::time::Duration::from_millis(20);
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        open_with(&daemon.socket, "c1".into(), lines, &mut out, every),
+    )
+    .await;
+    assert_eq!(finished, Ok(Ok(0)));
+    let out = String::from_utf8(out).expect("utf8");
+    assert!(out.contains("served on a later request"), "{out}");
 }
 
 #[tokio::test]
@@ -146,25 +193,30 @@ async fn clean_eof_exits_zero() {
 async fn input_stays_responsive_while_a_poll_is_in_flight() {
     let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = Arc::clone(&polls);
+    let in_flight = Arc::new(tokio::sync::Notify::new());
+    let signal = Arc::clone(&in_flight);
     let daemon = slow_daemon(
         Box::new(with_history),
-        Box::new(move |_| {
-            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                std::time::Duration::ZERO
-            } else {
-                std::time::Duration::from_secs(30)
+        Box::new(move |request| {
+            if !matches!(request, Request::ConversationMessages { .. }) {
+                return std::time::Duration::ZERO;
             }
+            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return std::time::Duration::ZERO;
+            }
+            signal.notify_one();
+            std::time::Duration::from_secs(30)
         }),
     );
     let (sender, lines) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        in_flight.notified().await;
         let _ = sender.send(Ok("/quit".to_owned())).await;
     });
     let mut out = Vec::new();
     let every = std::time::Duration::from_millis(20);
     let finished = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(1),
         open_with(&daemon.socket, "c1".into(), lines, &mut out, every),
     )
     .await;
