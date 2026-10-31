@@ -441,12 +441,17 @@ fn parse_input(line: &str) -> Input {
     }
 }
 
-/// Stdin lines arrive on a channel; it closes at EOF.
-fn stdin_lines() -> tokio::sync::mpsc::Receiver<String> {
+type Line = std::io::Result<String>;
+
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Stdin lines arrive on a channel; it closes at EOF, and a read error is its last item.
+fn stdin_lines() -> tokio::sync::mpsc::Receiver<Line> {
     let (sender, receiver) = tokio::sync::mpsc::channel(16);
     std::thread::spawn(move || {
-        for line in std::io::stdin().lines().map_while(Result::ok) {
-            if sender.blocking_send(line).is_err() {
+        for line in std::io::stdin().lines() {
+            let failed = line.is_err();
+            if sender.blocking_send(line).is_err() || failed {
                 break;
             }
         }
@@ -454,31 +459,60 @@ fn stdin_lines() -> tokio::sync::mpsc::Receiver<String> {
     receiver
 }
 
+/// A failed poll is a warning: the window stays open and the next poll retries.
+async fn refresh(
+    socket: &Path,
+    conversation: &str,
+    shown: &mut std::collections::BTreeMap<String, String>,
+    out: &mut impl std::io::Write,
+) -> Result<(), String> {
+    match page(socket, conversation, 0).await {
+        Ok((messages, _)) => show_new(out, shown, messages, false),
+        Err(message) => {
+            eprintln!("warning: could not refresh: {message}");
+            Ok(())
+        }
+    }
+}
+
 async fn open(socket: &Path, conversation: String) -> Result<i32, String> {
-    let mut lines = stdin_lines();
+    open_with(socket, conversation, stdin_lines(), &mut std::io::stdout()).await
+}
+
+async fn open_with(
+    socket: &Path,
+    conversation: String,
+    mut lines: tokio::sync::mpsc::Receiver<Line>,
+    out: &mut impl std::io::Write,
+) -> Result<i32, String> {
     let mut shown = std::collections::BTreeMap::new();
-    let mut poll = tokio::time::interval(std::time::Duration::from_secs(2));
+    refresh(socket, &conversation, &mut shown, out).await?;
+    let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + POLL_EVERY, POLL_EVERY);
     loop {
         tokio::select! {
-            _ = poll.tick() => {
-                let (messages, _) = page(socket, &conversation, 0).await?;
-                show_new(&mut std::io::stdout(), &mut shown, messages, false)?;
+            _ = poll.tick() => refresh(socket, &conversation, &mut shown, out).await?,
+            line = lines.recv() => {
+                let line = match line {
+                    None => return Ok(0),
+                    Some(Err(error)) => return Err(format!("reading input failed: {error}")),
+                    Some(Ok(line)) => line,
+                };
+                match parse_input(&line) {
+                    Input::Quit => return Ok(0),
+                    Input::Skip => {}
+                    Input::Invalid(message) => eprintln!("{message}"),
+                    Input::Tree => {
+                        if let Err(message) = show_tree(socket, &conversation, out).await {
+                            eprintln!("{message}");
+                        }
+                    }
+                    Input::Say { to, everyone, text } => {
+                        if let Err(message) = post(socket, conversation.clone(), to, everyone, text).await {
+                            eprintln!("{message}");
+                        }
+                    }
+                }
             }
-            line = lines.recv() => match parse_input(&line.unwrap_or_else(|| "/quit".into())) {
-                Input::Quit => return Ok(0),
-                Input::Skip => {}
-                Input::Invalid(message) => eprintln!("{message}"),
-                Input::Tree => {
-                    if let Err(message) = show_tree(socket, &conversation, &mut std::io::stdout()).await {
-                        eprintln!("{message}");
-                    }
-                }
-                Input::Say { to, everyone, text } => {
-                    if let Err(message) = post(socket, conversation.clone(), to, everyone, text).await {
-                        eprintln!("{message}");
-                    }
-                }
-            },
         }
     }
 }
