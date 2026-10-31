@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,7 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-26.04-arm, macos-15]
+        # Pull requests run the primary platform only; main and manual runs cover every host.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["macos-15"]') || fromJSON('["ubuntu-latest", "ubuntu-26.04-arm", "macos-15"]') }}
 
     steps:
       - name: Select short temporary paths for Unix sockets
@@ -95,6 +97,7 @@ jobs:
         run: node --test tests/board_diagnostics.cjs tests/board_chat.cjs
 
       - name: Build and test release runtime
+        if: github.event_name != 'pull_request'
         env:
           CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/release
         run: |
@@ -102,6 +105,7 @@ jobs:
           cargo test --locked --release --workspace --all-features
 
       - name: Package and verify native runtime kit
+        if: github.event_name != 'pull_request'
         env:
           KIT_NAME: conductor-${{ runner.os }}-${{ runner.arch }}
         run: |
@@ -122,6 +126,7 @@ jobs:
           fi
 
       - name: Upload verified native runtime kit
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7.0.2
         with:
           name: conductor-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}

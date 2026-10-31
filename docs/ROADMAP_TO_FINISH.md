@@ -106,6 +106,11 @@ source/evidence hashes and remaining gaps. Track implementation, tested candidat
 CI-verified release and installed behavior separately. Refresh GitHub/CI/runtime
 state before external delivery; dated documents are not current service state.
 
+CI lanes (2026-10-31): pull requests run debug checks on macOS, the primary
+platform, in about five minutes. Linux x86-64/arm64, the release build and the
+runtime kit run on every push to main and on manual dispatch; a red main is
+fixed before the next merge. Release candidates still require every host.
+
 ## Progress log
 
 - Baseline `99183c0`: shared room routing/configuration and controlled browser
