@@ -31,6 +31,8 @@ pub enum ChatCommand {
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
     },
+    /// Show each request as a tree of assignments, reports, blockers and summary.
+    Tree { conversation: String },
     /// Show the room history; --follow keeps printing new messages and state changes.
     Log {
         conversation: String,
@@ -53,6 +55,17 @@ pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
             all,
             text,
         } => post(socket, conversation, to, all, text.join(" ")).await,
+        ChatCommand::Tree { conversation } => {
+            let (messages, _) = match page(socket, &conversation, 0).await {
+                Ok(read) => read,
+                Err(message) => {
+                    eprintln!("{message}");
+                    return 1;
+                }
+            };
+            print!("{}", tree(&messages));
+            Ok(0)
+        }
         ChatCommand::Log {
             conversation,
             follow,
@@ -265,6 +278,72 @@ fn render(message: &Value) -> String {
             "    ! delegation refused: {}",
             message["examination"]["detail"].as_str().unwrap_or("?")
         );
+    }
+    out
+}
+
+fn summary_line(message: &Value) -> String {
+    let text = body(message);
+    let first = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default();
+    let mut line: String = first.chars().take(90).collect();
+    if first.chars().count() > 90 || text.lines().filter(|l| !l.trim().is_empty()).count() > 1 {
+        line.push('…');
+    }
+    line
+}
+
+fn outstanding(state: &str) -> &str {
+    match state {
+        "blocked" => "! blocked",
+        "unknown" => "! outcome unknown, not retried",
+        "failed" => "! failed",
+        "launch_intent" => "working",
+        other => other,
+    }
+}
+
+fn branch(out: &mut String, all: &[Value], message: &Value, depth: usize) {
+    let id = &message["id"];
+    let parent_author = all
+        .iter()
+        .find(|m| m["id"] == message["parent"])
+        .map(|m| &m["agent_id"]);
+    let role = match message["agent_id"].as_str() {
+        None => "you".to_owned(),
+        Some(author) if parent_author == Some(&message["agent_id"]) => {
+            format!("{author} (summary)")
+        }
+        Some(author) => author.to_owned(),
+    };
+    let _ = writeln!(
+        out,
+        "{}{role}: {}",
+        "   ".repeat(depth),
+        summary_line(message)
+    );
+    let children: Vec<&Value> = all.iter().filter(|m| m["parent"] == *id).collect();
+    for route in message["routing"].as_array().into_iter().flatten() {
+        let answered = children.iter().any(|c| c["agent_id"] == route["agent_id"]);
+        if route["kind"] != "information" && !answered {
+            let agent = route["agent_id"].as_str().unwrap_or("?");
+            let state = outstanding(route["state"].as_str().unwrap_or("?"));
+            let _ = writeln!(out, "{}{agent}: {state}", "   ".repeat(depth + 1));
+        }
+    }
+    for child in children {
+        branch(out, all, child, depth + 1);
+    }
+}
+
+/// Operator requests are roots; replies hang under the message they answer.
+fn tree(messages: &[Value]) -> String {
+    let mut out = String::new();
+    for root in messages.iter().filter(|m| m["agent_id"].is_null()) {
+        branch(&mut out, messages, root, 0);
+        out.push('\n');
     }
     out
 }
