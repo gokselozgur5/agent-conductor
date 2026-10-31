@@ -57,17 +57,7 @@ pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
             all,
             text,
         } => post(socket, conversation, to, all, text.join(" ")).await,
-        ChatCommand::Tree { conversation } => {
-            let (messages, _) = match page(socket, &conversation, 0).await {
-                Ok(read) => read,
-                Err(message) => {
-                    eprintln!("{message}");
-                    return 1;
-                }
-            };
-            print!("{}", tree(&messages));
-            Ok(0)
-        }
+        ChatCommand::Tree { conversation } => show_tree(socket, &conversation).await.map(|()| 0),
         ChatCommand::Log {
             conversation,
             follow,
@@ -372,6 +362,12 @@ fn show_new(
             Some(_) => {}
         }
     }
+}
+
+async fn show_tree(socket: &Path, conversation_id: &str) -> Result<(), String> {
+    let (messages, _) = page(socket, conversation_id, 0).await?;
+    print!("{}", tree(&messages));
+    Ok(())
 }
 
 async fn history(
