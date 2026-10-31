@@ -74,6 +74,9 @@ fn with_history(request: &Request) -> Result<Response, String> {
             messages: vec![operator_message()],
             next_after: None,
         }),
+        Request::ConversationRoom { .. } => Ok(Response::ConversationRoom {
+            configuration: Some(room_config("lead", &["worker".into()])),
+        }),
         other => Err(format!("unexpected {other:?}")),
     }
 }
@@ -206,4 +209,20 @@ async fn a_sent_message_shows_without_waiting_for_the_next_tick() {
     let result = open_with(&daemon.socket, "c1".into(), lines, &mut out, every).await;
     assert_eq!(result, Ok(0));
     assert!(String::from_utf8(out).expect("utf8").contains("#2 you"));
+}
+
+#[tokio::test]
+async fn a_message_to_an_unknown_agent_saves_nothing() {
+    let daemon = fake_daemon(Box::new(with_history));
+    let (result, _) = run(&daemon, typed(&["@ghost hi", "/quit"])).await;
+    assert_eq!(result, Ok(0));
+    let seen = daemon.seen.lock().expect("lock");
+    let saved = seen
+        .iter()
+        .any(|r| matches!(r, Request::SendConversationMessage { .. }));
+    assert!(!saved, "{seen:?}");
+    assert!(
+        seen.iter()
+            .any(|r| matches!(r, Request::ConversationRoom { .. }))
+    );
 }
