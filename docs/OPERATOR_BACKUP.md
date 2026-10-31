@@ -54,7 +54,7 @@ snapshot. Retain that external directory; see
 supported schema, so preserve matching tools for pre-upgrade snapshots.
 Recorded interrupted publications can now be repaired through `repair-restore`;
 missing/corrupt-state recovery has a separate
-[prepared host-restart workflow](DISASTER_RECOVERY.md), requiring authority
+[prepared host-restart workflow](archive/DISASTER_RECOVERY.md), requiring authority
 format 2 and a fresh compatible snapshot. Actual host-restart acceptance remains
 open under issue #59.
 

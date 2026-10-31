@@ -271,7 +271,7 @@ failure; native notifications are exercised on CI hosts.
 Configured observers now monitor current retained attempts after ownership loss.
 Changes use a separate `workspace.external.*` topic with observer identity and no
 lease or causal claim; ordinary `file.*` subscriptions remain separate. See
-[RETAINED_OBSERVATION.md](RETAINED_OBSERVATION.md) for current boundaries, source
+[RETAINED_OBSERVATION.md](archive/RETAINED_OBSERVATION.md) for current boundaries, source
 validation and replay behavior. Scoped outer document discovery is documented in
 [SCOPED_ADVISORY.md](SCOPED_ADVISORY.md); earlier sections preserve historical gates.
 

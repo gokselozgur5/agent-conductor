@@ -50,7 +50,7 @@ no renewal correctly stopped the worker before readiness; renewal until actual
 progress allowed startup and subsequent controlled cancellation. Current runner
 tests maintain the lease during bounded readiness, then deliberately test missed
 renewal, parent loss or cancellation. Their no-later-write assertions remain.
-See the historical evidence in [REPOSITORY_HOOKS.md](REPOSITORY_HOOKS.md).
+See the historical evidence in [REPOSITORY_HOOKS.md](../REPOSITORY_HOOKS.md).
 
 Private evidence: `reviews/agent-conductor-runtime-20261028/`, including
 `issue20-load-diagnostic-manifest.json`, `encoding-v2-load32-receipt.json`,

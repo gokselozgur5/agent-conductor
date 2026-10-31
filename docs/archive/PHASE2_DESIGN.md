@@ -13,7 +13,7 @@ hardening acceptance must be reported separately.
 
 ## Responsibility constraints
 
-Follow [RESPONSIBILITIES.md](RESPONSIBILITIES.md): each worker owns its assigned
+Follow [RESPONSIBILITIES.md](../RESPONSIBILITIES.md): each worker owns its assigned
 engineering work; Conductor coordinates, checks measure and an independent
 verifier reviews. Preserve SOLID boundaries without adding an unused framework.
 Prioritize the integrated acceptance workflow over additional standalone helpers.

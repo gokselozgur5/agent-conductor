@@ -56,7 +56,7 @@ tools, whose schema verification remains exact.
 
 This record establishes generation history and exclusive daemon admission. It
 does **not** establish that a writer surviving a crashed daemon has stopped.
-The separate [prepared recovery workflow](DISASTER_RECOVERY.md) quarantines
+The separate [prepared recovery workflow](archive/DISASTER_RECOVERY.md) quarantines
 startup and requires a native boot transition on the same host before restoring
 missing/corrupt state. Authority format 2 binds that host and retains the recovery
 request outside state. Normal startup upgrades format 1; older binaries refuse

@@ -1,7 +1,7 @@
 # Product: leaders and soldiers in one chat
 
 Status: operator-approved direction, 2026-10-31. This supersedes the finish
-definition in [ROADMAP_TO_FINISH.md](ROADMAP_TO_FINISH.md) where they differ.
+definition in [ROADMAP_TO_FINISH.md](archive/ROADMAP_TO_FINISH.md) where they differ.
 
 ## What the operator uses
 

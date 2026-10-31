@@ -1,6 +1,6 @@
 # Roadmap to finish Agent Conductor
 
-> 2026-10-31: the operator redirected the product; see [PRODUCT.md](PRODUCT.md).
+> 2026-10-31: the operator redirected the product; see [PRODUCT.md](../PRODUCT.md).
 > P3 accounts, the soak and release gates below are paused, not deleted.
 
 Status: active implementation plan, 2026-10-30. Baseline: `99183c0`.

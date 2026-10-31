@@ -1,7 +1,7 @@
 # Delivery acceptance audit
 
 This is an incomplete delivery audit, not a v1 acceptance certificate. The target
-remains the complete workflow and all gates in [REQUIREMENTS.md](REQUIREMENTS.md).
+remains the complete workflow and all gates in [REQUIREMENTS.md](../REQUIREMENTS.md).
 No local test count, short native fixture, or successful refusal substitutes for
 that scope. Read this current audit before the historical paragraphs in STATUS.
 
@@ -14,7 +14,7 @@ and the operator-selected Codex/Claude bypass modes. Existing file-only broker a
 acceptance must not be presented as completion of that target. The critical
 user-visible scenario is a normal CLI-created task dispatched to a full-capability
 agent, followed by independent verification and exactly-once completion, including
-interruption and recovery. See [the integration plan](FULL_CAPABILITY_EXECUTION.md).
+interruption and recovery. See [the integration plan](../FULL_CAPABILITY_EXECUTION.md).
 
 ## Candidate identity
 
@@ -96,7 +96,7 @@ does not describe the current full-capability writer admission path.
 Linux project checks now use a separate helper and bubblewrap with explicit
 filesystem and syscall restrictions. Actual source `ae57be7` passed the check
 boundary and source-binding tests in CI `40948331899`; see
-[Linux check requirements and evidence](LINUX_CHECKS.md). Full-capability workers
+[Linux check requirements and evidence](../LINUX_CHECKS.md). Full-capability workers
 retain their selected account's unrestricted tools and network. These check tests
 do not establish complete native vendor workflows on Linux. The CI matrix now
 also runs on `ubuntu-26.04-arm`; source `f8fb6b7` passed native arm64 checks,

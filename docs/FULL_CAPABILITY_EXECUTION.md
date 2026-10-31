@@ -232,7 +232,7 @@ on macOS and Linux, checking kernel peer identity, HOME, file ownership, ACK bef
 release, and snapshot transfer. It uses a controlled vendor fixture, not personal
 Codex or Claude logins. Started-worker interruption/restart recovery and personal
 vendor deployment under distinct accounts remain separate delivery gates. See
-[the delivery audit](DELIVERY_ACCEPTANCE.md) for pinned acceptance evidence.
+[the delivery audit](archive/DELIVERY_ACCEPTANCE.md) for pinned acceptance evidence.
 
 After a controller restart, an independently accepted account snapshot can still
 serve as a dependent task's input. Its completed task, accepted source identity,
