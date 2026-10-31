@@ -116,6 +116,20 @@ fn room_config(lead: &str, members: &[String]) -> Value {
     json!({"coordinator": lead, "members": all})
 }
 
+/// A typo must fail before a room-less conversation is created.
+fn check_agents(known: &[String], lead: &str, members: &[String]) -> Result<(), String> {
+    let named = std::iter::once(lead).chain(members.iter().map(String::as_str));
+    for name in named {
+        if !known.iter().any(|k| k == name) {
+            return Err(format!(
+                "no agent named {name}; known agents: {}",
+                known.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn create(
     socket: &Path,
     project: &Path,
@@ -128,16 +142,17 @@ async fn create(
             project.display()
         ));
     }
+    let Response::ConversationAgents { agents } = rpc(socket, Request::ConversationAgents).await?
+    else {
+        return Err("unexpected daemon response".into());
+    };
+    let known: Vec<String> = agents
+        .iter()
+        .filter_map(|a| a["id"].as_str().map(String::from))
+        .collect();
+    check_agents(&known, &lead, &members)?;
     if members.is_empty() {
-        let Response::ConversationAgents { agents } =
-            rpc(socket, Request::ConversationAgents).await?
-        else {
-            return Err("unexpected daemon response".into());
-        };
-        members = agents
-            .iter()
-            .filter_map(|a| a["id"].as_str().map(String::from))
-            .collect();
+        members = known;
     }
     let id = format!("chat-{}", uuid::Uuid::now_v7());
     let project_path = project.to_string_lossy().into_owned();
@@ -666,6 +681,20 @@ mod tests {
             panic!("wrong request")
         };
         assert_eq!(recipients, ["worker"]);
+    }
+
+    #[test]
+    fn lead_and_members_must_be_configured_agents() {
+        let known = ["lead".to_owned(), "worker".to_owned()];
+        assert_eq!(check_agents(&known, "lead", &["worker".into()]), Ok(()));
+        assert_eq!(
+            check_agents(&known, "leed", &[]),
+            Err("no agent named leed; known agents: lead, worker".into())
+        );
+        assert_eq!(
+            check_agents(&known, "lead", &["wroker".into()]),
+            Err("no agent named wroker; known agents: lead, worker".into())
+        );
     }
 
     fn room() -> Value {
