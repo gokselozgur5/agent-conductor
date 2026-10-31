@@ -68,7 +68,7 @@ quiescent current database because it cannot establish the absence of orphan
 writers or the highest prior boot generation from an old snapshot alone. There
 is no force option that invents fencing evidence. Full state-loss recovery needs
 an independently established ownership boundary and generation history.
-The separate [prepared recovery workflow](DISASTER_RECOVERY.md) uses the retained
+The separate [prepared recovery workflow](archive/DISASTER_RECOVERY.md) uses the retained
 authority and a native same-host boot transition for this case. Its automated
 positive transitions are simulated; actual host-restart acceptance is pending.
 

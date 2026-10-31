@@ -38,7 +38,7 @@ authentication or a complete task workflow.
 Never overwrite a running installation. Stage upgrades in a separate directory
 and preserve the existing state and accepted evidence. Final upgrade/rollback,
 personal vendor acceptance and endurance gates remain tracked in
-[delivery acceptance](DELIVERY_ACCEPTANCE.md).
+[delivery acceptance](archive/DELIVERY_ACCEPTANCE.md).
 
 To produce the same format from a clean source checkout:
 

@@ -67,7 +67,7 @@ def package(bin_dir, accepted_plan, destination):
     for path in REPO.joinpath('tools').iterdir():
         if path.is_file() and (path.suffix == '.py' or path.name == 'conductor'):
             shutil.copy2(path, destination / 'tools' / path.name)
-    for name in ('LOCAL_OPERATOR.md', 'DELIVERY_ACCEPTANCE.md', 'OPERATOR_RECOVERY.md', 'FULL_CAPABILITY_EXECUTION.md', 'LINUX_CHECKS.md', 'GIT_SOURCE_IDENTITY.md'):
+    for name in ('LOCAL_OPERATOR.md', 'OPERATOR_RECOVERY.md', 'FULL_CAPABILITY_EXECUTION.md', 'LINUX_CHECKS.md', 'GIT_SOURCE_IDENTITY.md'):
         shutil.copy2(REPO / 'docs' / name, destination / 'docs' / name)
     (destination / 'accepted-adapters.json').write_text(json.dumps(pins, indent=2) + '\n')
     (destination / 'accepted-adapters.json').chmod(0o600)
@@ -123,7 +123,7 @@ The launcher uses the packaging Python interpreter directly, independent of PATH
 Python and adapter executable paths are host-specific. Planning checks local
 adapter hashes; receiving-account executable bytes are checked there before ACK.
 Do not replace this bundle's binaries while its runtime is running.
-See docs/LOCAL_OPERATOR.md and docs/DELIVERY_ACCEPTANCE.md for the full boundaries.
+See docs/LOCAL_OPERATOR.md for the full boundaries.
 Linux project check dependencies and acceptance limits are in docs/LINUX_CHECKS.md.
 ''')
     files = {str(p.relative_to(destination)): digest(p) for p in sorted(destination.rglob('*')) if p.is_file()}

@@ -1,7 +1,7 @@
 # Status
 
 For the current requirement-by-requirement delivery gaps, see
-[Delivery acceptance audit](DELIVERY_ACCEPTANCE.md). Later sections retain
+[Delivery acceptance audit](archive/DELIVERY_ACCEPTANCE.md). Later sections retain
 historical evidence and must not be read as current feature inventories.
 
 ## Current baseline and broker vendor candidate
@@ -35,8 +35,8 @@ unchanged. This proves this controlled idle path, not live-provider reliability.
 
 Pre-ACK reconciliation, daemon lifecycle integration,
 complete OS confinement, live-model behavior and operational acceptance remain
-incomplete. See [the broker design](CODEX_WRITER_DESIGN.md) for proof boundaries
-and [the delivery audit](DELIVERY_ACCEPTANCE.md) for the original full scope.
+incomplete. See [the broker design](archive/CODEX_WRITER_DESIGN.md) for proof boundaries
+and [the delivery audit](archive/DELIVERY_ACCEPTANCE.md) for the original full scope.
 
 ## Historical auxiliary candidate evidence
 
@@ -51,7 +51,7 @@ Recovery handles no-launch and pre-ACK proofs, bounded paged inventories, legacy
 uncertainty, and evidence-supported native boot transitions when a receipt is
 missing. Native origin evidence commits with each new invocation. A host fence
 never substitutes for a successful check or verdict. See
-[AUXILIARY_PROCESS_OWNERSHIP.md](AUXILIARY_PROCESS_OWNERSHIP.md) for the contracts,
+[AUXILIARY_PROCESS_OWNERSHIP.md](archive/AUXILIARY_PROCESS_OWNERSHIP.md) for the contracts,
 fixtures and precise refusal paths.
 
 The schema-25 candidate passes 345 local workspace Rust tests, 73 Python tests,
@@ -70,7 +70,7 @@ isolated native HTTP/CLI restart probe pass. Separate real Chrome desktop and
 390-pixel mobile checks verify readable diagnostics, no horizontal overflow and
 clearing on disconnect; they do not establish general browser compatibility.
 
-The [auxiliary fault matrix](AUXILIARY_FAULT_MATRIX.md) identifies exact tested
+The [auxiliary fault matrix](archive/AUXILIARY_FAULT_MATRIX.md) identifies exact tested
 boundaries and remaining gaps, separating abrupt process death from cancellation
 and controlled daemon relays. Admission now has abrupt child-process coverage on
 both sides of its transaction for both roles. Result publication adds six real
@@ -113,19 +113,19 @@ Migration 18 binds parent-observed native PID/start/host/boot metadata to durabl
 wrapper acknowledgement, before release. Missing or malformed metadata refuses
 new authority-bound ACKs; legacy records remain unknown. Diagnostics distinguish
 stored bindings from native observations. These are not signalable handles or
-proof of escaped descendant fencing; see [RUNNER_PROCESS_IDENTITY.md](RUNNER_PROCESS_IDENTITY.md).
+proof of escaped descendant fencing; see [RUNNER_PROCESS_IDENTITY.md](archive/RUNNER_PROCESS_IDENTITY.md).
 
 Authority-bound native wrappers now expose scoped packet/wrapper correlation
 tags, checked before Ready. Kernel start-marker comparisons now discard observed
 PID changes around argument and database reads; this is not a pinned process
 handle. A bounded read-only process diagnostic reports
 correspondence with durable execution metadata.
-[RUNNER_PROCESS_IDENTITY.md](RUNNER_PROCESS_IDENTITY.md) explains the remaining
+[RUNNER_PROCESS_IDENTITY.md](archive/RUNNER_PROCESS_IDENTITY.md) explains the remaining
 process-identity/race limits; this observation is not fencing authority.
 
 A continuous isolated control-plane endurance harness exercises real lifecycle,
 event deduplication, stale epochs, board/SQLite correspondence and resource
-budgets. [CONTROL_PLANE_SOAK.md](CONTROL_PLANE_SOAK.md) defines its evidence and
+budgets. [CONTROL_PLANE_SOAK.md](archive/CONTROL_PLANE_SOAK.md) defines its evidence and
 limits; it never marks full native/v1 soak acceptance complete.
 
 Committed event deliveries and workflow admission now wake the sequential
@@ -159,7 +159,7 @@ SQLite boot recovery and remain consumed after failed startup or database
 rollback. Backup/restore/repair share that lock. See
 [RECOVERY_AUTHORITY.md](RECOVERY_AUTHORITY.md) for upgrade and retention rules.
 Generation history alone does not establish that orphan writers have stopped.
-The separate [prepared host recovery](DISASTER_RECOVERY.md) path now quarantines
+The separate [prepared host recovery](archive/DISASTER_RECOVERY.md) path now quarantines
 startup and requires a different native boot epoch on the same host before
 restoring missing/corrupt state. Native same-boot refusal and daemon reopen are
 tested; positive boot transitions are simulated in automated tests. Real host
@@ -176,9 +176,9 @@ packets with separate trust boundaries. See [LOCAL_OPERATOR.md](LOCAL_OPERATOR.m
 Task history exposes paginated audit metadata in the board and CLI. See
 [TASK_HISTORY.md](TASK_HISTORY.md) for its read-only contract and validation.
 Task lists use bounded pages after the required synthetic scale exposed an
-all-list response failure; see [TASK_PAGINATION.md](TASK_PAGINATION.md).
+all-list response failure; see [TASK_PAGINATION.md](archive/TASK_PAGINATION.md).
 Controlled cancellation now confirms group absence before reporting a stop; see
-[PROCESS_STOP.md](PROCESS_STOP.md) for the observed race and refusal boundary.
+[PROCESS_STOP.md](archive/PROCESS_STOP.md) for the observed race and refusal boundary.
 Explicit dependencies now gate dispatch on independent completed acceptance and
 can seed one successor from a selected accepted predecessor tree. Frozen source
 binding and any wake acknowledgement share one transaction. Read-only reviewer
@@ -220,7 +220,7 @@ into native plans without adding agent filesystem capabilities. See
 [SCOPED_ADVISORY.md](SCOPED_ADVISORY.md) for selection and trust boundaries.
 Retained nonterminal workspaces now publish explicitly external observations after
 ownership loss, without granting the former worker a lease or changing recovery
-acceptance. See [RETAINED_OBSERVATION.md](RETAINED_OBSERVATION.md).
+acceptance. See [RETAINED_OBSERVATION.md](archive/RETAINED_OBSERVATION.md).
 
 Event routing uses literal, case-sensitive prefixes and rechecks current filters
 before delivery leasing or workflow wake. See [EVENT_ROUTING.md](EVENT_ROUTING.md)
@@ -246,7 +246,7 @@ remaining execution diagnostics and broader recovery,
 host protocol/Thor/Linux isolation,
 load/restore/redaction validation and seven-day soak. Issue #20 now has controlled
 socket-encoding and worker-readiness evidence; see
-[RESPONSE_ENCODING.md](RESPONSE_ENCODING.md) for the correction and its limits.
+[RESPONSE_ENCODING.md](archive/RESPONSE_ENCODING.md) for the correction and its limits.
 
 The sections below preserve earlier acceptance milestones. Their counts and
 then-pending items are historical; current hook coverage is maintained in
@@ -277,7 +277,7 @@ credential/media scans. Evidence is kept privately under
 `reviews/agent-conductor-runtime-20261028/durable-recovery-workspace.log` and
 `native-workflow-v1/`. The model-call cap is not an actual spend measurement.
 
-Phase 1 has separate accepted evidence in [PHASE1_ACCEPTANCE.md](PHASE1_ACCEPTANCE.md).
+Phase 1 has separate accepted evidence in [PHASE1_ACCEPTANCE.md](archive/PHASE1_ACCEPTANCE.md).
 Native workflow head `5520583` and race-fix head `277d653` passed macOS/Linux CI
 before their respective merges. Board head `2937f43` also passed both hosts and merged at `3fc64c7`.
 Control head `02e6954` passed both hosts and merged at `a761d94`.
@@ -309,7 +309,7 @@ See [ADAPTER_CONFORMANCE.md](ADAPTER_CONFORMANCE.md) and [SANDBOX.md](SANDBOX.md
 
 Prioritize a usable integrated workflow over more standalone infrastructure.
 [RESPONSIBILITIES.md](RESPONSIBILITIES.md) defines the SOLID ownership boundaries;
-[PHASE2_DESIGN.md](PHASE2_DESIGN.md) preserves the complete delivery scope.
+[PHASE2_DESIGN.md](archive/PHASE2_DESIGN.md) preserves the complete delivery scope.
 
 ## Durable dispatch acceptance
 

@@ -29,12 +29,12 @@ class FinishAcceptanceTests(unittest.TestCase):
         self.git('config', 'user.name', 'Acceptance fixture')
         self.git('config', 'user.email', 'fixture@example.invalid')
         (self.source / 'source.txt').write_text('synthetic source')
-        (self.source / 'docs').mkdir()
-        (self.source / 'docs/finish_acceptance.json').write_bytes((REPO / 'docs/finish_acceptance.json').read_bytes())
-        self.git('add', 'source.txt', 'docs/finish_acceptance.json')
+        (self.source / 'docs/archive').mkdir(parents=True)
+        (self.source / 'docs/archive/finish_acceptance.json').write_bytes((REPO / 'docs/archive/finish_acceptance.json').read_bytes())
+        self.git('add', 'source.txt', 'docs/archive/finish_acceptance.json')
         self.git('commit', '-qm', 'Synthetic acceptance fixture')
         self.commit = self.git('rev-parse', 'HEAD').strip()
-        self.matrix = json.loads((REPO / 'docs/finish_acceptance.json').read_text())
+        self.matrix = json.loads((REPO / 'docs/archive/finish_acceptance.json').read_text())
         artifact = self.write('runtime.bin', b'synthetic runtime artifact')
         recording = self.write('recording.txt', b'synthetic test recording, not production evidence')
         samples = []
@@ -99,7 +99,7 @@ class FinishAcceptanceTests(unittest.TestCase):
         self.assertEqual(self.git('status', '--porcelain'), '')
 
     def test_checked_in_matrix_is_intentionally_incomplete(self):
-        self.matrix_path.write_bytes((REPO / 'docs/finish_acceptance.json').read_bytes())
+        self.matrix_path.write_bytes((REPO / 'docs/archive/finish_acceptance.json').read_bytes())
         self.assertRefused('final candidate is not pinned')
 
     def test_gate_inventory_cannot_be_shortened(self):

@@ -4,7 +4,7 @@ Current direction: the operator's full-capability requirement supersedes this
 file-only profile as the final worker design. This document retains historical
 broker implementation and validation evidence; passing its denial controls does
 not prove delivery of the full-capability agent. See
-[FULL_CAPABILITY_EXECUTION.md](FULL_CAPABILITY_EXECUTION.md).
+[FULL_CAPABILITY_EXECUTION.md](../FULL_CAPABILITY_EXECUTION.md).
 
 Status: broker, persistence barriers and MCP translation primitives implemented; production integration remains proposed.
 Native Codex writer admission remains refused. This design does not certify a
