@@ -19,22 +19,75 @@ pub fn configure(
     Ok(())
 }
 
-pub async fn serve(
-    service: PersistentControlService,
+/// A failed pass never ends supervision: queued chat for every conversation
+/// depends on this loop, and a transient store error must not outlive its cause.
+const IDLE: Duration = Duration::from_millis(250);
+const RETRY: Duration = Duration::from_secs(1);
+
+pub async fn serve(service: PersistentControlService, stop: tokio::sync::watch::Receiver<bool>) {
+    supervise(
+        |stop| service.dispatch_next_conversation(stop),
+        stop,
+        IDLE,
+        RETRY,
+    )
+    .await;
+}
+
+/// Runs passes until shutdown. After an error the loop waits `retry` and goes on.
+async fn supervise<Step, Pass, Failure>(
+    mut attempt: Step,
     mut stop: tokio::sync::watch::Receiver<bool>,
-) {
+    idle: Duration,
+    retry: Duration,
+) where
+    Step: FnMut(tokio::sync::watch::Receiver<bool>) -> Pass,
+    Pass: std::future::Future<Output = Result<bool, Failure>>,
+    Failure: std::fmt::Display,
+{
     while !*stop.borrow() {
-        match service.dispatch_next_conversation(stop.clone()).await {
+        let wait = match attempt(stop.clone()).await {
             Ok(true) => continue,
-            Ok(false) => {}
-            Err(_) => {
-                eprintln!("conversation dispatcher stopped: persistence requires reconciliation");
-                return;
+            Ok(false) => idle,
+            Err(error) => {
+                eprintln!("conversation dispatcher pass failed: {error}; retrying in {retry:?}");
+                retry
             }
-        }
+        };
         tokio::select! {
             _ = stop.changed() => return,
-            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+            () = tokio::time::sleep(wait) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const FAST: Duration = Duration::from_millis(1);
+
+    #[tokio::test]
+    async fn an_error_in_one_pass_does_not_stop_later_passes() {
+        let (stop_sender, stop) = tokio::sync::watch::channel(false);
+        let passes = AtomicUsize::new(0);
+        supervise(
+            |_| async {
+                match passes.fetch_add(1, Ordering::SeqCst) {
+                    0 | 1 => Err("database is busy"),
+                    4 => {
+                        stop_sender.send(true).unwrap();
+                        Ok(false)
+                    }
+                    _ => Ok(true),
+                }
+            },
+            stop,
+            FAST,
+            FAST,
+        )
+        .await;
+        assert_eq!(passes.load(Ordering::SeqCst), 5);
     }
 }
