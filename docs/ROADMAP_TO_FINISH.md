@@ -195,3 +195,8 @@ fixed before the next merge. Release candidates still require every host.
   `reviews/signal-evidence-20261030/room-visibility-v1` and `-negative-v1`.
   Observed for U2: a decision renders as raw JSON, and an information delivery
   to an agent that never runs again stays "pending".
+- P4 U2 in the terminal: the history RPC names the message each agent reply
+  answers (from the settled turn), and `conductorctl chat tree` shows each
+  request with its tasks, reports, unanswered recipients (blocked, unknown,
+  failed, working) and the coordinator summary. Checked on the live real-model
+  room; board rendering of the tree remains open.

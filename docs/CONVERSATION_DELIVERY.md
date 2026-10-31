@@ -114,6 +114,7 @@ conductorctl --socket <sock> chat new --project /abs/dir --lead lead   # prints 
 conductorctl --socket <sock> chat send <id> "task for the coordinator"
 conductorctl --socket <sock> chat send <id> --to worker "..."          # or --all
 conductorctl --socket <sock> chat log <id> --follow
+conductorctl --socket <sock> chat tree <id>                           # assignment tree
 ```
 
 `chat new` refuses a project folder that does not exist. `chat log` prints each
