@@ -348,6 +348,29 @@ fn tree(messages: &[Value]) -> String {
     out
 }
 
+/// Prints what is new since the last call: unseen messages and changed recipient states.
+fn show_new(
+    shown: &mut std::collections::BTreeMap<String, String>,
+    messages: Vec<Value>,
+    json: bool,
+) {
+    for message in messages {
+        let state = recipients(&message);
+        match shown.insert(message["sequence"].to_string(), state.clone()) {
+            None if json => println!("{message}"),
+            None => println!("{}", render(&message)),
+            Some(before) if before != state && !json => {
+                println!(
+                    "#{} {}{state}\n",
+                    message["sequence"],
+                    message["agent_id"].as_str().unwrap_or("you")
+                );
+            }
+            Some(_) => {}
+        }
+    }
+}
+
 async fn history(
     socket: &Path,
     conversation_id: &str,
@@ -357,21 +380,7 @@ async fn history(
     let mut shown = std::collections::BTreeMap::new();
     loop {
         let (messages, _) = page(socket, conversation_id, 0).await?;
-        for message in messages {
-            let state = recipients(&message);
-            match shown.insert(message["sequence"].to_string(), state.clone()) {
-                None if json => println!("{message}"),
-                None => println!("{}", render(&message)),
-                Some(before) if before != state && !json => {
-                    println!(
-                        "#{} {}{state}\n",
-                        message["sequence"],
-                        message["agent_id"].as_str().unwrap_or("you")
-                    );
-                }
-                Some(_) => {}
-            }
-        }
+        show_new(&mut shown, messages, json);
         if !follow {
             return Ok(0);
         }
