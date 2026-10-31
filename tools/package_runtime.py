@@ -112,7 +112,7 @@ Prepare and submit a task after selecting real project checks:
   python3 -E -s tools/conductor --state /short/private/state submit /short/private/state/plans/first.json
 
 See docs/FULL_CAPABILITY_EXECUTION.md for account setup, docs/LINUX_CHECKS.md for
-Linux dependencies, and docs/DELIVERY_ACCEPTANCE.md for remaining acceptance gaps.
+Linux dependencies.
 This kit is not a vendor login/conformance certificate or a complete v1 release.
 Never replace binaries in a running installation. Keep the verified archive and
 manifest; use a separate directory when preparing an upgrade.
