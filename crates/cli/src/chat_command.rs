@@ -170,6 +170,46 @@ fn address(message_id: String, to: Option<String>, everyone: bool) -> Request {
     }
 }
 
+/// A message to an agent outside the room would be saved and then never routed.
+fn check_recipient(
+    room: Option<&Value>,
+    conversation: &str,
+    to: Option<&str>,
+) -> Result<(), String> {
+    let Some(room) = room else {
+        return Err(format!(
+            "conversation {conversation} has no room; nothing was sent"
+        ));
+    };
+    let members: Vec<&str> = room["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["agent_id"].as_str())
+        .collect();
+    match to {
+        Some(agent) if !members.contains(&agent) => Err(format!(
+            "no agent named {agent} in this room; members: {}",
+            members.join(", ")
+        )),
+        _ => Ok(()),
+    }
+}
+
+async fn ensure_recipient(
+    socket: &Path,
+    conversation: &str,
+    to: Option<&str>,
+) -> Result<(), String> {
+    let request = Request::ConversationRoom {
+        conversation_id: conversation.into(),
+    };
+    let Response::ConversationRoom { configuration } = rpc(socket, request).await? else {
+        return Err("unexpected daemon response".into());
+    };
+    check_recipient(configuration.as_ref(), conversation, to)
+}
+
 async fn post(
     socket: &Path,
     conversation_id: String,
@@ -177,6 +217,7 @@ async fn post(
     everyone: bool,
     body: String,
 ) -> Result<i32, String> {
+    ensure_recipient(socket, &conversation_id, to.as_deref()).await?;
     let message_id = format!("msg-{}", uuid::Uuid::now_v7());
     let saved = Request::SendConversationMessage {
         conversation_id,
@@ -625,6 +666,27 @@ mod tests {
             panic!("wrong request")
         };
         assert_eq!(recipients, ["worker"]);
+    }
+
+    fn room() -> Value {
+        room_config("lead", &["worker".into()])
+    }
+
+    #[test]
+    fn recipient_must_be_a_room_member() {
+        let room = room();
+        assert_eq!(check_recipient(Some(&room), "c", Some("worker")), Ok(()));
+        assert_eq!(check_recipient(Some(&room), "c", None), Ok(()));
+        assert_eq!(
+            check_recipient(Some(&room), "c", Some("ghost")),
+            Err("no agent named ghost in this room; members: lead, worker".into())
+        );
+    }
+
+    #[test]
+    fn a_conversation_without_a_room_takes_no_message() {
+        let error = check_recipient(None, "c1", None).expect_err("no room");
+        assert!(error.contains("c1 has no room"), "{error}");
     }
 
     fn message(sender: Option<&str>, body: &str, outcome: Option<&str>, routing: &Value) -> Value {
