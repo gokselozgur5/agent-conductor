@@ -62,7 +62,7 @@ pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
             conversation,
             follow,
         } => history(socket, &conversation, json, follow).await,
-        ChatCommand::Open { conversation } => history(socket, &conversation, false, true).await,
+        ChatCommand::Open { conversation } => open(socket, conversation).await,
     };
     result.unwrap_or_else(|message| {
         eprintln!("{message}");
@@ -384,6 +384,92 @@ async fn history(
             return Ok(0);
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// One line typed into the chat window.
+#[derive(Debug, PartialEq, Eq)]
+enum Input {
+    Say {
+        to: Option<String>,
+        everyone: bool,
+        text: String,
+    },
+    Tree,
+    Quit,
+    Skip,
+    Invalid(String),
+}
+
+fn parse_input(line: &str) -> Input {
+    let line = line.trim();
+    match line {
+        "" => return Input::Skip,
+        "/tree" => return Input::Tree,
+        "/quit" => return Input::Quit,
+        _ if line.starts_with('/') => return Input::Invalid(format!("unknown command: {line}")),
+        _ => {}
+    }
+    let Some(addressed) = line.strip_prefix('@') else {
+        return Input::Say {
+            to: None,
+            everyone: false,
+            text: line.to_owned(),
+        };
+    };
+    let (target, text) = addressed
+        .split_once(char::is_whitespace)
+        .map_or((addressed, ""), |(target, text)| (target, text.trim()));
+    if target.is_empty() || text.is_empty() {
+        return Input::Invalid(format!("nothing to send: use @{target} <text>"));
+    }
+    let everyone = target == "all";
+    Input::Say {
+        to: (!everyone).then(|| target.to_owned()),
+        everyone,
+        text: text.to_owned(),
+    }
+}
+
+/// Stdin lines arrive on a channel; it closes at EOF.
+fn stdin_lines() -> tokio::sync::mpsc::Receiver<String> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines().map_while(Result::ok) {
+            if sender.blocking_send(line).is_err() {
+                break;
+            }
+        }
+    });
+    receiver
+}
+
+async fn open(socket: &Path, conversation: String) -> Result<i32, String> {
+    let mut lines = stdin_lines();
+    let mut shown = std::collections::BTreeMap::new();
+    let mut poll = tokio::time::interval(std::time::Duration::from_secs(2));
+    loop {
+        tokio::select! {
+            _ = poll.tick() => {
+                let (messages, _) = page(socket, &conversation, 0).await?;
+                show_new(&mut shown, messages, false);
+            }
+            line = lines.recv() => match parse_input(&line.unwrap_or_else(|| "/quit".into())) {
+                Input::Quit => return Ok(0),
+                Input::Skip => {}
+                Input::Invalid(message) => eprintln!("{message}"),
+                Input::Tree => {
+                    if let Err(message) = show_tree(socket, &conversation).await {
+                        eprintln!("{message}");
+                    }
+                }
+                Input::Say { to, everyone, text } => {
+                    if let Err(message) = post(socket, conversation.clone(), to, everyone, text).await {
+                        eprintln!("{message}");
+                    }
+                }
+            },
+        }
     }
 }
 
