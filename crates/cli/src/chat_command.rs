@@ -477,6 +477,49 @@ async fn open(socket: &Path, conversation: String) -> Result<i32, String> {
 mod tests {
     use super::*;
 
+    fn say(to: Option<&str>, everyone: bool, text: &str) -> Input {
+        Input::Say {
+            to: to.map(String::from),
+            everyone,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn plain_text_goes_to_the_coordinator() {
+        assert_eq!(parse_input("  build it \n"), say(None, false, "build it"));
+    }
+
+    #[test]
+    fn at_agent_sends_to_that_agent_only() {
+        assert_eq!(
+            parse_input("@worker hi  there"),
+            say(Some("worker"), false, "hi  there")
+        );
+    }
+
+    #[test]
+    fn at_all_sends_to_everyone() {
+        assert_eq!(parse_input("@all x"), say(None, true, "x"));
+    }
+
+    #[test]
+    fn commands_and_blank_lines() {
+        assert_eq!(parse_input("/tree"), Input::Tree);
+        assert_eq!(parse_input(" /quit "), Input::Quit);
+        assert_eq!(parse_input(""), Input::Skip);
+        assert_eq!(parse_input(" \t "), Input::Skip);
+        assert!(matches!(parse_input("/qiut"), Input::Invalid(_)));
+    }
+
+    #[test]
+    fn address_without_text_is_an_error_not_an_empty_message() {
+        assert!(matches!(parse_input("@worker"), Input::Invalid(_)));
+        assert!(matches!(parse_input("@worker   "), Input::Invalid(_)));
+        assert!(matches!(parse_input("@all"), Input::Invalid(_)));
+        assert!(matches!(parse_input("@ hi"), Input::Invalid(_)));
+    }
+
     #[test]
     fn room_reports_every_member_to_the_lead_once() {
         let room = room_config("lead", &["worker".into(), "lead".into()]);
