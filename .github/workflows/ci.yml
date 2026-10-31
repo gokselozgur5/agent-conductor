@@ -11,12 +11,13 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -50,10 +51,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run strict Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Build operator integration binaries
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
 
       - name: Install Linux check isolation dependency
         if: runner.os == 'Linux'
@@ -62,7 +63,7 @@ jobs:
       - name: Run workspace tests
         env:
           CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
 
       - name: Exercise a receiving worker under a distinct OS UID
         run: |
@@ -74,10 +75,12 @@ jobs:
           CONDUCTOR_TEST_BIN_DIR: ${{ github.workspace }}/target/debug
         run: |
           python3 -m unittest discover -s tests -p test_operator_backup.py -v
+          python3 -m unittest discover -s tests -p test_operator_conversations.py -v
           python3 -m unittest discover -s tests -p test_operator_profiles.py -v
           python3 -m unittest discover -s tests -p test_account_preflight.py -v
           python3 -m unittest discover -s tests -p test_adapter_pins.py -v
           python3 -m unittest discover -s tests -p 'test_conductor_rpc*.py' -v
+          python3 -m unittest discover -s tests -p test_conversation_schema_upgrade.py -v
           python3 -m unittest discover -s tests -p test_package_launcher.py -v
           python3 -m unittest discover -s tests -p test_package_runtime.py -v
           python3 -m unittest discover -s tests -p test_restore_publication.py -v
