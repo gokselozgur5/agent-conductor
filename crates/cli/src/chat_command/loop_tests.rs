@@ -16,6 +16,12 @@ struct Fake {
 }
 
 fn fake_daemon(answer: Answer) -> Fake {
+    slow_daemon(answer, Box::new(|_| std::time::Duration::ZERO))
+}
+
+type Delay = Box<dyn Fn(&Request) -> std::time::Duration + Send + Sync>;
+
+fn slow_daemon(answer: Answer, delay: Delay) -> Fake {
     let dir = tempfile::Builder::new()
         .prefix("cc")
         .tempdir_in("/tmp")
@@ -25,23 +31,29 @@ fn fake_daemon(answer: Answer) -> Fake {
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
     let seen = Arc::new(Mutex::new(Vec::new()));
     let record = Arc::clone(&seen);
+    let answer = Arc::new(answer);
+    let delay = Arc::new(delay);
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut raw = Vec::new();
-            stream.read_to_end(&mut raw).await.expect("read request");
-            let request: RequestEnvelope = serde_json::from_slice(&raw).expect("request json");
-            let reply = match answer(&request.payload) {
-                Ok(response) => ResponseEnvelope::success(&request, response),
-                Err(message) => ResponseEnvelope::failure(
-                    Some(&request),
-                    ErrorBody::new(ErrorCode::Validation, message),
-                ),
-            };
-            record.lock().expect("lock").push(request.payload);
-            let body = serde_json::to_vec(&reply).expect("response json");
-            stream.write_all(&body).await.expect("write response");
-            stream.shutdown().await.expect("shutdown");
+            let (answer, delay, record) = (answer.clone(), delay.clone(), record.clone());
+            tokio::spawn(async move {
+                let mut raw = Vec::new();
+                stream.read_to_end(&mut raw).await.expect("read request");
+                let request: RequestEnvelope = serde_json::from_slice(&raw).expect("request json");
+                let reply = match answer(&request.payload) {
+                    Ok(response) => ResponseEnvelope::success(&request, response),
+                    Err(message) => ResponseEnvelope::failure(
+                        Some(&request),
+                        ErrorBody::new(ErrorCode::Validation, message),
+                    ),
+                };
+                record.lock().expect("lock").push(request.payload.clone());
+                tokio::time::sleep(delay(&request.payload)).await;
+                let body = serde_json::to_vec(&reply).expect("response json");
+                let _ = stream.write_all(&body).await;
+                let _ = stream.shutdown().await;
+            });
         }
     });
     Fake {
@@ -67,13 +79,21 @@ fn with_history(request: &Request) -> Result<Response, String> {
 }
 
 async fn run(daemon: &Fake, input: Vec<Line>) -> (Result<i32, String>, String) {
+    run_every(daemon, input, std::time::Duration::from_secs(3600)).await
+}
+
+async fn run_every(
+    daemon: &Fake,
+    input: Vec<Line>,
+    every: std::time::Duration,
+) -> (Result<i32, String>, String) {
     let (sender, lines) = tokio::sync::mpsc::channel(16);
     for line in input {
         sender.send(line).await.expect("queue input");
     }
     drop(sender);
     let mut out = Vec::new();
-    let result = open_with(&daemon.socket, "c1".into(), lines, &mut out).await;
+    let result = open_with(&daemon.socket, "c1".into(), lines, &mut out, every).await;
     (result, String::from_utf8(out).expect("utf8"))
 }
 
@@ -121,4 +141,33 @@ async fn clean_eof_exits_zero() {
     let daemon = fake_daemon(Box::new(with_history));
     let (result, _) = run(&daemon, vec![]).await;
     assert_eq!(result, Ok(0));
+}
+
+#[tokio::test]
+async fn input_stays_responsive_while_a_poll_is_in_flight() {
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&polls);
+    let daemon = slow_daemon(
+        Box::new(with_history),
+        Box::new(move |_| {
+            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                std::time::Duration::ZERO
+            } else {
+                std::time::Duration::from_secs(30)
+            }
+        }),
+    );
+    let (sender, lines) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let _ = sender.send(Ok("/quit".to_owned())).await;
+    });
+    let mut out = Vec::new();
+    let every = std::time::Duration::from_millis(20);
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        open_with(&daemon.socket, "c1".into(), lines, &mut out, every),
+    )
+    .await;
+    assert_eq!(finished, Ok(Ok(0)));
 }

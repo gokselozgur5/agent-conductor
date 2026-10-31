@@ -459,15 +459,22 @@ fn stdin_lines() -> tokio::sync::mpsc::Receiver<Line> {
     receiver
 }
 
+type Polled = Result<Vec<Value>, String>;
+
+async fn fetch(socket: &Path, conversation: &str) -> Polled {
+    page(socket, conversation, 0)
+        .await
+        .map(|(messages, _)| messages)
+}
+
 /// A failed poll is a warning: the window stays open and the next poll retries.
-async fn refresh(
-    socket: &Path,
-    conversation: &str,
-    shown: &mut std::collections::BTreeMap<String, String>,
+fn show_polled(
     out: &mut impl std::io::Write,
+    shown: &mut std::collections::BTreeMap<String, String>,
+    polled: Polled,
 ) -> Result<(), String> {
-    match page(socket, conversation, 0).await {
-        Ok((messages, _)) => show_new(out, shown, messages, false),
+    match polled {
+        Ok(messages) => show_new(out, shown, messages, false),
         Err(message) => {
             eprintln!("warning: could not refresh: {message}");
             Ok(())
@@ -475,8 +482,21 @@ async fn refresh(
     }
 }
 
+/// Polls run beside the input loop, so a slow daemon never blocks typing.
+fn start_poll(socket: &Path, conversation: &str) -> tokio::task::JoinHandle<Polled> {
+    let (socket, conversation) = (socket.to_owned(), conversation.to_owned());
+    tokio::spawn(async move { fetch(&socket, &conversation).await })
+}
+
 async fn open(socket: &Path, conversation: String) -> Result<i32, String> {
-    open_with(socket, conversation, stdin_lines(), &mut std::io::stdout()).await
+    open_with(
+        socket,
+        conversation,
+        stdin_lines(),
+        &mut std::io::stdout(),
+        POLL_EVERY,
+    )
+    .await
 }
 
 async fn open_with(
@@ -484,13 +504,24 @@ async fn open_with(
     conversation: String,
     mut lines: tokio::sync::mpsc::Receiver<Line>,
     out: &mut impl std::io::Write,
+    every: std::time::Duration,
 ) -> Result<i32, String> {
     let mut shown = std::collections::BTreeMap::new();
-    refresh(socket, &conversation, &mut shown, out).await?;
-    let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + POLL_EVERY, POLL_EVERY);
+    show_polled(out, &mut shown, fetch(socket, &conversation).await)?;
+    let (mut in_flight, mut due) = (None, false);
+    let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     loop {
+        if due && in_flight.is_none() {
+            in_flight = Some(start_poll(socket, &conversation));
+            due = false;
+        }
         tokio::select! {
-            _ = poll.tick() => refresh(socket, &conversation, &mut shown, out).await?,
+            _ = poll.tick() => due = true,
+            done = async { in_flight.as_mut().expect("guarded").await }, if in_flight.is_some() => {
+                in_flight = None;
+                let polled = done.unwrap_or_else(|error| Err(format!("poll task failed: {error}")));
+                show_polled(out, &mut shown, polled)?;
+            }
             line = lines.recv() => {
                 let line = match line {
                     None => return Ok(0),
@@ -510,6 +541,7 @@ async fn open_with(
                         if let Err(message) = post(socket, conversation.clone(), to, everyone, text).await {
                             eprintln!("{message}");
                         }
+                        due = true;
                     }
                 }
             }
