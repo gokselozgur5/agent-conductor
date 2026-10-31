@@ -57,7 +57,11 @@ pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
             all,
             text,
         } => post(socket, conversation, to, all, text.join(" ")).await,
-        ChatCommand::Tree { conversation } => show_tree(socket, &conversation).await.map(|()| 0),
+        ChatCommand::Tree { conversation } => {
+            show_tree(socket, &conversation, &mut std::io::stdout())
+                .await
+                .map(|()| 0)
+        }
         ChatCommand::Log {
             conversation,
             follow,
@@ -343,31 +347,36 @@ fn tree(messages: &[Value]) -> String {
 
 /// Prints what is new since the last call: unseen messages and changed recipient states.
 fn show_new(
+    out: &mut impl std::io::Write,
     shown: &mut std::collections::BTreeMap<String, String>,
     messages: Vec<Value>,
     json: bool,
-) {
+) -> Result<(), String> {
     for message in messages {
         let state = recipients(&message);
         match shown.insert(message["sequence"].to_string(), state.clone()) {
-            None if json => println!("{message}"),
-            None => println!("{}", render(&message)),
-            Some(before) if before != state && !json => {
-                println!(
-                    "#{} {}{state}\n",
-                    message["sequence"],
-                    message["agent_id"].as_str().unwrap_or("you")
-                );
-            }
-            Some(_) => {}
+            None if json => writeln!(out, "{message}"),
+            None => writeln!(out, "{}", render(&message)),
+            Some(before) if before != state && !json => writeln!(
+                out,
+                "#{} {}{state}\n",
+                message["sequence"],
+                message["agent_id"].as_str().unwrap_or("you")
+            ),
+            Some(_) => Ok(()),
         }
+        .map_err(|error| error.to_string())?;
     }
+    Ok(())
 }
 
-async fn show_tree(socket: &Path, conversation_id: &str) -> Result<(), String> {
+async fn show_tree(
+    socket: &Path,
+    conversation_id: &str,
+    out: &mut impl std::io::Write,
+) -> Result<(), String> {
     let (messages, _) = page(socket, conversation_id, 0).await?;
-    print!("{}", tree(&messages));
-    Ok(())
+    write!(out, "{}", tree(&messages)).map_err(|error| error.to_string())
 }
 
 async fn history(
@@ -377,9 +386,10 @@ async fn history(
     follow: bool,
 ) -> Result<i32, String> {
     let mut shown = std::collections::BTreeMap::new();
+    let mut out = std::io::stdout();
     loop {
         let (messages, _) = page(socket, conversation_id, 0).await?;
-        show_new(&mut shown, messages, json);
+        show_new(&mut out, &mut shown, messages, json)?;
         if !follow {
             return Ok(0);
         }
@@ -452,14 +462,14 @@ async fn open(socket: &Path, conversation: String) -> Result<i32, String> {
         tokio::select! {
             _ = poll.tick() => {
                 let (messages, _) = page(socket, &conversation, 0).await?;
-                show_new(&mut shown, messages, false);
+                show_new(&mut std::io::stdout(), &mut shown, messages, false)?;
             }
             line = lines.recv() => match parse_input(&line.unwrap_or_else(|| "/quit".into())) {
                 Input::Quit => return Ok(0),
                 Input::Skip => {}
                 Input::Invalid(message) => eprintln!("{message}"),
                 Input::Tree => {
-                    if let Err(message) = show_tree(socket, &conversation).await {
+                    if let Err(message) = show_tree(socket, &conversation, &mut std::io::stdout()).await {
                         eprintln!("{message}");
                     }
                 }
