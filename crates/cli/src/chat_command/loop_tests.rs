@@ -171,3 +171,39 @@ async fn input_stays_responsive_while_a_poll_is_in_flight() {
     .await;
     assert_eq!(finished, Ok(Ok(0)));
 }
+
+#[tokio::test]
+async fn a_sent_message_shows_without_waiting_for_the_next_tick() {
+    let sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&sent);
+    let daemon = fake_daemon(Box::new(move |request| match request {
+        Request::SendConversationMessage { .. } => {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(Response::ConversationMessageSaved { message: json!({}) })
+        }
+        Request::RouteConversationMessage { .. } => Ok(Response::ConversationTurnQueued {
+            message_id: "m".into(),
+        }),
+        Request::ConversationMessages { .. } if flag.load(std::sync::atomic::Ordering::SeqCst) => {
+            let mut sent = operator_message();
+            sent["sequence"] = json!(2);
+            sent["body"] = json!("just typed");
+            Ok(Response::ConversationMessages {
+                messages: vec![operator_message(), sent],
+                next_after: None,
+            })
+        }
+        other => with_history(other),
+    }));
+    let (sender, lines) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        let _ = sender.send(Ok("just typed".to_owned())).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let _ = sender.send(Ok("/quit".to_owned())).await;
+    });
+    let mut out = Vec::new();
+    let every = std::time::Duration::from_secs(3600);
+    let result = open_with(&daemon.socket, "c1".into(), lines, &mut out, every).await;
+    assert_eq!(result, Ok(0));
+    assert!(String::from_utf8(out).expect("utf8").contains("#2 you"));
+}
