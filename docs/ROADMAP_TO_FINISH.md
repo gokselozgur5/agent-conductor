@@ -1,5 +1,8 @@
 # Roadmap to finish Agent Conductor
 
+> 2026-10-31: the operator redirected the product; see [PRODUCT.md](PRODUCT.md).
+> P3 accounts, the soak and release gates below are paused, not deleted.
+
 Status: active implementation plan, 2026-10-30. Baseline: `99183c0`.
 The previous 75% estimate and 8/5/4/2/4/2 remaining-work allocation are planning
 estimates, not measured completion, elapsed-time forecasts or acceptance evidence.
