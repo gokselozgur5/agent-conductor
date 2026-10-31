@@ -760,4 +760,7 @@ async fn message_history_explains_who_received_each_message_and_why() {
     assert_eq!(messages[1]["examination"]["outcome"], "authorized");
     assert_eq!(messages[2]["examination"]["outcome"], "ordinary");
     assert!(messages[0]["examination"].is_null());
+    assert!(messages[0]["parent"].is_null());
+    assert_eq!(messages[1]["parent"], messages[0]["id"]);
+    assert_eq!(messages[2]["parent"], messages[1]["id"]);
 }

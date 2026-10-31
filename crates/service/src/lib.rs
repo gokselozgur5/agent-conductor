@@ -870,10 +870,17 @@ impl<C: Clock> ControlService for PersistentControlService<C> {
                         .conversation_reply_examination(&row.id)
                         .await
                         .map_err(store_error)?;
+                    let parent = self
+                        .store
+                        .conversation_reply_origin(&row.id)
+                        .await
+                        .map_err(store_error)?
+                        .map(|origin| origin.parent_message_id);
                     let mut value = serde_json::to_value(row).map_err(json_error)?;
                     value["status"] = serde_json::Value::String(status);
                     value["routing"] = serde_json::to_value(routing).map_err(json_error)?;
                     value["examination"] = serde_json::to_value(examination).map_err(json_error)?;
+                    value["parent"] = serde_json::to_value(parent).map_err(json_error)?;
                     messages.push(value);
                 }
                 if let Some(cursor) = next_after
