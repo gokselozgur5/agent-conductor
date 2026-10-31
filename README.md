@@ -4,6 +4,13 @@ Agent Conductor is a local-first control plane for durable, evidence-backed work
 
 It does not trust a conversation to remain alive and it does not accept a worker's claim of completion as proof. Tasks, leases, checkpoints, events, subscriptions, deliveries, and verification decisions live in SQLite.
 
+Start with [PRODUCT.md](docs/PRODUCT.md): it is the operator-approved direction
+(two leaders and their soldiers in one terminal chat). Other current docs:
+[architecture](docs/ARCHITECTURE.md), [chat delivery](docs/CONVERSATION_DELIVERY.md),
+[native workflow](docs/NATIVE_WORKFLOW.md), [requirements](docs/REQUIREMENTS.md),
+[threat model](docs/THREAT_MODEL.md), [store transactions](docs/STORE_TRANSACTIONS.md).
+Paused goals and past phases are in [docs/archive](docs/archive/README.md).
+
 ## Run the local operator workflow
 
 For CI-built native binaries, see [runtime kits](docs/RUNTIME_KITS.md).
@@ -23,12 +30,10 @@ socket, database, project registration and repository watcher. In another termin
 See [local operator setup](docs/LOCAL_OPERATOR.md) for model authentication,
 preparing plans with accepted adapter pins, event-triggered tasks and restart.
 
-The active completion sequence and exit criteria are in the [roadmap to finish](docs/ROADMAP_TO_FINISH.md).
-
 ## Current implementation
 
 The Rust runtime supports durable task/lease state, private dirty Git snapshots,
-pinned native Claude writers, independent Codex/Claude review, macOS isolated
+pinned native Claude writers, independent Codex/Claude review, isolated
 checks, retained-work continuation, attributed repository events and subscribed
 workflow wake admission, and [verified predecessor handoff](docs/WORKFLOW_DEPENDENCIES.md). The authenticated local board submits plans and projects
 the same state as the CLI. Workers cannot complete or verify their own tasks.
@@ -93,7 +98,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
 The Python spike is not the production runtime. Automatic advisory instruction
-discovery, broader host support and remaining v1 acceptance are tracked separately. See [phases](docs/PHASES.md), [requirements](docs/REQUIREMENTS.md),
+discovery, broader host support and remaining v1 acceptance are tracked separately. See [requirements](docs/REQUIREMENTS.md),
 [design](docs/DESIGN.md), and [threat model](docs/THREAT_MODEL.md).
 
 ## Python spike path intake
