@@ -649,3 +649,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod loop_tests;
