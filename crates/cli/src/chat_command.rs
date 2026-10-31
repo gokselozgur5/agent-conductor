@@ -39,6 +39,8 @@ pub enum ChatCommand {
         #[arg(long)]
         follow: bool,
     },
+    /// Chat in the room: live history, `@agent text`, `@all text`, `/tree`, `/quit`.
+    Open { conversation: String },
 }
 
 pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
@@ -56,20 +58,15 @@ pub async fn run(socket: &Path, json: bool, command: ChatCommand) -> i32 {
             text,
         } => post(socket, conversation, to, all, text.join(" ")).await,
         ChatCommand::Tree { conversation } => {
-            let (messages, _) = match page(socket, &conversation, 0).await {
-                Ok(read) => read,
-                Err(message) => {
-                    eprintln!("{message}");
-                    return 1;
-                }
-            };
-            print!("{}", tree(&messages));
-            Ok(0)
+            show_tree(socket, &conversation, &mut std::io::stdout())
+                .await
+                .map(|()| 0)
         }
         ChatCommand::Log {
             conversation,
             follow,
         } => history(socket, &conversation, json, follow).await,
+        ChatCommand::Open { conversation } => open(socket, conversation).await,
     };
     result.unwrap_or_else(|message| {
         eprintln!("{message}");
@@ -119,6 +116,20 @@ fn room_config(lead: &str, members: &[String]) -> Value {
     json!({"coordinator": lead, "members": all})
 }
 
+/// A typo must fail before a room-less conversation is created.
+fn check_agents(known: &[String], lead: &str, members: &[String]) -> Result<(), String> {
+    let named = std::iter::once(lead).chain(members.iter().map(String::as_str));
+    for name in named {
+        if !known.iter().any(|k| k == name) {
+            return Err(format!(
+                "no agent named {name}; known agents: {}",
+                known.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn create(
     socket: &Path,
     project: &Path,
@@ -131,16 +142,17 @@ async fn create(
             project.display()
         ));
     }
+    let Response::ConversationAgents { agents } = rpc(socket, Request::ConversationAgents).await?
+    else {
+        return Err("unexpected daemon response".into());
+    };
+    let known: Vec<String> = agents
+        .iter()
+        .filter_map(|a| a["id"].as_str().map(String::from))
+        .collect();
+    check_agents(&known, &lead, &members)?;
     if members.is_empty() {
-        let Response::ConversationAgents { agents } =
-            rpc(socket, Request::ConversationAgents).await?
-        else {
-            return Err("unexpected daemon response".into());
-        };
-        members = agents
-            .iter()
-            .filter_map(|a| a["id"].as_str().map(String::from))
-            .collect();
+        members = known;
     }
     let id = format!("chat-{}", uuid::Uuid::now_v7());
     let project_path = project.to_string_lossy().into_owned();
@@ -173,6 +185,46 @@ fn address(message_id: String, to: Option<String>, everyone: bool) -> Request {
     }
 }
 
+/// A message to an agent outside the room would be saved and then never routed.
+fn check_recipient(
+    room: Option<&Value>,
+    conversation: &str,
+    to: Option<&str>,
+) -> Result<(), String> {
+    let Some(room) = room else {
+        return Err(format!(
+            "conversation {conversation} has no room; nothing was sent"
+        ));
+    };
+    let members: Vec<&str> = room["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["agent_id"].as_str())
+        .collect();
+    match to {
+        Some(agent) if !members.contains(&agent) => Err(format!(
+            "no agent named {agent} in this room; members: {}",
+            members.join(", ")
+        )),
+        _ => Ok(()),
+    }
+}
+
+async fn ensure_recipient(
+    socket: &Path,
+    conversation: &str,
+    to: Option<&str>,
+) -> Result<(), String> {
+    let request = Request::ConversationRoom {
+        conversation_id: conversation.into(),
+    };
+    let Response::ConversationRoom { configuration } = rpc(socket, request).await? else {
+        return Err("unexpected daemon response".into());
+    };
+    check_recipient(configuration.as_ref(), conversation, to)
+}
+
 async fn post(
     socket: &Path,
     conversation_id: String,
@@ -180,6 +232,7 @@ async fn post(
     everyone: bool,
     body: String,
 ) -> Result<i32, String> {
+    ensure_recipient(socket, &conversation_id, to.as_deref()).await?;
     let message_id = format!("msg-{}", uuid::Uuid::now_v7());
     let saved = Request::SendConversationMessage {
         conversation_id,
@@ -242,6 +295,18 @@ fn recipients(message: &Value) -> String {
     }
 }
 
+/// A message that is not delivered or answered shows why it sits: `saved`, `blocked`, ...
+fn status_note(message: &Value) -> String {
+    match message["status"].as_str() {
+        None | Some("replied" | "launch_intent") => String::new(),
+        Some(status) => format!(" [{status}]"),
+    }
+}
+
+fn state(message: &Value) -> String {
+    format!("{}{}", recipients(message), status_note(message))
+}
+
 /// An authorized decision reads as its assignments; anything else as its text.
 fn body(message: &Value) -> String {
     let text = message["body"].as_str().unwrap_or_default();
@@ -266,7 +331,7 @@ fn body(message: &Value) -> String {
 
 fn render(message: &Value) -> String {
     let author = message["agent_id"].as_str().unwrap_or("you");
-    let mut out = format!("#{} {author}{}\n", message["sequence"], recipients(message));
+    let mut out = format!("#{} {author}{}\n", message["sequence"], state(message));
     for line in body(message).lines() {
         out.push_str("    ");
         out.push_str(line);
@@ -348,6 +413,40 @@ fn tree(messages: &[Value]) -> String {
     out
 }
 
+/// Prints what is new since the last call: unseen messages and changed recipient states.
+fn show_new(
+    out: &mut impl std::io::Write,
+    shown: &mut std::collections::BTreeMap<String, String>,
+    messages: Vec<Value>,
+    json: bool,
+) -> Result<(), String> {
+    for message in messages {
+        let state = state(&message);
+        match shown.insert(message["sequence"].to_string(), state.clone()) {
+            None if json => writeln!(out, "{message}"),
+            None => writeln!(out, "{}", render(&message)),
+            Some(before) if before != state && !json => writeln!(
+                out,
+                "#{} {}{state}\n",
+                message["sequence"],
+                message["agent_id"].as_str().unwrap_or("you")
+            ),
+            Some(_) => Ok(()),
+        }
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+async fn show_tree(
+    socket: &Path,
+    conversation_id: &str,
+    out: &mut impl std::io::Write,
+) -> Result<(), String> {
+    let (messages, _) = page(socket, conversation_id, 0).await?;
+    write!(out, "{}", tree(&messages)).map_err(|error| error.to_string())
+}
+
 async fn history(
     socket: &Path,
     conversation_id: &str,
@@ -355,23 +454,10 @@ async fn history(
     follow: bool,
 ) -> Result<i32, String> {
     let mut shown = std::collections::BTreeMap::new();
+    let mut out = std::io::stdout();
     loop {
         let (messages, _) = page(socket, conversation_id, 0).await?;
-        for message in messages {
-            let state = recipients(&message);
-            match shown.insert(message["sequence"].to_string(), state.clone()) {
-                None if json => println!("{message}"),
-                None => println!("{}", render(&message)),
-                Some(before) if before != state && !json => {
-                    println!(
-                        "#{} {}{state}\n",
-                        message["sequence"],
-                        message["agent_id"].as_str().unwrap_or("you")
-                    );
-                }
-                Some(_) => {}
-            }
-        }
+        show_new(&mut out, &mut shown, messages, json)?;
         if !follow {
             return Ok(0);
         }
@@ -379,9 +465,204 @@ async fn history(
     }
 }
 
+/// One line typed into the chat window.
+#[derive(Debug, PartialEq, Eq)]
+enum Input {
+    Say {
+        to: Option<String>,
+        everyone: bool,
+        text: String,
+    },
+    Tree,
+    Quit,
+    Skip,
+    Invalid(String),
+}
+
+fn parse_input(line: &str) -> Input {
+    let line = line.trim();
+    match line {
+        "" => return Input::Skip,
+        "/tree" => return Input::Tree,
+        "/quit" => return Input::Quit,
+        _ if line.starts_with('/') => return Input::Invalid(format!("unknown command: {line}")),
+        _ => {}
+    }
+    let Some(addressed) = line.strip_prefix('@') else {
+        return Input::Say {
+            to: None,
+            everyone: false,
+            text: line.to_owned(),
+        };
+    };
+    let (target, text) = addressed
+        .split_once(char::is_whitespace)
+        .map_or((addressed, ""), |(target, text)| (target, text.trim()));
+    if target.is_empty() || text.is_empty() {
+        return Input::Invalid(format!("nothing to send: use @{target} <text>"));
+    }
+    let everyone = target == "all";
+    Input::Say {
+        to: (!everyone).then(|| target.to_owned()),
+        everyone,
+        text: text.to_owned(),
+    }
+}
+
+type Line = std::io::Result<String>;
+
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Stdin lines arrive on a channel; it closes at EOF, and a read error is its last item.
+fn stdin_lines() -> tokio::sync::mpsc::Receiver<Line> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines() {
+            let failed = line.is_err();
+            if sender.blocking_send(line).is_err() || failed {
+                break;
+            }
+        }
+    });
+    receiver
+}
+
+type Polled = Result<Vec<Value>, String>;
+
+async fn fetch(socket: &Path, conversation: &str) -> Polled {
+    page(socket, conversation, 0)
+        .await
+        .map(|(messages, _)| messages)
+}
+
+/// A failed poll is a warning: the window stays open and the next poll retries.
+fn show_polled(
+    out: &mut impl std::io::Write,
+    shown: &mut std::collections::BTreeMap<String, String>,
+    polled: Polled,
+) -> Result<(), String> {
+    match polled {
+        Ok(messages) => show_new(out, shown, messages, false),
+        Err(message) => {
+            eprintln!("warning: could not refresh: {message}");
+            Ok(())
+        }
+    }
+}
+
+/// Polls run beside the input loop, so a slow daemon never blocks typing.
+fn start_poll(socket: &Path, conversation: &str) -> tokio::task::JoinHandle<Polled> {
+    let (socket, conversation) = (socket.to_owned(), conversation.to_owned());
+    tokio::spawn(async move { fetch(&socket, &conversation).await })
+}
+
+async fn open(socket: &Path, conversation: String) -> Result<i32, String> {
+    open_with(
+        socket,
+        conversation,
+        stdin_lines(),
+        &mut std::io::stdout(),
+        POLL_EVERY,
+    )
+    .await
+}
+
+async fn open_with(
+    socket: &Path,
+    conversation: String,
+    mut lines: tokio::sync::mpsc::Receiver<Line>,
+    out: &mut impl std::io::Write,
+    every: std::time::Duration,
+) -> Result<i32, String> {
+    let mut shown = std::collections::BTreeMap::new();
+    show_polled(out, &mut shown, fetch(socket, &conversation).await)?;
+    let (mut in_flight, mut due) = (None, false);
+    let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    loop {
+        if due && in_flight.is_none() {
+            in_flight = Some(start_poll(socket, &conversation));
+            due = false;
+        }
+        tokio::select! {
+            _ = poll.tick() => due = true,
+            done = async { in_flight.as_mut().expect("guarded").await }, if in_flight.is_some() => {
+                in_flight = None;
+                let polled = done.unwrap_or_else(|error| Err(format!("poll task failed: {error}")));
+                show_polled(out, &mut shown, polled)?;
+            }
+            line = lines.recv() => {
+                let line = match line {
+                    None => return Ok(0),
+                    Some(Err(error)) => return Err(format!("reading input failed: {error}")),
+                    Some(Ok(line)) => line,
+                };
+                match parse_input(&line) {
+                    Input::Quit => return Ok(0),
+                    Input::Skip => {}
+                    Input::Invalid(message) => eprintln!("{message}"),
+                    Input::Tree => {
+                        if let Err(message) = show_tree(socket, &conversation, out).await {
+                            eprintln!("{message}");
+                        }
+                    }
+                    Input::Say { to, everyone, text } => {
+                        if let Err(message) = post(socket, conversation.clone(), to, everyone, text).await {
+                            eprintln!("{message}");
+                        }
+                        due = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn say(to: Option<&str>, everyone: bool, text: &str) -> Input {
+        Input::Say {
+            to: to.map(String::from),
+            everyone,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn plain_text_goes_to_the_coordinator() {
+        assert_eq!(parse_input("  build it \n"), say(None, false, "build it"));
+    }
+
+    #[test]
+    fn at_agent_sends_to_that_agent_only() {
+        assert_eq!(
+            parse_input("@worker hi  there"),
+            say(Some("worker"), false, "hi  there")
+        );
+    }
+
+    #[test]
+    fn at_all_sends_to_everyone() {
+        assert_eq!(parse_input("@all x"), say(None, true, "x"));
+    }
+
+    #[test]
+    fn commands_and_blank_lines() {
+        assert_eq!(parse_input("/tree"), Input::Tree);
+        assert_eq!(parse_input(" /quit "), Input::Quit);
+        assert_eq!(parse_input(""), Input::Skip);
+        assert_eq!(parse_input(" \t "), Input::Skip);
+        assert!(matches!(parse_input("/qiut"), Input::Invalid(_)));
+    }
+
+    #[test]
+    fn address_without_text_is_an_error_not_an_empty_message() {
+        assert!(matches!(parse_input("@worker"), Input::Invalid(_)));
+        assert!(matches!(parse_input("@worker   "), Input::Invalid(_)));
+        assert!(matches!(parse_input("@all"), Input::Invalid(_)));
+        assert!(matches!(parse_input("@ hi"), Input::Invalid(_)));
+    }
 
     #[test]
     fn room_reports_every_member_to_the_lead_once() {
@@ -414,6 +695,41 @@ mod tests {
         assert_eq!(recipients, ["worker"]);
     }
 
+    #[test]
+    fn lead_and_members_must_be_configured_agents() {
+        let known = ["lead".to_owned(), "worker".to_owned()];
+        assert_eq!(check_agents(&known, "lead", &["worker".into()]), Ok(()));
+        assert_eq!(
+            check_agents(&known, "leed", &[]),
+            Err("no agent named leed; known agents: lead, worker".into())
+        );
+        assert_eq!(
+            check_agents(&known, "lead", &["wroker".into()]),
+            Err("no agent named wroker; known agents: lead, worker".into())
+        );
+    }
+
+    fn room() -> Value {
+        room_config("lead", &["worker".into()])
+    }
+
+    #[test]
+    fn recipient_must_be_a_room_member() {
+        let room = room();
+        assert_eq!(check_recipient(Some(&room), "c", Some("worker")), Ok(()));
+        assert_eq!(check_recipient(Some(&room), "c", None), Ok(()));
+        assert_eq!(
+            check_recipient(Some(&room), "c", Some("ghost")),
+            Err("no agent named ghost in this room; members: lead, worker".into())
+        );
+    }
+
+    #[test]
+    fn a_conversation_without_a_room_takes_no_message() {
+        let error = check_recipient(None, "c1", None).expect_err("no room");
+        assert!(error.contains("c1 has no room"), "{error}");
+    }
+
     fn message(sender: Option<&str>, body: &str, outcome: Option<&str>, routing: &Value) -> Value {
         let examination = outcome.map(|o| json!({"outcome": o, "detail": "agent not in room"}));
         json!({"sequence": 2, "agent_id": sender, "body": body, "examination": examination, "routing": routing})
@@ -433,6 +749,28 @@ mod tests {
         assert_eq!(
             shown,
             "#2 lead → worker (unknown)\n    [task for worker] write fib.py\n"
+        );
+    }
+
+    #[test]
+    fn an_undelivered_message_shows_its_status() {
+        let saved = json!({"sequence": 3, "agent_id": null, "body": "hi", "status": "saved", "routing": []});
+        assert_eq!(render(&saved), "#3 you [saved]\n    hi\n");
+        let answered = json!({"sequence": 3, "agent_id": null, "body": "hi", "status": "replied", "routing": []});
+        assert_eq!(render(&answered), "#3 you\n    hi\n");
+    }
+
+    #[test]
+    fn a_status_change_is_printed_once() {
+        let mut shown = std::collections::BTreeMap::new();
+        let mut out = Vec::new();
+        let at = |status: &str| json!({"sequence": 3, "agent_id": null, "body": "hi", "status": status, "routing": []});
+        for status in ["saved", "saved", "blocked"] {
+            show_new(&mut out, &mut shown, vec![at(status)], false).expect("write");
+        }
+        assert_eq!(
+            String::from_utf8(out).expect("utf8"),
+            "#3 you [saved]\n    hi\n\n#3 you [blocked]\n\n"
         );
     }
 
@@ -468,3 +806,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod loop_tests;
