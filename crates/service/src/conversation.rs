@@ -68,16 +68,6 @@ impl<C: Clock> PersistentControlService<C> {
             .get(agent_id)
             .cloned()
             .ok_or_else(|| invalid("conversation agent is not configured"))?;
-        let conversation = self
-            .store
-            .conversation_message(message_id)
-            .await?
-            .map(|message| message.conversation_id);
-        if let Some(conversation) = conversation
-            && !self.room_admits(&conversation, agent_id).await?
-        {
-            return Err(invalid("conversation agent is not a room member"));
-        }
         let profile = serde_json::to_string(&agent)
             .map_err(|_| invalid("conversation profile encoding failed"))?;
         self.store

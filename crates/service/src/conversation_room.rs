@@ -94,24 +94,6 @@ impl<C: Clock> PersistentControlService<C> {
         ConversationRoom::new(config.coordinator, config.members, &members)
     }
 
-    /// Whether the agent may take a turn in this conversation: any agent when no
-    /// room exists, only a member once one does.
-    pub(crate) async fn room_admits(
-        &self,
-        conversation_id: &str,
-        agent_id: &str,
-    ) -> Result<bool, StoreError> {
-        if self
-            .store
-            .conversation_room(conversation_id)
-            .await?
-            .is_none()
-        {
-            return Ok(true);
-        }
-        Ok(self.load_room(conversation_id).await?.has_member(agent_id))
-    }
-
     /// Admits one durable assignment recipient: a configured profile is queued,
     /// a missing profile becomes a visible blocked job. Neither launches here.
     async fn admit_recipient(&self, message_id: &str, agent_id: &str) -> Result<(), StoreError> {

@@ -1,4 +1,5 @@
 use crate::{Store, StoreError};
+use sqlx::Connection;
 
 impl Store {
     /// Queues a stored message with an immutable trusted agent profile. The
@@ -25,17 +26,41 @@ impl Store {
             ));
         }
         let mut writer = self.inner.writer.lock().await;
+        let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
+        // Membership is judged under the same write lock as the insert, so a room
+        // configured meanwhile cannot be bypassed by an earlier read of "no room".
+        let room: Option<String> = sqlx::query_scalar("SELECT r.configuration_json FROM conversation_rooms r JOIN conversation_messages m ON m.conversation_id=r.conversation_id WHERE m.id=?")
+            .bind(message_id).fetch_optional(&mut *tx).await?;
+        if let Some(room) = room {
+            let member = serde_json::from_str::<serde_json::Value>(&room)
+                .ok()
+                .and_then(|room| room.get("members").cloned())
+                .and_then(|members| members.as_array().cloned())
+                .is_some_and(|members| {
+                    members.iter().any(|m| {
+                        m.get("agent_id").and_then(serde_json::Value::as_str) == Some(agent_id)
+                    })
+                });
+            if !member {
+                return Err(StoreError::Integrity(
+                    "conversation agent is not a room member".into(),
+                ));
+            }
+        }
         sqlx::query("INSERT INTO conversation_jobs(message_id,agent_id,agent_profile_json,state,created_at_ms) SELECT id,?,?,'queued',? FROM conversation_messages WHERE id=? AND (sender='operator' OR EXISTS(SELECT 1 FROM conversation_assignments a WHERE a.source_reply_id=conversation_messages.id AND a.agent_id=?) OR EXISTS(SELECT 1 FROM conversation_continuations c WHERE c.source_reply_id=conversation_messages.id AND c.agent_id=?)) ON CONFLICT(message_id,agent_id) DO NOTHING")
-            .bind(agent_id).bind(profile_json).bind(now_ms).bind(message_id).bind(agent_id).bind(agent_id).execute(&mut *writer).await?;
+            .bind(agent_id).bind(profile_json).bind(now_ms).bind(message_id).bind(agent_id).bind(agent_id).execute(&mut *tx).await?;
         let saved: Option<String> = sqlx::query_scalar(
             "SELECT agent_profile_json FROM conversation_jobs WHERE message_id=? AND agent_id=?",
         )
         .bind(message_id)
         .bind(agent_id)
-        .fetch_optional(&mut *writer)
+        .fetch_optional(&mut *tx)
         .await?;
         match saved {
-            Some(value) if value == profile_json => Ok(()),
+            Some(value) if value == profile_json => {
+                tx.commit().await?;
+                Ok(())
+            }
             Some(_) => Err(StoreError::IdempotencyCollision),
             None => Err(StoreError::Integrity(
                 "operator message, authorized assignment or continuation required".into(),

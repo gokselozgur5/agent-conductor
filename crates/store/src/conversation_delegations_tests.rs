@@ -1186,3 +1186,20 @@ async fn an_unroutable_reply_is_settled_with_a_visible_reason_and_unblocks_the_q
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn the_queue_insert_itself_refuses_an_agent_outside_the_stored_room() {
+    let (_root, store) = fixture(&[("lead", None)]).await;
+    // The caller's earlier read saw no room or a member; only the store's own
+    // view at insert time counts.
+    let refused = store
+        .queue_conversation_job("operator", &profile("outsider"), 3)
+        .await;
+    assert!(refused.is_err_and(|e| e.to_string().contains("not a room member")));
+    assert!(store.next_conversation_job().await.unwrap().is_none());
+    store
+        .queue_conversation_job("operator", &profile("lead"), 3)
+        .await
+        .unwrap();
+    assert!(store.next_conversation_job().await.unwrap().is_some());
+}
