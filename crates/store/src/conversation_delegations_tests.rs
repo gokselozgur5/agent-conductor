@@ -1203,3 +1203,46 @@ async fn the_queue_insert_itself_refuses_an_agent_outside_the_stored_room() {
         .unwrap();
     assert!(store.next_conversation_job().await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn rejection_replaces_only_the_historical_examination_marker() {
+    let (_root, store) = fixture(&[("lead", None)]).await;
+    for (id, outcome, detail) in [
+        ("old", "ordinary", "settled before reply examination"),
+        ("real", "ordinary", "information only"),
+        ("granted", "authorized", "1 assignments"),
+    ] {
+        let parent = format!("request-{id}");
+        request(&store, &parent).await;
+        reply(&store, id, &parent, "ghost", "text").await;
+        let mut writer = store.inner.writer.lock().await;
+        sqlx::query("INSERT OR REPLACE INTO conversation_reply_examinations(reply_message_id,outcome,detail,created_at_ms) VALUES (?,?,?,1)")
+            .bind(id).bind(outcome).bind(detail).execute(&mut *writer).await.unwrap();
+    }
+    for id in ["old", "real", "granted"] {
+        store
+            .reject_unroutable_conversation_reply(id, "author is not a room member", 5)
+            .await
+            .unwrap();
+    }
+    let examined = |id: &'static str| {
+        let store = store.clone();
+        async move {
+            let row = store.conversation_reply_examination(id).await.unwrap();
+            let row = row.unwrap();
+            (row.outcome, row.detail)
+        }
+    };
+    assert_eq!(
+        examined("old").await,
+        ("rejected".into(), "author is not a room member".into())
+    );
+    assert_eq!(
+        examined("real").await,
+        ("ordinary".into(), "information only".into())
+    );
+    assert_eq!(
+        examined("granted").await,
+        ("authorized".into(), "1 assignments".into())
+    );
+}

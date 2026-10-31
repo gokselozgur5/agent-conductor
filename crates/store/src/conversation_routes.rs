@@ -102,7 +102,8 @@ impl Store {
     /// Settles a native reply that no room route can describe, so it stops
     /// heading the unrouted queue. It gets an empty route (nobody is informed)
     /// and a `rejected` examination carrying the reason; a reply with a
-    /// recorded route or examination keeps what it has.
+    /// recorded route or real examination keeps what it has; only the historical
+    /// pre-examination marker is upgraded to the rejection.
     /// # Errors
     /// Rejects non-agent or unknown messages and returns database errors.
     pub async fn reject_unroutable_conversation_reply(
@@ -125,7 +126,7 @@ impl Store {
         }
         sqlx::query("INSERT INTO conversation_routes(message_id,recipients_json,created_at_ms) VALUES (?,'[]',?) ON CONFLICT(message_id) DO NOTHING")
             .bind(reply_id).bind(now_ms).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO conversation_reply_examinations(reply_message_id,outcome,detail,created_at_ms) VALUES (?,'rejected',?,?) ON CONFLICT(reply_message_id) DO NOTHING")
+        sqlx::query("INSERT INTO conversation_reply_examinations(reply_message_id,outcome,detail,created_at_ms) VALUES (?,'rejected',?,?) ON CONFLICT(reply_message_id) DO UPDATE SET outcome='rejected',detail=excluded.detail,created_at_ms=excluded.created_at_ms WHERE conversation_reply_examinations.outcome='ordinary' AND conversation_reply_examinations.detail='settled before reply examination'")
             .bind(reply_id).bind(reason).bind(now_ms).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
