@@ -163,14 +163,14 @@ def verify(matrix_path, evidence_root, source_root):
         actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source_root, text=True).strip()
         require(actual == source, 'candidate source differs from checkout HEAD')
         committed = parse_json(subprocess.check_output(
-            ['git', 'show', 'HEAD:docs/finish_acceptance.json'], cwd=source_root, text=True))
+            ['git', 'show', 'HEAD:docs/archive/finish_acceptance.json'], cwd=source_root, text=True))
         require(isinstance(committed, dict) and isinstance(committed.get('gates'), list),
                 'committed acceptance contract missing')
         contract = {row['id']: row for row in committed['gates']}
         require(set(contract) == GATES, 'committed gate inventory mismatch')
         dirty = subprocess.check_output(['git', '--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'],
                                         cwd=source_root, text=True).splitlines()
-        require(all(line[3:] == 'docs/finish_acceptance.json' for line in dirty),
+        require(all(line[3:] == 'docs/archive/finish_acceptance.json' for line in dirty),
                 'source checkout has uncommitted or untracked changes')
         artifacts = candidate.get('artifacts', {})
         require(isinstance(artifacts, dict) and artifacts, 'candidate artifacts missing')
@@ -223,7 +223,7 @@ def verify(matrix_path, evidence_root, source_root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--matrix', type=Path, default=Path(__file__).resolve().parents[1] / 'docs/finish_acceptance.json')
+    parser.add_argument('--matrix', type=Path, default=Path(__file__).resolve().parents[1] / 'docs/archive/finish_acceptance.json')
     parser.add_argument('--evidence-root', type=Path, required=True)
     parser.add_argument('--source-root', type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
