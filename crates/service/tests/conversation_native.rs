@@ -764,3 +764,70 @@ async fn message_history_explains_who_received_each_message_and_why() {
     assert_eq!(messages[1]["parent"], messages[0]["id"]);
     assert_eq!(messages[2]["parent"], messages[1]["id"]);
 }
+
+/// A reply authored outside the room (reachable through a direct queue before
+/// membership was enforced) must not stand between the dispatcher and real work.
+#[tokio::test]
+async fn a_reply_from_outside_the_room_never_blocks_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let (lead, worker) = delegating_fixture(root.path(), "lead");
+    let store = seeded_room(root.path(), "room.sqlite3").await;
+    store
+        .create_conversation("other", root.path().to_str().unwrap(), 1)
+        .await
+        .unwrap();
+    for (id, conversation, sender, agent_id) in [
+        ("ghost-reply", "room", "agent", Some("ghost")),
+        ("other-request", "other", "operator", None),
+    ] {
+        store
+            .append_conversation_message(
+                &ConversationMessage {
+                    sequence: 0,
+                    id: id.into(),
+                    conversation_id: conversation.into(),
+                    sender: sender.into(),
+                    agent_id: agent_id.map(Into::into),
+                    body: "Stray or fresh text".into(),
+                    created_at_ms: 0,
+                },
+                2,
+            )
+            .await
+            .unwrap();
+    }
+    let service = PersistentControlService::start(store.clone(), 1)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![lead.clone(), worker.clone()])
+        .unwrap();
+    for conversation in ["room", "other"] {
+        service
+            .configure_room(conversation, shared_configuration(&lead.id, &worker.id))
+            .await
+            .unwrap();
+    }
+    for request in ["shared-request", "other-request"] {
+        service
+            .route_room_request(request, &[], false)
+            .await
+            .unwrap();
+    }
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    drain(&service, &receiver).await;
+    for request in ["shared-request", "other-request"] {
+        assert_eq!(
+            store.conversation_message_status(request).await.unwrap(),
+            "replied"
+        );
+    }
+    let ghost = store
+        .conversation_reply_examination("ghost-reply")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ghost.outcome, "rejected");
+    assert_eq!(ghost.detail, "reply author is not a room member");
+    assert!(store.next_unrouted_room_reply().await.unwrap().is_none());
+}

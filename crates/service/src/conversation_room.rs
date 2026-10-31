@@ -150,10 +150,25 @@ impl<C: Clock> PersistentControlService<C> {
     pub(crate) async fn reconcile_room_delivery(&self) -> Result<bool, StoreError> {
         let now = self.clock.read(self.boot_generation).wall_unix_ms;
         if let Some((message, conversation)) = self.store.next_unrouted_room_reply().await? {
-            self.load_room(&conversation)
+            let room = self.load_room(&conversation).await?;
+            let author = self
+                .store
+                .conversation_message(&message)
                 .await?
-                .route_agent_update(&self.store, &message, now)
-                .await?;
+                .and_then(|m| m.agent_id);
+            // A reply from outside the room cannot be routed; settling it with a
+            // visible reason keeps it from starving every later reply.
+            if author.as_deref().is_some_and(|a| !room.has_member(a)) {
+                self.store
+                    .reject_unroutable_conversation_reply(
+                        &message,
+                        "reply author is not a room member",
+                        now,
+                    )
+                    .await?;
+                return Ok(true);
+            }
+            room.route_agent_update(&self.store, &message, now).await?;
             return Ok(true);
         }
         if let Some(reply) = self.store.next_unexamined_room_reply().await? {

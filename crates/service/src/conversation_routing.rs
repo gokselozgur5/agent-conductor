@@ -195,6 +195,12 @@ impl ConversationRoom {
             .collect())
     }
 
+    /// Whether the agent belongs to this room.
+    #[must_use]
+    pub fn has_member(&self, agent_id: &str) -> bool {
+        self.members.contains_key(agent_id)
+    }
+
     /// Checks direct reporting authority for a structured delegation request.
     /// # Errors
     /// Rejects attempts to command peers, ancestors or unknown agents.
