@@ -128,12 +128,34 @@ mod tests {
         assert_eq!(passes.load(Ordering::SeqCst), 5);
     }
 
-    #[test]
-    fn backoff_doubles_to_its_ceiling_and_resets() {
-        let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
-        let waits: Vec<u64> = (0..7).map(|_| backoff.next().as_secs()).collect();
-        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30]);
-        backoff.reset();
-        assert_eq!(backoff.next(), Duration::from_secs(1));
+    #[tokio::test(start_paused = true)]
+    async fn failed_passes_wait_one_two_then_up_to_thirty_seconds_and_success_resets() {
+        let (stop_sender, stop) = tokio::sync::watch::channel(false);
+        let start = tokio::time::Instant::now();
+        let calls = std::sync::Mutex::new(Vec::new());
+        // Seven failures, a busy success, a failure after it, then shutdown.
+        supervise(
+            |_| async {
+                let mut calls = calls.lock().unwrap();
+                calls.push(start.elapsed().as_secs());
+                match calls.len() {
+                    1..=7 | 9 => Err("database is busy"),
+                    8 => Ok(true),
+                    _ => {
+                        stop_sender.send(true).unwrap();
+                        Ok(false)
+                    }
+                }
+            },
+            stop,
+            Duration::from_millis(250),
+            (RETRY_FIRST, RETRY_LAST),
+        )
+        .await;
+        // Attempt times: each gap is the wait that followed the earlier failure.
+        assert_eq!(
+            calls.into_inner().unwrap(),
+            [0, 1, 3, 7, 15, 31, 61, 91, 91, 92]
+        );
     }
 }

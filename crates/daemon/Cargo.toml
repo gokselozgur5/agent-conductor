@@ -28,6 +28,7 @@ nix = { version = "0.30", features = ["fs", "user"] }
 [dev-dependencies]
 sqlx.workspace = true
 tempfile = "3.23"
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
