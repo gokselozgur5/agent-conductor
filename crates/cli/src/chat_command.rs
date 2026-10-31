@@ -295,6 +295,18 @@ fn recipients(message: &Value) -> String {
     }
 }
 
+/// A message that is not delivered or answered shows why it sits: `saved`, `blocked`, ...
+fn status_note(message: &Value) -> String {
+    match message["status"].as_str() {
+        None | Some("replied" | "launch_intent") => String::new(),
+        Some(status) => format!(" [{status}]"),
+    }
+}
+
+fn state(message: &Value) -> String {
+    format!("{}{}", recipients(message), status_note(message))
+}
+
 /// An authorized decision reads as its assignments; anything else as its text.
 fn body(message: &Value) -> String {
     let text = message["body"].as_str().unwrap_or_default();
@@ -319,7 +331,7 @@ fn body(message: &Value) -> String {
 
 fn render(message: &Value) -> String {
     let author = message["agent_id"].as_str().unwrap_or("you");
-    let mut out = format!("#{} {author}{}\n", message["sequence"], recipients(message));
+    let mut out = format!("#{} {author}{}\n", message["sequence"], state(message));
     for line in body(message).lines() {
         out.push_str("    ");
         out.push_str(line);
@@ -409,7 +421,7 @@ fn show_new(
     json: bool,
 ) -> Result<(), String> {
     for message in messages {
-        let state = recipients(&message);
+        let state = state(&message);
         match shown.insert(message["sequence"].to_string(), state.clone()) {
             None if json => writeln!(out, "{message}"),
             None => writeln!(out, "{}", render(&message)),
@@ -737,6 +749,28 @@ mod tests {
         assert_eq!(
             shown,
             "#2 lead → worker (unknown)\n    [task for worker] write fib.py\n"
+        );
+    }
+
+    #[test]
+    fn an_undelivered_message_shows_its_status() {
+        let saved = json!({"sequence": 3, "agent_id": null, "body": "hi", "status": "saved", "routing": []});
+        assert_eq!(render(&saved), "#3 you [saved]\n    hi\n");
+        let answered = json!({"sequence": 3, "agent_id": null, "body": "hi", "status": "replied", "routing": []});
+        assert_eq!(render(&answered), "#3 you\n    hi\n");
+    }
+
+    #[test]
+    fn a_status_change_is_printed_once() {
+        let mut shown = std::collections::BTreeMap::new();
+        let mut out = Vec::new();
+        let at = |status: &str| json!({"sequence": 3, "agent_id": null, "body": "hi", "status": status, "routing": []});
+        for status in ["saved", "saved", "blocked"] {
+            show_new(&mut out, &mut shown, vec![at(status)], false).expect("write");
+        }
+        assert_eq!(
+            String::from_utf8(out).expect("utf8"),
+            "#3 you [saved]\n    hi\n\n#3 you [blocked]\n\n"
         );
     }
 
