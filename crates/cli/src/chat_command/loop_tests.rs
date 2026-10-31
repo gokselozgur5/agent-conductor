@@ -12,7 +12,7 @@ type Answer = Box<dyn Fn(&Request) -> Result<Response, String> + Send + Sync>;
 struct Fake {
     socket: PathBuf,
     seen: Arc<Mutex<Vec<Request>>>,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 fn fake_daemon(answer: Answer) -> Fake {
@@ -56,11 +56,7 @@ fn slow_daemon(answer: Answer, delay: Delay) -> Fake {
             });
         }
     });
-    Fake {
-        socket,
-        seen,
-        _dir: dir,
-    }
+    Fake { socket, seen, dir }
 }
 
 fn operator_message() -> Value {
@@ -224,5 +220,25 @@ async fn a_message_to_an_unknown_agent_saves_nothing() {
     assert!(
         seen.iter()
             .any(|r| matches!(r, Request::ConversationRoom { .. }))
+    );
+}
+
+#[tokio::test]
+async fn a_mistyped_lead_creates_no_conversation() {
+    let daemon = fake_daemon(Box::new(|request| match request {
+        Request::ConversationAgents => Ok(Response::ConversationAgents {
+            agents: vec![json!({"id": "lead"})],
+        }),
+        other => Err(format!("unexpected {other:?}")),
+    }));
+    let project = daemon.dir.path().to_owned();
+    let result = create(&daemon.socket, &project, "leed".into(), vec![]).await;
+    assert!(result.is_err());
+    let seen = daemon.seen.lock().expect("lock");
+    assert!(
+        !seen
+            .iter()
+            .any(|r| matches!(r, Request::CreateConversation { .. })),
+        "{seen:?}"
     );
 }
