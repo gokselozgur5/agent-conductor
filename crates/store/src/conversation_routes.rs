@@ -99,6 +99,38 @@ impl Store {
         Ok(())
     }
 
+    /// Settles a native reply that no room route can describe, so it stops
+    /// heading the unrouted queue. It gets an empty route (nobody is informed)
+    /// and a `rejected` examination carrying the reason; a reply with a
+    /// recorded route or examination keeps what it has.
+    /// # Errors
+    /// Rejects non-agent or unknown messages and returns database errors.
+    pub async fn reject_unroutable_conversation_reply(
+        &self,
+        reply_id: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        let mut writer = self.inner.writer.lock().await;
+        let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;
+        let agent_reply: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM conversation_messages WHERE id=? AND sender='agent'")
+                .bind(reply_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if agent_reply.is_none() {
+            return Err(StoreError::Integrity(
+                "recorded agent reply required".into(),
+            ));
+        }
+        sqlx::query("INSERT INTO conversation_routes(message_id,recipients_json,created_at_ms) VALUES (?,'[]',?) ON CONFLICT(message_id) DO NOTHING")
+            .bind(reply_id).bind(now_ms).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO conversation_reply_examinations(reply_message_id,outcome,detail,created_at_ms) VALUES (?,'rejected',?,?) ON CONFLICT(reply_message_id) DO NOTHING")
+            .bind(reply_id).bind(reason).bind(now_ms).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Lists one room member's pending deliveries in source-message order.
     /// # Errors
     /// Returns database errors.

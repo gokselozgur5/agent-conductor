@@ -1145,3 +1145,44 @@ async fn routing_shows_each_recipient_with_its_reason_and_state() {
     let routing = store.conversation_message_routing("reply").await.unwrap();
     assert_eq!(routing[2].state, "received");
 }
+
+#[tokio::test]
+async fn an_unroutable_reply_is_settled_with_a_visible_reason_and_unblocks_the_queue() {
+    let (_root, store) = fixture(&[("lead", None)]).await;
+    reply(&store, "ghost-reply", "operator", "ghost", "Stray output").await;
+    request(&store, "second").await;
+    reply(&store, "lead-reply", "second", "lead", "Real output").await;
+    let head = store.next_unrouted_room_reply().await.unwrap();
+    assert_eq!(head.unwrap().0, "ghost-reply");
+    store
+        .reject_unroutable_conversation_reply("ghost-reply", "author is not a room member", 5)
+        .await
+        .unwrap();
+    // Replay keeps the first reason and the queue moves on to the next reply.
+    store
+        .reject_unroutable_conversation_reply("ghost-reply", "another reason", 6)
+        .await
+        .unwrap();
+    let head = store.next_unrouted_room_reply().await.unwrap();
+    assert_eq!(head.unwrap().0, "lead-reply");
+    let examination = store
+        .conversation_reply_examination("ghost-reply")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(examination.outcome, "rejected");
+    assert_eq!(examination.detail, "author is not a room member");
+    assert!(
+        store
+            .next_unexamined_room_reply()
+            .await
+            .unwrap()
+            .is_some_and(|id| id == "lead-reply")
+    );
+    assert!(
+        store
+            .reject_unroutable_conversation_reply("operator", "operator text", 7)
+            .await
+            .is_err()
+    );
+}
