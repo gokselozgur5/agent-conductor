@@ -831,3 +831,32 @@ async fn a_reply_from_outside_the_room_never_blocks_dispatch() {
     assert_eq!(ghost.detail, "reply author is not a room member");
     assert!(store.next_unrouted_room_reply().await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn a_room_refuses_a_turn_for_an_agent_that_is_not_a_member() {
+    let root = tempfile::tempdir().unwrap();
+    let (lead, worker) = delegating_fixture(root.path(), "lead");
+    let mut outsider = worker.clone();
+    outsider.id = "outsider".into();
+    let store = seeded_room(root.path(), "room.sqlite3").await;
+    let service = PersistentControlService::start(store.clone(), 1)
+        .await
+        .unwrap();
+    service
+        .configure_conversation_agents(vec![lead.clone(), worker.clone(), outsider])
+        .unwrap();
+    service
+        .configure_room("room", shared_configuration(&lead.id, &worker.id))
+        .await
+        .unwrap();
+    let refused = service
+        .queue_conversation_turn("shared-request", "outsider")
+        .await;
+    assert!(refused.is_err_and(|e| e.to_string().contains("not a room member")));
+    assert!(store.next_conversation_job().await.unwrap().is_none());
+    service
+        .queue_conversation_turn("shared-request", "worker")
+        .await
+        .unwrap();
+    assert!(store.next_conversation_job().await.unwrap().is_some());
+}
