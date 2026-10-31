@@ -104,9 +104,9 @@ async fn main() {
         }
     };
     if let Some(path) = &args.conversation_agents
-        && conversation_dispatcher::configure(&service, path).is_err()
+        && let Err(error) = conversation_dispatcher::configure(&service, path)
     {
-        eprintln!("conversation profiles could not be loaded for this OS account");
+        eprintln!("conversation profiles could not be loaded for this OS account: {error}");
         std::process::exit(1);
     }
     if let Some(configs) = &watches {
