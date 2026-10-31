@@ -42,6 +42,12 @@ impl<C: Clock> PersistentControlService<C> {
                     "conversation profile requires its own OS worker account",
                 ));
             }
+            if agent.timeout_ms == 0 || agent.timeout_ms > 300_000 {
+                return Err(invalid(&format!(
+                    "agent {}: timeout_ms must be 1..=300000",
+                    agent.id
+                )));
+            }
             if profiles.insert(agent.id.clone(), agent).is_some() {
                 return Err(invalid("duplicate conversation profile"));
             }
