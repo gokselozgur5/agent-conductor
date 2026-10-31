@@ -764,3 +764,31 @@ async fn message_history_explains_who_received_each_message_and_why() {
     assert_eq!(messages[1]["parent"], messages[0]["id"]);
     assert_eq!(messages[2]["parent"], messages[1]["id"]);
 }
+
+#[tokio::test]
+async fn configuration_refuses_timeouts_outside_the_run_range() {
+    let root = tempfile::tempdir().unwrap();
+    let (_, agent) = fixture_agent(root.path());
+    let store = Store::open(root.path().join("state.sqlite3"))
+        .await
+        .unwrap();
+    let service = PersistentControlService::start(store, 1).await.unwrap();
+    for timeout_ms in [0, 600_000] {
+        let mut rejected = agent.clone();
+        rejected.timeout_ms = timeout_ms;
+        let error = service
+            .configure_conversation_agents(vec![rejected])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("agent codex-fixture: timeout_ms must be 1..=300000"),
+            "{error}"
+        );
+    }
+    let mut accepted = agent;
+    accepted.timeout_ms = 300_000;
+    service
+        .configure_conversation_agents(vec![accepted])
+        .unwrap();
+}
